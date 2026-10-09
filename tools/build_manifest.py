@@ -502,6 +502,14 @@ def pptx_thumbnail(path: Path) -> bytes | None:
     return None
 
 
+def blank_image(data: bytes) -> bool:
+    """한 가지 색뿐인 그림인가 — python-pptx 로 만든 PPTX 는 기본 틀의 빈 미리 보기(흰 256×192)를 그대로 담는다."""
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as img:
+        lo, hi = img.convert("L").getextrema()
+    return hi - lo < 8
+
+
 def save_thumb(data: bytes, img_p: Path) -> None:
     from PIL import Image
     with Image.open(io.BytesIO(data)) as img:
@@ -538,6 +546,8 @@ def render_previews(root: Path, decks: list[dict], cache: Path, want_thumbs: boo
         info = {"slides": d["slides"], "title": "", "noimage": True}
         try:
             data = pptx_thumbnail(root / d["path"])
+            if data and blank_image(data):
+                data = None                     # 빈 그림보다 '그림 없음' 표시가 낫다
             info["noimage"] = data is None
             if data:
                 save_thumb(data, img_p)

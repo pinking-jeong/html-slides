@@ -347,9 +347,12 @@ def test_pptx_previews_come_from_the_file(tmp_path, monkeypatch):
     (tmp_path / "decks/a.pptx").write_bytes(samples.make_pptx(3, thumbnail=samples.jpeg((320, 180))))
     (tmp_path / "decks/b.pptx").write_bytes(samples.make_pptx(2))
     (tmp_path / "decks/c.pptx").write_bytes(b"PK not a zip")
+    # python-pptx 는 기본 틀의 흰 미리 보기를 그대로 담는다 — 흰 카드 대신 '그림 없음'
+    (tmp_path / "decks/w.pptx").write_bytes(samples.make_pptx(2, thumbnail=samples.jpeg((256, 192), (255, 255, 255))))
     cache = tmp_path / "cache"
     by_id = {d["id"]: d for d in bm.build_manifest(tmp_path, thumbs=True, cache=cache, use_git=False)["decks"]}
     a, b, c = by_id["a"], by_id["b"], by_id["c"]
+    assert (by_id["w"]["thumb"], by_id["w"]["slides"]) == (None, 2)
     assert a["slides"] == 3 and a["thumb"]
     with Image.open(cache / Path(a["thumb"]).name) as img:
         assert img.size == (320, 180)

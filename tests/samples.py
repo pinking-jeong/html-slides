@@ -117,8 +117,10 @@ def break_member(data: bytes, name: str) -> bytes:
 
 
 def jpeg(size: tuple[int, int] = (256, 144), color: tuple[int, int, int] = (0, 113, 94)) -> bytes:
-    """작은 JPEG(Pillow 가 있을 때)."""
+    """작은 JPEG(Pillow 가 있을 때). 왼쪽 위 1/4 은 흰색 — 한 가지 색뿐인 그림은 빌드가 '빈 그림'으로 본다."""
     from PIL import Image
+    img = Image.new("RGB", size, color)
+    img.paste((255, 255, 255), (0, 0, size[0] // 2, size[1] // 2))
     out = io.BytesIO()
-    Image.new("RGB", size, color).save(out, "JPEG", quality=85)
+    img.save(out, "JPEG", quality=85)
     return out.getvalue()
