@@ -10,12 +10,23 @@
     empty: $('empty'), emptyTitle: $('emptyTitle'), emptyText: $('emptyText'), reset: $('resetBtn'),
     gen: $('gen'), repo: $('repoLink'), upload: $('uploadLink'),
     viewer: $('viewer'), viewerTitle: $('viewerTitle'), viewerOpen: $('viewerOpen'),
-    viewerClose: $('viewerClose'), frame: $('viewerFrame'),
+    viewerClose: $('viewerClose'), stage: $('viewerStage'), hint: $('viewerHint'),
     help: $('help'), helpBtn: $('helpBtn'), helpClose: $('helpClose'), toast: $('toast'),
   };
   const SORTS = ['updated', 'date', 'title'];
   const PREF = { sort: 'hs:sort', folder: 'hs:folder' };
   const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+  // Office 웹 뷰어가 받는 PowerPoint 파일 크기 상한(10 MB) — viewer/common.js 의 OFFICE_MAX 와 같게 둔다.
+  const OFFICE_MAX = 10000000;
+  // HTML 덱은 이 사이트와 다른 출처로 격리해 연다(sandbox). PDF·PPTX 뷰어(viewer/)는 이 저장소의 코드라
+  // 같은 출처로 연다 — 같은 출처에 스크립트를 허용한 sandbox 는 막는 것이 없어 걸지 않는다.
+  // PDF 내용은 PDF.js 가 그림으로만 그리고, Office 웹 뷰어는 뷰어 페이지가 따로 격리한다.
+  const DECK_SANDBOX = 'allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads';
+  const KIND_LABEL = { file: 'HTML', dir: 'HTML', pdf: 'PDF', pptx: 'PPTX' };
+  const HINT = {
+    deck: '화면을 한 번 누른 뒤 ← → 키로 장을 넘깁니다 · 바깥을 누르거나 ‘닫기’로 닫습니다',
+    pptx: 'Microsoft Office 웹 뷰어로 보여 줍니다(파일 주소가 Microsoft 로 전달됨) · 바깥을 누르거나 ‘닫기’로 닫습니다',
+  };
   const state = { data: null, decks: [], q: '', sort: 'updated', folder: '', repo: null, branch: 'main' };
   let lastFocus = null;
   let toastTimer = 0;
@@ -47,6 +58,7 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const ICONS = {
     play: 'M7 4.8v10.4l8.2-5.2z',
+    down: 'M10 3.5v9m0 0-3.5-3.5M10 12.5l3.5-3.5M4 14v1.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V14',
     eye: 'M1.9 10s3.1-5.4 8.1-5.4 8.1 5.4 8.1 5.4-3.1 5.4-8.1 5.4S1.9 10 1.9 10zM10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
   };
   function icon(name) {
@@ -79,13 +91,35 @@
   }
   // 발표일은 날짜만 적힌 값이라 시간대를 거치지 않고 그대로 바꾼다(하루 밀리지 않게).
   const fmtDate = (s) => (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.replace(/-/g, '.') : '');
-  function fmtSize(n) {
+  function fmtSize(n) {                         // 십진 단위 — Office 웹 뷰어의 10 MB 상한과 같은 잣대
     if (!n) return '';
-    if (n >= 1048576) return `${(n / 1048576).toFixed(n >= 10485760 ? 0 : 1)} MB`;
-    return `${Math.max(1, Math.round(n / 1024))} KB`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} MB`;
+    return `${Math.max(1, Math.round(n / 1000))} KB`;
   }
   const norm = (s) => String(s || '').normalize('NFC').toLowerCase();
   const fileName = (p) => String(p).split('/').pop();
+
+  /* ---------- 덱 종류별 주소 */
+
+  const viewerUrl = (page, file, v) =>
+    `viewer/${page}.html#file=${encodeURIComponent(file)}${v ? `&v=${encodeURIComponent(v)}` : ''}`;
+  const officeOk = (size) => typeof size === 'number' && size <= OFFICE_MAX;
+
+  // ‘발표’로 여는 주소. 10 MB 가 넘는 PPTX 만 재생할 수 없어 null.
+  function presentUrl(d) {
+    if (d.kind === 'pdf') return viewerUrl('pdf', d.path, d.rev);
+    if (d.kind === 'pptx') return officeOk(d.size) ? viewerUrl('pptx', d.path, d.rev) : null;
+    return enc(d.path);
+  }
+  // 제목 링크·주소 복사용 — 재생할 수 없는 PPTX 는 받기 안내가 있는 뷰어 페이지로.
+  const openUrl = (d) => presentUrl(d) || viewerUrl('pptx', d.path, d.rev);
+
+  function previewOf(d) {
+    if (d.kind === 'pdf' || d.kind === 'pptx') {
+      return { url: new URL(`${viewerUrl(d.kind, d.path, d.rev)}&embed=1`, location.href).href, sandbox: null };
+    }
+    return { url: absUrl(d.path), sandbox: DECK_SANDBOX };
+  }
 
   /* ---------- 거르기·정렬 */
 
@@ -93,7 +127,7 @@
 
   function haystack(d) {
     return norm([d.title, d.description, d.folderLabel, d.folder, d.venue, d.authors, d.name,
-      (d.tags || []).join(' ')].join(' '));
+      KIND_LABEL[d.kind] || '', d.pdf ? 'pdf' : '', d.pptx ? 'pptx' : '', (d.tags || []).join(' ')].join(' '));
   }
 
   const byTitle = (a, b) => a.title.localeCompare(b.title, 'ko', { numeric: true, sensitivity: 'base' });
@@ -157,10 +191,25 @@
       h('span', { class: 'ph-note' }, '미리보기 그림 없음'));
   }
 
-  function menuFor(d, url) {
-    const items = [h('button', { type: 'button', onclick: () => copy(absUrl(d.path)) }, '주소 복사')];
-    if (d.kind === 'file') items.push(h('a', { href: url, download: fileName(d.path) }, 'HTML 받기'));
-    if (d.pptx) items.push(h('a', { href: enc(d.pptx), download: fileName(d.pptx) }, 'PPTX 받기'));
+  const getLink = (path, label) => h('a', { href: enc(path), download: fileName(path) }, label);
+  const tabLink = (href, label, note) =>
+    h('a', { href, target: '_blank', rel: 'noopener' }, label, note ? h('small', null, note) : null);
+
+  function menuFor(d) {
+    const items = [h('button', { type: 'button', onclick: () => copy(new URL(openUrl(d), location.href).href) }, '주소 복사')];
+    if (d.kind === 'file') items.push(getLink(d.path, 'HTML 받기'));
+    if (d.kind === 'pdf') items.push(getLink(d.path, 'PDF 받기'));
+    if (d.pdf) {
+      items.push(tabLink(viewerUrl('pdf', d.pdf, d.pdfRev), 'PDF 로 보기'));
+      items.push(getLink(d.pdf, 'PDF 받기'));
+    }
+    if (d.kind === 'pptx') items.push(getLink(d.path, 'PPTX 받기'));
+    if (d.pptx) {
+      if (officeOk(d.pptxSize)) {
+        items.push(tabLink(viewerUrl('pptx', d.pptx, d.pptxRev), 'PowerPoint 로 보기', 'Microsoft Office 웹 뷰어'));
+      }
+      items.push(getLink(d.pptx, 'PPTX 받기'));
+    }
     if (state.repo) {
       const gh = `https://github.com/${state.repo}`;
       const br = enc(state.branch);
@@ -185,7 +234,7 @@
   }
 
   function card(d) {
-    const url = enc(d.path);
+    const present = presentUrl(d);
     const thumb = h('button', {
       type: 'button', class: 'thumb', 'aria-label': `미리보기 — ${d.title}`,
       onclick: (e) => openViewer(d, e.currentTarget),
@@ -197,6 +246,7 @@
     } else {
       thumb.append(placeholder(d));
     }
+    if (d.kind === 'pdf' || d.kind === 'pptx') thumb.append(h('span', { class: 'kind' }, KIND_LABEL[d.kind]));
     if (d.slides) thumb.append(h('span', { class: 'badge' }, `${num(d.slides)}장`));
 
     const event = [];
@@ -206,23 +256,30 @@
     const info = [];
     if (d._t) info.push(`${fmtDay(d._t)} 수정`);
     if (d.size) info.push(fmtSize(d.size));
+    if (d.pdf) info.push('PDF 포함');
     if (d.pptx) info.push('PPTX 포함');
+    if (!present) info.push('10 MB 넘어 받기만');
     const tags = (d.tags || []).slice(0, 5);
 
+    // 10 MB 가 넘는 PPTX 는 웹에서 재생하지 않으므로 ‘발표’ 자리에 ‘받기’를 둔다.
+    const main = present
+      ? h('a', { class: 'btn primary small', href: present, target: '_blank', rel: 'noopener' }, icon('play'), '발표')
+      : h('a', { class: 'btn primary small', href: enc(d.path), download: fileName(d.path),
+        title: 'Office 웹 뷰어는 10 MB 가 넘는 파일을 열지 않습니다' }, icon('down'), '받기');
     return h('article', { class: 'card' },
       thumb,
       h('div', { class: 'card-body' },
         d.folderLabel ? h('p', { class: 'folder' }, d.folderLabel) : null,
-        h('h2', { class: 'title' }, h('a', { href: url, target: '_blank', rel: 'noopener', title: d.title }, d.title)),
+        h('h2', { class: 'title' }, h('a', { href: openUrl(d), target: '_blank', rel: 'noopener', title: d.title }, d.title)),
         d.description ? h('p', { class: 'desc', title: d.description }, d.description) : null,
         event.length ? h('p', { class: 'meta event' }, event.join(' · ')) : null,
         info.length ? h('p', { class: 'meta' }, info.join(' · ')) : null,
         tags.length ? h('ul', { class: 'tags', 'aria-label': '꼬리표' }, tags.map((t) => h('li', null, t))) : null,
         h('div', { class: 'actions' },
-          h('a', { class: 'btn primary small', href: url, target: '_blank', rel: 'noopener' }, icon('play'), '발표'),
+          main,
           h('button', { type: 'button', class: 'btn ghost small', onclick: (e) => openViewer(d, e.currentTarget) },
             icon('eye'), '미리보기'),
-          menuFor(d, url))));
+          menuFor(d))));
   }
 
   function renderGrid() {
@@ -248,17 +305,33 @@
     document.querySelectorAll('details.more[open]').forEach((m) => { if (m !== except) m.open = false; });
   }
 
-  // 미리보기 창의 주소는 location.replace 로 바꾼다 — src 를 바꾸면 뒤로 가기 기록이 쌓인다.
-  function setFrame(url) {
-    try { els.frame.contentWindow.location.replace(url); } catch (e) { els.frame.src = url; }
+  // 미리보기 창의 iframe 은 열 때마다 새로 만든다 — 덱 종류마다 sandbox 가 다르고(바꾼 sandbox 는 다음 이동부터
+  // 듣는다), 새 iframe 의 첫 이동은 뒤로 가기 기록을 남기지 않는다. 닫으면 없애 소리·영상도 멈춘다.
+  function mountFrame(url, sandbox) {
+    const frame = h('iframe', { title: '발표자료 미리보기', sandbox, allow: 'fullscreen; clipboard-write' });
+    frame.src = url;
+    els.stage.replaceChildren(frame);
   }
 
   function openViewer(d, opener) {
     closeMenus();
     lastFocus = opener || document.activeElement;
     els.viewerTitle.textContent = d.title;
-    els.viewerOpen.href = enc(d.path);
-    setFrame(absUrl(d.path));
+    const present = presentUrl(d);
+    if (present) {
+      els.viewerOpen.href = present;
+      els.viewerOpen.target = '_blank';
+      els.viewerOpen.removeAttribute('download');
+      els.viewerOpen.textContent = '새 창에서 발표';
+    } else {                                     // 10 MB 넘는 PPTX — 받기만
+      els.viewerOpen.href = enc(d.path);
+      els.viewerOpen.removeAttribute('target');
+      els.viewerOpen.setAttribute('download', fileName(d.path));
+      els.viewerOpen.textContent = 'PPTX 받기';
+    }
+    els.hint.textContent = d.kind === 'pptx' ? HINT.pptx : HINT.deck;
+    const { url, sandbox } = previewOf(d);
+    mountFrame(url, sandbox);
     els.viewer.showModal();
   }
 
@@ -381,7 +454,7 @@
   els.helpBtn.addEventListener('click', openHelp);
   els.helpClose.addEventListener('click', () => els.help.close());
   els.viewerClose.addEventListener('click', () => els.viewer.close());
-  els.viewer.addEventListener('close', () => { setFrame('about:blank'); restoreFocus(); });
+  els.viewer.addEventListener('close', () => { els.stage.replaceChildren(); restoreFocus(); });
   els.help.addEventListener('close', restoreFocus);
   // 바깥(배경)을 누르면 닫는다. 창 안을 누른 것은 e.target 이 창 자신이 아니므로 걸리지 않는다.
   for (const dlg of [els.viewer, els.help]) {

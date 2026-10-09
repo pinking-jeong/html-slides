@@ -1,6 +1,7 @@
 * text=auto
 *.cmd text eol=crlf
 *.pptx binary
+*.pdf binary
 *.webp binary
 *.png binary
 *.jpg binary
@@ -13,3 +14,5 @@ decks/**/*.htm -merge
 # 덱은 바이트 그대로 둔다(줄바꿈을 바꾸면 원본과 달라져 매번 바뀐 것으로 보인다).
 # 맨 끝에 두어 위의 규칙보다 앞서게 한다.
 decks/** -text
+# 밖에서 가져온 PDF.js 도 받은 바이트 그대로(무결성 값과 맞춰 볼 수 있게).
+vendor/** -text

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""html-slides 로컬 도구 — 이 PC 에서 만든 HTML 발표자료를 공개 저장소에 올리고, 원본을 고치면 바로 반영한다.
+"""html-slides 로컬 도구 — 이 PC 에서 만든 발표자료(HTML·PDF·PPTX)를 공개 저장소에 올리고, 원본을 고치면 바로 반영한다.
 
 저장소 폴더에서 실행한다(PowerShell 은 .\\slides, cmd 는 slides).
 
-  slides add "원본.html" --name kns-2026 --folder conf --title "제목"   덱을 등록하고 올린다
+  slides add "원본.html" --name kns-2026 --folder conf --title "제목"   덱을 등록하고 올린다(.pdf·.pptx 도 됨)
+  slides add "원본.pdf" --pptx "원본.pptx"                             PDF 로 재생하고 PPTX 는 받기로 붙인다
   slides sync                                                          바뀐 덱을 맞춰 올린다
   slides watch                                                         원본을 지켜보다 저장되면 자동으로 올린다
   slides list                                                          등록한 덱과 상태를 본다
@@ -27,6 +28,7 @@ import argparse
 import datetime as dt
 import functools
 import hashlib
+import html
 import http.server
 import json
 import os
@@ -38,6 +40,7 @@ import time
 import unicodedata
 import webbrowser
 import zipfile
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,9 +49,14 @@ META_SUFFIX = ".meta.json"
 FOLDERS_FILE = "folders.json"
 REGISTRY_NAME = "slides-registry.json"
 LOCK_NAME = "slides.lock"
-HTML_SUFFIXES = (".html", ".htm")
+SOURCE_KINDS ={".html": ".html", ".htm": ".html", ".pdf": ".pdf", ".pptx": ".pptx"}   # 원본 확장자 → 저장소 확장자
+DECK_SUFFIXES = (".html", ".htm", ".pdf", ".pptx")     # 이름이 같으면 갤러리가 한 덱으로 묶는 파일(앞의 것이 덱)
+KIND_RANK = {".html": 0, ".htm": 0, ".pdf": 1, ".pptx": 2}
+KIND_NAME = {".html": "HTML", ".pdf": "PDF", ".pptx": "PPTX"}
+OFFICE_MAX = 10_000_000                 # Office 웹 뷰어가 여는 PPTX 크기 상한(갤러리와 같게)
+SCAN_MAX = 64 * 1024 * 1024             # PDF·PPTX 에서 점검할 글의 최대 바이트(풀어 낸 것 포함)
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-KEY_RE = re.compile(r"^decks/(?:[^/]+/)*[^/]+\.html$")
+KEY_RE = re.compile(r"^decks/(?:[^/]+/)*[^/]+\.(?:html|pdf|pptx)$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 KNOWN_MAX = 20                          # 덱마다 기억하는 'slides 가 만든 판' 지문 수(덮어써도 되는 것은 마지막 하나)
 SIZE_WARN = 50 * 1024 * 1024
@@ -220,31 +228,280 @@ def read_deck_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8", errors="replace")
 
 
+PPTX_TEXT_PARTS = (".xml", ".rels", ".svg", ".vml")     # PPTX 안에서 글로 읽어 점검하는 조각
+
+
+def zip_text(z: zipfile.ZipFile, info: zipfile.ZipInfo) -> str | None:
+    """zip 안의 글 조각 하나. 너무 크거나 압축이 깨져(zlib.error·EOFError 등) 읽지 못하면 None."""
+    if info.file_size > SCAN_MAX:
+        return None
+    try:
+        return z.read(info).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def pptx_notes(path: Path) -> list[str]:
-    """PPTX 에 함께 실려 나가는 것: 만든 이·발표자 노트·메모·바깥 링크."""
+    """PPTX 에 함께 실려 나가는 것: 만든 이·발표자 노트·메모·붙은 파일·바깥 링크."""
     out = []
     try:
         with zipfile.ZipFile(path) as z:
-            names = z.namelist()
-            if "docProps/core.xml" in names:
-                core = z.read("docProps/core.xml").decode("utf-8", "replace")
-                for tag, label in (("dc:creator", "만든 이"), ("cp:lastModifiedBy", "마지막으로 고친 이")):
-                    m = re.search(rf"<{tag}>([^<]*)</{tag}>", core)
-                    if m and m.group(1).strip():
-                        out.append(f"{label}: {m.group(1).strip()}")
+            infos = z.infolist()
+            names = [i.filename for i in infos]
+            core = next((i for i in infos if i.filename == "docProps/core.xml"), None)
+            text = (zip_text(z, core) or "") if core else ""
+            for tag, label in (("dc:creator", "만든 이"), ("cp:lastModifiedBy", "마지막으로 고친 이")):
+                m = re.search(rf"<{tag}>([^<]*)</{tag}>", text)
+                if m and m.group(1).strip():
+                    out.append(f"{label}: {mask(m.group(1), 60)}")
             notes = sum(1 for n in names if n.startswith("ppt/notesSlides/") and n.endswith(".xml"))
             if notes:
                 out.append(f"발표자 노트 {notes}장")
             comments = sum(1 for n in names if n.startswith("ppt/comments") and n.endswith(".xml"))
             if comments:
                 out.append(f"메모 {comments}묶음")
-            external = sum(z.read(n).decode("utf-8", "replace").count('TargetMode="External"')
-                           for n in names if n.endswith(".rels"))
+            embedded = sum(1 for n in names if n.startswith("ppt/embeddings/") and not n.endswith("/"))
+            if embedded:
+                out.append(f"PPTX 안에 붙은 파일 {embedded}개(차트·표의 원본 엑셀 등 — 함께 공개됨)")
+            external, total = 0, 0
+            for i in infos:
+                if i.filename.endswith(".rels") and total + i.file_size <= SCAN_MAX:
+                    total += i.file_size
+                    external += (zip_text(z, i) or "").count('TargetMode="External"')
             if external:
                 out.append(f"바깥 링크 {external}개")
-    except (OSError, zipfile.BadZipFile) as e:
+    except Exception as e:  # noqa: BLE001 — 깨진 파일도 알리기만 한다
         out.append(f"PPTX 를 열어 보지 못했습니다: {e}")
     return out
+
+
+def kind_of(path: Path | str) -> str:
+    """덱 파일이 저장소에서 갖는 확장자(.html·.pdf·.pptx) — 덱 파일이 아니면 ''."""
+    return SOURCE_KINDS.get(Path(path).suffix.lower(), "")
+
+
+def pptx_text(path: Path) -> tuple[str, int]:
+    """PPTX 안의 글 조각 모두(장·발표자 노트·메모·문서 정보·링크·SVG) — 열쇠·토큰·경로 점검용.
+    (글, 읽지 못하거나 상한을 넘어 점검하지 못한 조각 수)."""
+    parts, total, skipped = [], 0, 0
+    try:
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                if not info.filename.lower().endswith(PPTX_TEXT_PARTS):
+                    continue
+                text = zip_text(z, info) if total + info.file_size <= SCAN_MAX else None
+                if text is None:
+                    skipped += 1
+                    continue
+                parts.append(text)
+                total += info.file_size
+    except Exception:  # noqa: BLE001 — 열지 못한 것은 pptx_notes 가 알린다
+        pass
+    return "\n".join(parts), skipped
+
+
+STREAM_RE = re.compile(rb"stream\r?\n")
+PDF_INFO_KEY_RE = re.compile(r"/(?:Producer|CreationDate|ModDate)\b")   # 문서 정보(Info) 사전에 거의 늘 있는 키
+PDF_INFO_TRIES = 256                    # 문서 정보 사전을 찾아볼 키의 수(실제 PDF 는 고친 판마다 하나씩 — 몇 개뿐)
+PDF_DICT_SPAN = 16384                   # 문서 정보 사전 하나의 최대 길이
+PDF_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
+
+
+def pdf_text(path: Path) -> str:
+    """PDF 의 날 바이트와 풀어 낸 Flate 흐름(latin-1 로 읽음). 문서 정보·XMP·단순한 글자는 여기서 보이지만,
+    글꼴에 따라 본문 글자는 코드로 들어 있어 다 훑지는 못한다."""
+    data = path.read_bytes()
+    out, total, pos = [data.decode("latin-1")], 0, 0
+    while total < SCAN_MAX:
+        m = STREAM_RE.search(data, pos)
+        if not m:
+            break
+        end = data.find(b"endstream", m.end())
+        if end < 0:
+            break
+        pos = end + 9
+        try:
+            chunk = zlib.decompressobj().decompress(data[m.end():end], SCAN_MAX - total)
+        except zlib.error:
+            continue                            # Flate 가 아닌 흐름(JPEG 그림 등)
+        total += len(chunk)
+        out.append(chunk.decode("latin-1"))
+    return "\n".join(out)
+
+
+def pdf_string_at(text: str, i: int) -> str | None:
+    """text[i] 에서 시작하는 PDF 문자열 (…) 또는 <16진> 을 풀어 돌려준다."""
+    if text.startswith("(", i):
+        depth, j, buf = 1, i + 1, []
+        while j < len(text) and len(buf) < 4000:
+            c = text[j]
+            if c == "\\" and j + 1 < len(text):
+                n = text[j + 1]
+                if n in PDF_ESCAPES:
+                    buf.append(PDF_ESCAPES[n])
+                    j += 2
+                elif n in "01234567":
+                    k = j + 1
+                    while k < len(text) and k < j + 4 and text[k] in "01234567":
+                        k += 1
+                    buf.append(chr(int(text[j + 1:k], 8) & 0xFF))
+                    j = k
+                else:
+                    if n not in "\r\n":         # 줄 끝의 \ 는 이어 쓰기(CR LF 도 한 줄 끝)
+                        buf.append(n)
+                    j += 3 if text.startswith("\r\n", j + 1) else 2
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            buf.append(c)
+            j += 1
+        raw = "".join(buf).encode("latin-1", "replace")
+    elif text.startswith("<", i) and not text.startswith("<<", i):
+        end = text.find(">", i)
+        hexs = re.sub(r"\s", "", text[i + 1:end]) if end > 0 else ""
+        try:
+            raw = bytes.fromhex(hexs + "0" * (len(hexs) % 2))
+        except ValueError:
+            return None
+    else:
+        return None
+    if raw.startswith(b"\xfe\xff"):
+        return raw[2:].decode("utf-16-be", "replace")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", "replace")
+    return raw.decode("latin-1")
+
+
+PDF_DICT_TOKEN_RE = re.compile(r"[()<>\\]")
+
+
+def pdf_dict_end(text: str, start: int) -> int:
+    """text[start] 의 '<<' 와 짝이 되는 '>>' 의 자리. 글 (…)·<16진> 속의 괄호·꺾쇠는 건너뛰므로
+    '/Title<FEFF…>>>' 처럼 붙여 쓴 것도 맞게 끊는다. PDF_DICT_SPAN 안에서 못 찾거나 너무 깊으면 -1."""
+    depth, nest, i, end = 0, 0, start, min(len(text), start + PDF_DICT_SPAN)
+    while True:
+        m = PDF_DICT_TOKEN_RE.search(text, i, end)
+        if not m:
+            return -1
+        i, c = m.start(), m.group()
+        if nest:                                # 글 (…) 안 — 괄호 짝과 \ 이스케이프만 본다
+            if c == "\\":
+                i += 2
+            else:
+                nest += (c == "(") - (c == ")")
+                i += 1
+        elif c == "(":
+            nest, i = 1, i + 1
+        elif text.startswith("<<", i):
+            depth += 1
+            if depth > 8:                       # 문서 정보는 거의 겹치지 않는다(조작한 입력에서 멈추지 않게)
+                return -1
+            i += 2
+        elif text.startswith(">>", i):
+            depth -= 1
+            if depth <= 0:
+                return i
+            i += 2
+        elif c == "<":                          # <16진>
+            j = text.find(">", i + 1, end)
+            if j < 0:
+                return -1
+            i = j + 1
+        else:
+            i += 1
+
+
+def xmp_packet(text: str) -> str:
+    """PDF 안의 첫 XMP 묶음(최대 256 KB) — 없으면 ''."""
+    starts = [i for i in (text.find("<x:xmpmeta"), text.find("<x:xapmeta"), text.find("<rdf:RDF")) if i >= 0]
+    return text[min(starts):min(starts) + 262144] if starts else ""
+
+
+def xmp_value(pkt: str, tag: str) -> str | None:
+    """XMP 의 <dc:title><rdf:Alt><rdf:li>…</rdf:li> 같은 값(그 태그 안에서만 찾는다)."""
+    m = re.search(rf"<{tag}\b[^<>]{{0,1024}}>", pkt)
+    close = pkt.find(f"</{tag}>", m.end()) if m and not m.group(0).endswith("/>") else -1
+    li = re.search(r"<rdf:li\b[^<>]{0,1024}>([^<]{1,4000})</rdf:li>", pkt[m.end():close]) if close >= 0 else None
+    if not li:
+        return None
+    val = li.group(1).encode("latin-1", "replace").decode("utf-8", "replace")     # XMP 는 UTF-8
+    return " ".join(html.unescape(val).split()) or None
+
+
+def pdf_meta(text: str) -> dict[str, str]:
+    """PDF 문서 정보(Info 사전 — Producer·CreationDate·ModDate 가 든 것)와 XMP 의 제목·만든 이·주제·키워드.
+    믿을 수 없는 입력이라 정규식 대신 짧은 범위만 훑는다(조작한 PDF 로 멈추지 않게)."""
+    out: dict[str, str] = {}
+    seen: set[int] = set()
+    for n, m in enumerate(PDF_INFO_KEY_RE.finditer(text)):
+        if n >= PDF_INFO_TRIES:
+            break
+        start = text.rfind("<<", max(0, m.start() - PDF_DICT_SPAN), m.start())
+        if start < 0 or start in seen:
+            continue
+        seen.add(start)
+        end = pdf_dict_end(text, start)
+        if end < 0:
+            continue
+        body = text[start + 2:end]
+        for key in ("Title", "Author", "Subject", "Keywords"):
+            k = re.search(r"/" + key + r"\s*(?=[(<])", body)
+            if key not in out and k:
+                s = pdf_string_at(body, k.end())
+                if s and s.strip():
+                    out[key] = " ".join(s.split())
+    pkt = xmp_packet(text)
+    for key, tag in (("Title", "dc:title"), ("Author", "dc:creator"), ("Subject", "dc:description")):
+        if key not in out:
+            val = xmp_value(pkt, tag)
+            if val:
+                out[key] = val
+    return out
+
+
+def pdf_notes(text: str, meta: dict[str, str]) -> list[str]:
+    """PDF 와 함께 공개되는 것: 문서 정보·붙은 파일·스크립트·바깥 링크·암호."""
+    out = []
+    for key, label in (("Author", "만든 이"), ("Subject", "주제"), ("Keywords", "키워드")):
+        if meta.get(key):
+            out.append(f"{label}: {mask(meta[key], 60)}")
+    embedded = len(re.findall(r"/Type\s*/EmbeddedFile\b", text))
+    if embedded or "/EmbeddedFiles" in text:
+        out.append(f"PDF 안에 붙은 파일 {embedded or '?'}개(함께 공개됨)")
+    if re.search(r"/JavaScript\b|/JS\s*[(<\d]", text):
+        out.append("PDF 안의 스크립트(갤러리는 실행하지 않지만 받은 사람의 PDF 프로그램은 실행할 수 있음)")
+    links = len(re.findall(r"/URI\s*[(<]", text))
+    if links:
+        out.append(f"바깥 링크 {links}개")
+    if re.search(r"/Encrypt\s+\d+\s+\d+\s+R|/Encrypt\s*<<", text):
+        out.append("암호가 걸린 PDF — 여는 암호가 있으면 갤러리에서 재생되지 않습니다")
+    out.append("PDF 본문 글자는 다 훑지 못합니다(글꼴에 따라 글자가 코드로 들어 있음) — 공개해도 되는지 직접 확인하세요")
+    return out
+
+
+def inspect_deck(path: Path) -> tuple[str, str, list[str]]:
+    """올리기 전 점검 — (열쇠·경로를 찾아볼 글, 파일에서 찾은 제목, 알려 줄 것)."""
+    kind = kind_of(path)
+    if kind == ".pdf":
+        text = pdf_text(path)
+        meta = pdf_meta(text)
+        return text, meta.get("Title", ""), pdf_notes(text, meta)
+    if kind == ".pptx":
+        text, skipped = pptx_text(path)
+        m = re.search(r"<dc:title>([^<]*)</dc:title>", text)
+        notes = pptx_notes(path)
+        if skipped:
+            notes.append(f"PPTX 안의 글 조각 {skipped}개는 너무 크거나 깨져 점검하지 못했습니다 — 공개해도 되는지 직접 확인하세요")
+        return text, html.unescape(m.group(1)) if m else "", notes
+    text = read_deck_text(path)
+    head = text[:262144]
+    m = re.search(r"<title\b[^<>]{0,1024}>", head, re.I)
+    end = re.compile(r"</title", re.I).search(head, m.end()) if m else None
+    return text, head[m.end():end.start()] if end else "", []
 
 
 def check_size(path: Path, what: str) -> list[str]:
@@ -726,15 +983,31 @@ def registry_path(repo: Repo) -> Path:
     return repo.gitdir / REGISTRY_NAME
 
 
-def deck_paths(rel_html: str) -> dict[str, str]:
-    stem = rel_html.rsplit(".", 1)[0]               # .html·.htm 모두
-    return {"html": rel_html, "pptx": stem + ".pptx", "meta": stem + META_SUFFIX}
+def deck_paths(rel: str) -> dict[str, str]:
+    """등록한 덱이 저장소에 쓰는 파일: 덱 파일(main)·함께 올린 PPTX(pptx)·정보 파일(meta).
+    PPTX 덱에는 따로 붙는 PPTX 가 없다."""
+    stem, ext = rel.rsplit(".", 1)
+    out = {"main": rel, "meta": stem + META_SUFFIX}
+    if ext.lower() != "pptx":
+        out["pptx"] = stem + ".pptx"
+    return out
+
+
+def kinds(rel: str) -> list[tuple[str, str]]:
+    """(지문 기록의 이름, 등록부의 원본 키) — 덱 파일과, 붙을 수 있으면 PPTX."""
+    return [("main", "source")] + ([("pptx", "pptx_source")] if "pptx" in deck_paths(rel) else [])
+
+
+def group_paths(rel: str) -> list[str]:
+    """이름(확장자 뺀)이 같은 덱 파일과 정보 파일 — 갤러리에서는 덱 하나라 내릴 때 함께 내린다."""
+    stem = rel[: -len(Path(rel).suffix)] if rel.lower().endswith(DECK_SUFFIXES) else rel
+    return [stem + s for s in DECK_SUFFIXES] + [stem + META_SUFFIX]
 
 
 def entry_problem(repo: Repo, key, entry) -> str | None:
     """등록부 항목이 믿을 만한지 본다. 문제가 있으면 그 까닭."""
     if not isinstance(key, str) or not KEY_RE.match(key):
-        return "decks/…/이름.html 꼴이 아님"
+        return "decks/…/이름.html(.pdf·.pptx) 꼴이 아님"
     parts = key.split("/")
     if any(p in (".", "..") or p.startswith((".", "_")) for p in parts[1:]):
         return "decks/ 밖이나 숨긴 경로"
@@ -743,12 +1016,12 @@ def entry_problem(repo: Repo, key, entry) -> str | None:
     if not isinstance(entry, dict):
         return "항목 형식이 아님"
     src = entry.get("source")
-    if not isinstance(src, str) or not os.path.isabs(src) or not src.lower().endswith(HTML_SUFFIXES):
-        return "원본이 절대 경로의 HTML 이 아님"
+    if not isinstance(src, str) or not os.path.isabs(src) or kind_of(src) != kind_of(key):
+        return "원본이 절대 경로의 덱 파일이 아니거나 저장소 쪽과 종류가 다름"
     if inside(Path(src), repo.root):
         return "원본이 저장소 안에 있음"
     pptx = entry.get("pptx_source")
-    if pptx is not None and (not isinstance(pptx, str) or not os.path.isabs(pptx)
+    if pptx is not None and (kind_of(key) == ".pptx" or not isinstance(pptx, str) or not os.path.isabs(pptx)
                              or not pptx.lower().endswith(".pptx") or inside(Path(pptx), repo.root)):
         return "PPTX 원본이 맞지 않음"
     return None
@@ -770,9 +1043,11 @@ def load_registry(repo: Repo, quiet: bool = False) -> dict:
             if not quiet:
                 print(f"[경고] 등록부 항목을 무시합니다({why}): {key}")
             continue
-        known = entry.get("known") if isinstance(entry.get("known"), dict) else {}
+        known = dict(entry.get("known")) if isinstance(entry.get("known"), dict) else {}
+        if "html" in known and "main" not in known:     # 예전 등록부는 덱 파일의 기록을 'html' 로 적었다
+            known["main"] = known.pop("html")
         entry["known"] = {k: [h for h in v if isinstance(h, str) and HEX64_RE.match(h)][-KNOWN_MAX:]
-                          for k, v in known.items() if k in ("html", "pptx") and isinstance(v, list)}
+                          for k, v in known.items() if k in ("main", "pptx") and isinstance(v, list)}
         decks[key] = entry
     return {"version": 2, "decks": decks}
 
@@ -792,12 +1067,12 @@ def save_registry(repo: Repo, data: dict) -> None:
 
 
 def regen_paths(reg: dict) -> set[str]:
-    """원본이 있어 언제든 다시 만들 수 있는 저장소 사본(등록한 덱의 HTML·PPTX, normcase).
+    """원본이 있어 언제든 다시 만들 수 있는 저장소 사본(등록한 덱의 덱 파일·PPTX, normcase).
     원격과 부딪쳤을 때 원격 쪽을 따라도 잃는 것이 없는 파일은 이것뿐이다."""
     out = set()
     for rel, entry in reg["decks"].items():
         paths = deck_paths(rel)
-        for kind, key in (("html", "source"), ("pptx", "pptx_source")):
+        for kind, key in kinds(rel):
             if entry.get(key) and Path(entry[key]).is_file():
                 out.add(os.path.normcase(paths[kind]))
     return out
@@ -816,7 +1091,7 @@ def split_arg(arg: str) -> tuple[str, bool]:
     while s.startswith("./"):
         s = s[2:]
     s = s.strip("/")
-    explicit = "/" in s or s.lower().endswith(HTML_SUFFIXES)
+    explicit = "/" in s or s.lower().endswith(DECK_SUFFIXES)
     if s.lower().startswith(DECKS_DIR + "/"):
         s, explicit = s[len(DECKS_DIR) + 1:], True
     return s, explicit
@@ -827,7 +1102,7 @@ def find_entry(reg: dict, key: str) -> str | None:
     이름만 적었으면 어느 폴더에 있든 그 이름인 것을 찾는다. 없으면 None."""
     s, explicit = split_arg(key)
     k = s.lower()
-    for suf in HTML_SUFFIXES:
+    for suf in DECK_SUFFIXES:
         if k.endswith(suf):
             k = k[: -len(suf)]
             break
@@ -915,6 +1190,30 @@ def inside_folder_deck(root: Path, rel: str) -> str | None:
     return None
 
 
+def same_name_files(repo: Repo, rel: str) -> list[str]:
+    """rel 과 이름(확장자 뺀)이 같은, 같은 폴더의 다른 덱 파일(디스크에 있는 이름 그대로)."""
+    folder = (repo.root / rel).parent
+    stem, name = Path(rel).stem.lower(), Path(rel).name.lower()
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    return [(Path(rel).parent / n).as_posix() for n in names
+            if Path(n).stem.lower() == stem and Path(n).suffix.lower() in KIND_RANK and n.lower() != name]
+
+
+def stem_conflict(repo: Repo, reg: dict, rel: str) -> str | None:
+    """이름이 같은 다른 덱. 갤러리는 이름이 같은 파일을 한 덱으로 묶고 HTML > PDF > PPTX 차례로 앞의 것을
+    덱으로 보이므로, 새 덱이 다른 덱에 붙어 보이지 않게 되거나 두 등록이 한 덱을 나눠 갖지 않게 막는다.
+    뒤 차례의 파일(HTML 덱 옆의 PDF·PPTX, PDF 덱 옆의 PPTX)은 이 덱에 붙는 것이라 괜찮다."""
+    stem = rel.rsplit(".", 1)[0].lower()
+    for key in reg["decks"]:
+        if key.lower() != rel.lower() and key.rsplit(".", 1)[0].lower() == stem:
+            return key
+    rank = KIND_RANK[Path(rel).suffix.lower()]
+    return next((p for p in same_name_files(repo, rel) if KIND_RANK[Path(p).suffix.lower()] <= rank), None)
+
+
 def check_target(repo: Repo, reg: dict, rel: str, src: Path, pptx_src: Path | None, force: bool) -> None:
     """add 할 자리가 안전한지 본다(덮으면 안 되는 것이 있으면 멈춘다)."""
     holder = inside_folder_deck(repo.root, rel)
@@ -923,23 +1222,30 @@ def check_target(repo: Repo, reg: dict, rel: str, src: Path, pptx_src: Path | No
     clash = case_conflict(repo.root, rel)
     if clash:
         raise SlidesError(f"대소문자만 다른 {clash} 가 이미 있습니다 — --name·--folder 를 바꾸거나 그쪽을 먼저 내려 주세요")
-    entry = reg["decks"].get(rel)
-    dst = repo.root / rel
-    if force or not dst.exists():
+    other = stem_conflict(repo, reg, rel)
+    if other:
+        raise SlidesError(f"이름이 같은 덱 {other} 가 있습니다(갤러리는 이름이 같은 파일을 한 덱으로 묶습니다) — "
+                          "--name 을 바꾸거나 그 덱을 먼저 내려 주세요. PDF 덱에 PPTX 를 붙이려면 "
+                          'slides add "발표.pdf" --pptx "발표.pptx"')
+    if force:
         return
-    if entry is None:
-        raise SlidesError(f"{rel} 가 이미 있습니다(웹에서 올린 덱일 수 있음). 이 원본으로 덮으려면 --force")
-    if os.path.normcase(entry["source"]) != os.path.normcase(str(src)):
-        raise SlidesError(f"{rel} 는 다른 원본({entry['source']})에 묶여 있습니다. 이 원본으로 바꾸려면 --force")
-    pairs = [("html", src, dst)]
+    entry = reg["decks"].get(rel)
+    pairs = [("main", src, repo.root / rel)]
     if pptx_src:
         pairs.append(("pptx", pptx_src, repo.root / deck_paths(rel)["pptx"]))
     for kind, s, d in pairs:
-        if not d.is_file():
+        if not d.exists():
             continue
-        cur = sha256_file(d)
+        shown = deck_paths(rel)[kind]
+        if entry is None:
+            raise SlidesError(f"{shown} 가 이미 있습니다(웹에서 올린 덱일 수 있음). 이 원본으로 덮으려면 --force")
+        if kind == "main" and os.path.normcase(entry["source"]) != os.path.normcase(str(src)):
+            raise SlidesError(f"{rel} 는 다른 원본({entry['source']})에 묶여 있습니다. 이 원본으로 바꾸려면 --force")
+        cur = sha256_file(d) if d.is_file() else None
         if cur != ours(entry, kind) and cur != sha256_file(s):
-            raise SlidesError(f"{deck_paths(rel)[kind]} 가 저장소 쪽에서 바뀌었습니다(웹 업로드·되돌림·직접 수정). "
+            if ours(entry, kind) is None:       # slides 가 쓴 적 없는 파일(덱에 붙은 웹 업로드 PPTX 등)
+                raise SlidesError(f"{shown} 가 이미 있습니다(웹에서 올린 파일일 수 있음). 이 원본으로 덮으려면 --force")
+            raise SlidesError(f"{shown} 가 저장소 쪽에서 바뀌었습니다(웹 업로드·되돌림·직접 수정). "
                               "이 원본으로 덮으려면 --force")
 
 
@@ -949,14 +1255,36 @@ def report_taken(taken: list[str]) -> None:
               "slides list 로 확인하세요")
 
 
+def add_notes(repo: Repo, rel: str, src: Path, pptx_src: Path | None) -> list[str]:
+    """add 할 때 함께 알려 줄 것: PPTX 재생 방식·10 MB 상한, 이 덱에 붙게 될 같은 이름의 파일."""
+    out = []
+    if kind_of(src) == ".pptx":
+        out.append("PPTX 는 Microsoft Office 웹 뷰어로 재생됩니다 — 파일 주소가 Microsoft 로 전달됩니다")
+        size = src.stat().st_size
+        if size > OFFICE_MAX:
+            out.append(f"10 MB 가 넘어({size / 1e6:.1f} MB) 갤러리에서는 재생되지 않고 받기만 됩니다 — PowerPoint 에서 "
+                       f'PDF 로 내보내 slides add "{src.with_suffix(".pdf").name}" --pptx "{src.name}" 로 올리면 '
+                       "PDF 로 재생됩니다")
+    if pptx_src and pptx_src.stat().st_size > OFFICE_MAX:
+        out.append("PPTX 가 10 MB 가 넘어 ‘PowerPoint 로 보기’ 없이 받기로만 붙습니다")
+    mine = {deck_paths(rel).get("pptx", "").lower()} if pptx_src else set()
+    for p in same_name_files(repo, rel):
+        if p.lower() not in mine:
+            out.append(f"이름이 같은 {p} 는 이 덱에 붙습니다(갤러리의 ⋯ 메뉴에서 보기·받기)")
+    return out
+
+
 def cmd_add(repo: Repo, args) -> int:
     src = Path(args.source).expanduser().resolve()
-    if not src.is_file() or src.suffix.lower() not in HTML_SUFFIXES:
-        raise SlidesError(f"HTML 파일이 아닙니다: {src}")
+    ext = kind_of(src)
+    if not src.is_file() or not ext:
+        raise SlidesError(f"HTML·PDF·PPTX 파일이 아닙니다: {src}")
     if inside(src, repo.root):
         raise SlidesError("원본은 저장소 폴더 밖에 두어 주세요(저장소의 decks/ 는 slides 가 관리합니다) — "
                           "파일을 다른 폴더로 옮긴 뒤 그 경로로 add 하세요")
     pptx_src = Path(args.pptx).expanduser().resolve() if args.pptx else None
+    if pptx_src and ext == ".pptx":
+        raise SlidesError("PPTX 를 덱으로 올릴 때는 --pptx 를 붙이지 않습니다")
     if pptx_src and (not pptx_src.is_file() or pptx_src.suffix.lower() != ".pptx"):
         raise SlidesError(f"PPTX 파일이 아닙니다: {pptx_src}")
     if pptx_src and inside(pptx_src, repo.root):
@@ -964,25 +1292,28 @@ def cmd_add(repo: Repo, args) -> int:
     if args.date and not DATE_RE.match(args.date):
         raise SlidesError("--date 는 2026-10-29 꼴로 적어 주세요")
     name = slugify(args.name or src.stem)
-    if name == "index":                     # 내보내기 도구들이 흔히 index.html 로 만든다
+    if name == "index" and ext == ".html":  # 내보내기 도구들이 흔히 index.html 로 만든다
         name = slugify(src.parent.name) if src.parent.name else "deck"
         print(f"이름이 index 이면 폴더 전체가 한 덱으로 보여 '{name}' 으로 바꿉니다(--name 으로 정할 수 있음).")
     folder_parts = [slugify(p) for p in re.split(r"[\\/]+", args.folder or "") if p.strip(" ._")]
-    rel = "/".join([DECKS_DIR, *folder_parts, name + ".html"])
+    rel = "/".join([DECKS_DIR, *folder_parts, name + ext])
     push = not args.no_push
 
-    notes = check_size(src, "HTML")
+    notes = check_size(src, KIND_NAME[ext])
     if pptx_src:
         notes += check_size(pptx_src, "PPTX")
-    text = read_deck_text(src)
+    text, found_title, more = inspect_deck(src)
     secrets = scan_text(text, SECRET_PATTERNS, keep=10)
-    notes += scan_text(text, leak_patterns(), keep=48)
+    notes += scan_text(text, leak_patterns(), keep=48) + more
     if pptx_src:
-        notes += [f"PPTX {n}" for n in pptx_notes(pptx_src)]
-    title = args.title or (re.search(r"<title[^>]*>(.*?)</title>", text[:262144], re.I | re.S) or [None, ""])[1]
+        ptext, _, pmore = inspect_deck(pptx_src)
+        secrets += [f"PPTX {s}" for s in scan_text(ptext, SECRET_PATTERNS, keep=10)]
+        notes += [f"PPTX {n}" for n in scan_text(ptext, leak_patterns(), keep=48) + pmore]
+    title = args.title or found_title
 
     reg = load_registry(repo)
     check_target(repo, reg, rel, src, pptx_src, args.force)
+    notes += add_notes(repo, rel, src, pptx_src)
     print(PUBLIC_WARNING)
     print(f"  원본: {src}\n  저장소: {rel}\n  제목: {mask(title or name, 80)}")
     if secrets:
@@ -1007,11 +1338,14 @@ def cmd_add(repo: Repo, args) -> int:
                 push = False
         reg = load_registry(repo)
         check_target(repo, reg, rel, src, pptx_src, args.force)
+        late = [n for n in add_notes(repo, rel, src, pptx_src) if n not in notes]
+        if late:                                # 방금 원격에서 받은 같은 이름의 파일(웹 업로드 등)
+            print("  확인할 것(원격에서 받은 것):\n" + "\n".join(f"   - {n}" for n in late))
         old = reg["decks"].get(rel)
-        # 지문 기록은 이어 간다(덮어쓸지는 마지막 판으로만 정한다) — --force 로 HTML 만 덮어도 PPTX 기록을 잃지 않게.
+        # 지문 기록은 이어 간다(덮어쓸지는 마지막 판으로만 정한다) — --force 로 덱 파일만 덮어도 PPTX 기록을 잃지 않게.
         known = {k: list(v) for k, v in (old or {}).get("known", {}).items()}
         paths = deck_paths(rel)
-        remember(known.setdefault("html", []), copy_atomic(src, repo.root / rel))
+        remember(known.setdefault("main", []), copy_atomic(src, repo.root / rel))
         changed = [rel]
         pptx_from = str(pptx_src) if pptx_src else (old or {}).get("pptx_source")
         if pptx_src:
@@ -1069,7 +1403,7 @@ def tool_owned_dirty(repo: Repo, reg: dict, dirty: dict[str, str], quiet: bool =
     out = []
     for rel, entry in reg["decks"].items():
         paths = deck_paths(rel)
-        for kind in ("html", "pptx"):
+        for kind, _ in kinds(rel):
             p = nd.get(os.path.normcase(paths[kind]))
             f = repo.root / paths[kind]
             if p and f.is_file() and sha256_file(f) == ours(entry, kind):
@@ -1095,7 +1429,7 @@ def copy_changed(repo: Repo, reg: dict, quiet: bool) -> list[str]:
 
     for rel, entry in sorted(reg["decks"].items()):
         paths = deck_paths(rel)
-        for kind, key in (("html", "source"), ("pptx", "pptx_source")):
+        for kind, key in kinds(rel):
             if not entry.get(key):
                 continue
             src, dst = Path(entry[key]), repo.root / paths[kind]
@@ -1125,8 +1459,8 @@ def copy_changed(repo: Repo, reg: dict, quiet: bool) -> list[str]:
                 if src.stat().st_size > SIZE_LIMIT:
                     say(f"{src.name}: 100 MB 에 가까워 올리지 않았습니다")
                     continue
-                if kind == "html" and not entry.get("scan_ignored"):
-                    secrets = scan_text(read_deck_text(src), SECRET_PATTERNS, keep=10)
+                if not entry.get("scan_ignored"):
+                    secrets = scan_text(inspect_deck(src)[0], SECRET_PATTERNS, keep=10)
                     if secrets:
                         say(f"{src.name}: 열쇠·토큰처럼 보이는 글이 있어 올리지 않았습니다 — " + "; ".join(secrets))
                         continue
@@ -1247,7 +1581,7 @@ def deck_status(repo: Repo, rel: str, entry: dict, head: set[str]) -> str:
     src, dst = Path(entry["source"]), repo.root / rel
     if not src.is_file():
         return "원본 없음"
-    last = ours(entry, "html")
+    last = ours(entry, "main")
     if not dst.is_file():
         if last and os.path.normcase(rel) not in head:
             return "저장소에서 지워짐(되살리지 않음 — 다시 올리려면 add --force)"
@@ -1288,34 +1622,51 @@ def canonical_case(root: Path, rel: str) -> str:
     return "/".join(out)
 
 
+def group_files(repo: Repo, reg: dict, rel: str) -> list[str]:
+    """rel 과 이름이 같은 덱 파일 가운데 디스크·git·등록부 어디엔가 있는 것(덱이 되는 차례로)."""
+    cands = group_paths(rel)[:-1]               # 정보 파일은 빼고 덱 파일만
+    tracked = {os.path.normcase(p): p for p in repo.tracked(*cands)}
+    out: dict[str, str] = {}
+    for c in cands:
+        if (repo.root / c).is_file():
+            p = canonical_case(repo.root, c)
+        else:
+            p = tracked.get(os.path.normcase(c)) or next((k for k in reg["decks"] if k.lower() == c.lower()), None)
+        if p:
+            out.setdefault(p.lower(), p)
+    return sorted(out.values(), key=lambda p: DECK_SUFFIXES.index(Path(p).suffix.lower()))
+
+
 def resolve_target(repo: Repo, reg: dict, arg: str) -> tuple[str, str, str | None]:
     """내릴 덱을 찾는다 → (경로, 'file'|'dir', 등록부 키 또는 None). decks/ 밖은 받지 않는다.
+    파일 덱은 이름이 같은 덱 파일 묶음(HTML·PDF·PPTX)이 갤러리의 덱 하나라, 확장자를 적었든 아니든 그 묶음을 찾는다.
     적은 경로와 꼭 맞는 것을 먼저 보고, 이름만 적었으면 어느 폴더에 있든 그 이름인 등록 덱도 본다 — 여럿이면 묻는다."""
     s, explicit = split_arg(arg)
     if not s or any(p in ("", ".", "..") for p in s.split("/")):
         raise SlidesError("decks/ 아래의 덱만 내릴 수 있습니다")
     base = repo.root / DECKS_DIR
     rel = f"{DECKS_DIR}/{s}"
-    found: dict[str, tuple[str, str, str | None]] = {}
+    found: dict[tuple[str, str], tuple[str, str, str | None]] = {}
     is_index = rel.lower().endswith("/index.html")
     folder = repo.root / (rel[: -len("/index.html")] if is_index else rel)
     if folder.is_dir() and (folder / "index.html").is_file() and inside(folder, base) \
             and folder.resolve() != base.resolve():
         c = canonical_case(repo.root, folder.relative_to(repo.root).as_posix())
-        found[c.lower()] = (c, "dir", None)
+        found[("dir", c.lower())] = (c, "dir", None)
+
+    def add_group(path: str) -> None:
+        files = group_files(repo, reg, path)
+        if files and inside(repo.root / files[0], base):
+            stem = files[0].rsplit(".", 1)[0].lower()
+            key = next((k for k in reg["decks"] if k.rsplit(".", 1)[0].lower() == stem), None)
+            found.setdefault(("file", stem), (files[0], "file", key))
+
     if not is_index:
-        rel_file = rel if rel.lower().endswith(HTML_SUFFIXES) else rel + ".html"
-        key = next((k for k in reg["decks"] if k.lower() == rel_file.lower()), None)
-        on_disk = (repo.root / rel_file).is_file()
-        if key:
-            found[key.lower()] = (key, "file", key)
-        elif inside(repo.root / rel_file, base) and (on_disk or repo.tracked(rel_file)):
-            c = canonical_case(repo.root, rel_file) if on_disk else rel_file
-            found[c.lower()] = (c, "file", None)
+        add_group(rel)
     if not explicit:
         hit = find_entry(reg, arg)
         if hit:
-            found.setdefault(hit.lower(), (hit, "file", hit))
+            add_group(hit)
     if len(found) > 1:
         raise SlidesError(f"'{arg}' 에 맞는 덱이 여럿입니다: {', '.join(sorted(v[0] for v in found.values()))} "
                           "— decks/ 아래 경로로 적어 주세요")
@@ -1340,10 +1691,11 @@ def cmd_remove(repo: Repo, args) -> int:
         if kind == "dir":
             targets = [rel]
             shown = f"{rel}/ (폴더째)"
-        else:                                   # 이 PC 에서 먼저 지운 파일도 git 에 있으면 함께 내린다
-            cand = list(deck_paths(rel).values())
-            known = {os.path.normcase(p) for p in repo.tracked(*cand)}
-            targets = [p for p in cand if (repo.root / p).exists() or os.path.normcase(p) in known]
+        else:                                   # 이름이 같은 덱 파일·정보 파일 모두. 이 PC 에서 먼저 지운 것도 git 에 있으면 함께
+            cand = group_paths(rel)
+            known = {os.path.normcase(p): p for p in repo.tracked(*cand)}
+            targets = [canonical_case(repo.root, p) if (repo.root / p).exists() else known[os.path.normcase(p)]
+                       for p in cand if (repo.root / p).exists() or os.path.normcase(p) in known]
             shown = ", ".join(targets)
         print(f"내릴 것: {shown}")
         print("갤러리에서는 사라지지만 git 기록(이전 판)에는 남습니다.")
@@ -1359,9 +1711,12 @@ def cmd_remove(repo: Repo, args) -> int:
                         (repo.root / p).unlink()
         except OSError as e:
             raise SlidesError(f"다 지우지 못했습니다(다른 프로그램이 파일을 열고 있을 수 있음) — 닫고 다시 해 주세요: {e}")
-        gone = (key or rel).lower()             # 폴더째 내리면 그 안에 등록한 덱도 등록에서 뺀다(되살아나지 않게)
+        # 이름이 같은 등록 덱, 폴더째 내리면 그 안에 등록한 덱도 등록에서 뺀다(되살아나지 않게).
+        gone = (key or rel).lower()
+        stem = gone.rsplit(".", 1)[0]
         for k in [k for k in reg["decks"]
-                  if k.lower() == gone or (kind == "dir" and k.lower().startswith(gone + "/"))]:
+                  if (kind == "file" and k.lower().rsplit(".", 1)[0] == stem)
+                  or (kind == "dir" and k.lower().startswith(gone + "/"))]:
             reg["decks"].pop(k)
         save_registry(repo, reg)
         name = Path(rel).stem if kind == "file" else Path(rel).name
@@ -1399,14 +1754,18 @@ def pages_url(repo: Repo) -> str | None:
     return f"https://{owner.lower()}.github.io/{name}/"
 
 
-def print_urls(repo: Repo, rel_html: str | None = None) -> None:
+def print_urls(repo: Repo, rel: str | None = None) -> None:
     base = pages_url(repo)
     if not base:
         return
     print(f"갤러리: {base}  (Actions 가 1~2분 뒤 반영)")
-    if rel_html:
+    if rel:
         from urllib.parse import quote
-        print(f"이 덱: {base}{quote(rel_html)}")
+        kind = kind_of(rel)
+        if kind in (".pdf", ".pptx"):            # PDF·PPTX 는 갤러리의 뷰어로 연다
+            print(f"이 덱: {base}viewer/{kind[1:]}.html#file={quote(rel, safe='')}")
+        else:
+            print(f"이 덱: {base}{quote(rel)}")
 
 
 def cmd_url(repo: Repo, args) -> int:
@@ -1417,6 +1776,13 @@ def cmd_url(repo: Repo, args) -> int:
 class LocalHandler(http.server.SimpleHTTPRequestHandler):
     """이 PC 에서만 쓰는 미리보기 서버 — 다른 이름(Host)으로 들어온 요청은 받지 않는다(DNS rebinding 막기)."""
     allowed_hosts: set = set()
+    # Windows 는 확장자의 형식을 레지스트리에서 읽어 .mjs 를 엉뚱하게 줄 수 있다 — PDF 뷰어의 모듈이 안 돌지 않게 정해 둔다.
+    extensions_map = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json",
+        ".wasm": "application/wasm", ".pdf": "application/pdf", ".svg": "image/svg+xml",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
 
     def parse_request(self) -> bool:
         if not super().parse_request():
@@ -1460,18 +1826,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("add", help="덱을 등록하고 올린다")
-    a.add_argument("source", help="원본 HTML 파일(저장소 폴더 밖)")
+    a = sub.add_parser("add", help="덱을 등록하고 올린다(HTML·PDF·PPTX)")
+    a.add_argument("source", help="원본 HTML·PDF·PPTX 파일(저장소 폴더 밖)")
     a.add_argument("--name", help="저장소에서 쓸 이름(주소에 들어감, 기본: 원본 파일 이름)")
     a.add_argument("--folder", help="폴더(예: conf, seminar/2026)")
     a.add_argument("--folder-label", help="폴더의 표시 이름(예: 학회 발표)")
-    a.add_argument("--title", help="갤러리에 보일 제목(기본: HTML 의 <title>)")
+    a.add_argument("--title", help="갤러리에 보일 제목(기본: HTML 의 <title>, PDF·PPTX 의 문서 제목)")
     a.add_argument("--desc", help="한두 줄 설명")
     a.add_argument("--date", help="발표일 YYYY-MM-DD")
     a.add_argument("--venue", help="발표 자리(학회·세미나 이름)")
     a.add_argument("--authors", help="발표자")
     a.add_argument("--tags", help="쉼표로 나눈 꼬리표")
-    a.add_argument("--pptx", help="함께 올릴 PPTX(만든 이·발표자 노트도 함께 공개됨)")
+    a.add_argument("--pptx", help="HTML·PDF 덱에 함께 올릴 PPTX(받기·보기로 붙음, 만든 이·발표자 노트도 함께 공개됨)")
     a.add_argument("--force", action="store_true", help="저장소에 있는 판을 이 원본으로 덮는다")
     a.add_argument("--ignore-scan", action="store_true", help="열쇠·토큰 점검에 걸려도 올린다(잘못 찾은 경우)")
     a.add_argument("--yes", action="store_true", help="공개 저장소 확인을 건너뛴다")

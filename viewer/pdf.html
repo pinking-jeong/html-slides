@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex, nofollow">
+<title>PDF 발표</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="viewer.css">
+<script type="module" src="pdf.js"></script>
+</head>
+<body class="pdf">
+<main class="stage" id="stage" aria-label="발표 화면 — 누르거나 ← → 키로 장을 넘깁니다">
+  <div class="sheet" id="sheet"></div>
+  <p class="status" id="status" role="status">PDF 를 불러오는 중…</p>
+  <div class="msg" id="msg" role="alert" hidden></div>
+</main>
+
+<header class="bar top" id="top">
+  <a class="back" href="../" aria-label="발표자료 목록으로">
+    <svg class="ico" viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg><span>목록</span>
+  </a>
+  <h1 id="title">PDF</h1>
+  <nav class="acts" aria-label="함께 받기">
+    <a class="btn wide" id="pptxView" hidden>PowerPoint 로 보기</a>
+    <a class="btn" id="pptxGet" hidden>PPTX 받기</a>
+    <a class="btn" id="pdfGet" hidden>PDF 받기</a>
+  </nav>
+</header>
+
+<footer class="bar bottom" id="bottom">
+  <div class="pager">
+    <button class="btn" type="button" id="prev" aria-label="이전 장" disabled>
+      <svg class="ico" viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg>
+    </button>
+    <span class="count" id="count" aria-live="polite">– / –</span>
+    <button class="btn" type="button" id="next" aria-label="다음 장" disabled>
+      <svg class="ico" viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5"/></svg>
+    </button>
+  </div>
+  <button class="btn fs" type="button" id="fs" hidden>전체 화면</button>
+</footer>
+</body>
+</html>

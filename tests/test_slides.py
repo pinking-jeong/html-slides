@@ -9,11 +9,14 @@ import stat
 import subprocess
 import sys
 import threading
+import time
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import samples
 import slides
 
 REPO = Path(__file__).resolve().parents[1]
@@ -296,6 +299,186 @@ def test_size_guard(env, monkeypatch, capsys):
     deck.write_text("y" * 64, encoding="utf-8")
     assert slides.sync(repo(env)) == []                     # 고친 원본이 너무 크면 올리지 않는다
     assert remote_show(env, "decks/big.html") == "x" * 64
+
+
+# ---------------------------------------------------------------- PDF·PPTX
+
+def fake_token() -> str:
+    return "gh" + "p_" + "A1b2" * 9                        # 토큰처럼 보이는 가짜(파일에 그 꼴로 두지 않는다)
+
+
+def test_deck_paths_by_kind():
+    assert slides.deck_paths("decks/a/t.pdf") == {"main": "decks/a/t.pdf", "meta": "decks/a/t.meta.json",
+                                                  "pptx": "decks/a/t.pptx"}
+    assert slides.deck_paths("decks/t.pptx") == {"main": "decks/t.pptx", "meta": "decks/t.meta.json"}
+    assert slides.kinds("decks/t.pptx") == [("main", "source")]
+    assert slides.kinds("decks/t.html") == [("main", "source"), ("pptx", "pptx_source")]
+    assert slides.group_paths("decks/c/t.PDF") == ["decks/c/t.html", "decks/c/t.htm", "decks/c/t.pdf",
+                                                   "decks/c/t.pptx", "decks/c/t.meta.json"]
+
+
+def test_pdf_strings_and_info():
+    text = r"(a\(b\)c\\d\101\
+e)"
+    assert slides.pdf_string_at(text, 0) == "a(b)c" + BS + "dAe"
+    assert slides.pdf_string_at("(a" + BS + "\r\nb)", 0) == "ab"        # CR LF 줄 끝도 이어 쓰기
+    assert slides.pdf_string_at("<FEFF D55C AE00>", 0) == "한글"
+    assert slides.pdf_string_at("<< /x 1 >>", 0) is None
+    # 목차(Outline) 항목도 /Title 을 쓴다 — 문서 정보(Producer·CreationDate 가 함께 있는 사전)의 것만 읽는다
+    raw = ("1 0 obj << /Title (Outline item) /Parent 3 0 R >> endobj "
+           "9 0 obj << /Title <FEFFC81C BAA9> /Author (Hong) /Producer (x) >> endobj")
+    assert slides.pdf_meta(raw) == {"Title": "제목", "Author": "Hong"}
+    # 붙여 쓴 '<16진>>>' 와 괄호가 든 글도 사전 끝을 맞게 찾는다
+    assert slides.pdf_meta("7 0 obj <</Producer(x)/Title<FEFFC81CBAA9>>> endobj") == {"Title": "제목"}
+    assert slides.pdf_meta("<< /Title (a (b) c) /Producer (p) /Author <FEFF0041> >>") == {"Title": "a (b) c",
+                                                                                     "Author": "A"}
+    # XMP: 빈 제목이 다음 항목(만든 이)을 끌어오지 않는다
+    xmp = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description>'
+           '<dc:title><rdf:Alt><rdf:li xml:lang="x-default"/></rdf:Alt></dc:title>'
+           '<dc:creator><rdf:Seq><rdf:li>Kim &amp; Lee</rdf:li></rdf:Seq></dc:creator>'
+           '</rdf:Description></rdf:RDF></x:xmpmeta>')
+    assert slides.pdf_meta(xmp) == {"Author": "Kim & Lee"}
+    # 조작한 입력에도 금방 끝난다(예전 정규식은 길이의 제곱으로 느려졌다)
+    started = time.perf_counter()
+    for crafted in ("<< /Producer" * 100000, ("<< /Producer (" + "a" * 16000 + ") >>") * 200,
+                    "<x:xmpmeta>" + "<dc:title>" * 50000, "<x:xmpmeta><dc:title>" + "<rdf:li " * 50000):
+        assert slides.pdf_meta(crafted) == {}
+    assert time.perf_counter() - started < 5
+
+
+def test_add_pdf_deck_with_pptx(env, capsys):
+    pdf = env.src / "Talk.pdf"
+    pdf.write_bytes(samples.make_pdf(3, info={"Title": "PDF 제목", "Author": "홍길동", "Producer": "test"}))
+    pptx = env.src / "Talk.pptx"
+    pptx.write_bytes(samples.make_pptx(3, creator="홍길동", notes=2))
+    assert run(env, "add", str(pdf), "--pptx", str(pptx), "--folder", "conf", "--yes") == 0
+    out = capsys.readouterr().out
+    assert "decks/conf/talk.pdf" in out and "제목: PDF 제목" in out
+    assert "만든 이: 홍길동" in out and "PPTX 만든 이: 홍길동" in out and "PPTX 발표자 노트 2장" in out
+    assert "PDF 본문 글자는 다 훑지 못합니다" in out
+    files = remote_files(env)
+    assert "decks/conf/talk.pdf" in files and "decks/conf/talk.pptx" in files
+    assert remote_bytes(env, "decks/conf/talk.pdf") == pdf.read_bytes()        # 바이너리도 바이트 그대로
+    entry = slides.load_registry(repo(env))["decks"]["decks/conf/talk.pdf"]
+    assert sorted(entry["known"]) == ["main", "pptx"] and entry["pptx_source"] == str(pptx.resolve())
+
+    pdf.write_bytes(samples.make_pdf(4))                    # 원본을 고치면 sync 가 따라간다
+    assert slides.sync(repo(env)) == ["talk"]
+    assert remote_bytes(env, "decks/conf/talk.pdf") == pdf.read_bytes()
+    pptx.write_bytes(samples.make_pptx(4))
+    assert slides.sync(repo(env)) == ["talk"]
+    assert remote_bytes(env, "decks/conf/talk.pptx") == pptx.read_bytes()
+    run(env, "list")
+    assert "상태: 같음" in capsys.readouterr().out
+
+
+def test_add_pptx_deck(env, capsys, monkeypatch):
+    deck = env.src / "slides.pptx"
+    deck.write_bytes(samples.make_pptx(5, title="PPTX 제목"))
+    other = env.src / "other.pptx"
+    other.write_bytes(samples.make_pptx(1))
+    assert run(env, "add", str(deck), "--pptx", str(other), "--yes") == 2   # PPTX 덱에는 붙일 PPTX 가 없다
+    monkeypatch.setattr(slides, "OFFICE_MAX", 100)
+    capsys.readouterr()
+    assert run(env, "add", str(deck), "--yes") == 0
+    out = capsys.readouterr().out
+    assert "제목: PPTX 제목" in out and "Microsoft Office 웹 뷰어" in out and "10 MB 가 넘어" in out
+    assert "decks/slides.pptx" in remote_files(env)
+    entry = slides.load_registry(repo(env))["decks"]["decks/slides.pptx"]
+    assert entry["pptx_source"] is None and list(entry["known"]) == ["main"]
+    deck.write_bytes(samples.make_pptx(6))
+    assert slides.sync(repo(env)) == ["slides"]
+    assert remote_bytes(env, "decks/slides.pptx") == deck.read_bytes()
+
+
+def test_pdf_and_pptx_are_scanned(env, capsys):
+    token = fake_token()
+    flate = zlib.compress(f"BT ({token}) Tj ET".encode("ascii"))
+    hidden = b"<< /Length " + str(len(flate)).encode() + b" /Filter /FlateDecode >>\nstream\n" + flate + b"\nendstream"
+    pdf = env.src / "s.pdf"
+    pdf.write_bytes(samples.make_pdf(2, extra=[hidden]))    # 압축한 흐름 안의 토큰도 찾는다
+    assert run(env, "add", str(pdf), "--yes") == 2
+    assert "GitHub 토큰" in capsys.readouterr().out
+    assert not (env.work / "decks/s.pdf").exists()
+
+    plain = env.src / "p.pdf"
+    plain.write_bytes(samples.make_pdf(2, info={"Title": "C:/Users/someone/deck.pptx", "Producer": "x"}))
+    capsys.readouterr()
+    assert run(env, "add", str(plain), "--yes") == 0        # 경로는 알리기만 한다
+    assert "이 PC 의 파일 경로" in capsys.readouterr().out
+    plain.write_bytes(samples.make_pdf(2, info={"Keywords": token, "Producer": "x"}))
+    assert slides.sync(repo(env)) == []                     # 고친 PDF 에 토큰이 생기면 올리지 않는다
+    assert "열쇠·토큰처럼" in capsys.readouterr().out
+
+    pptx = env.src / "t.pptx"
+    pptx.write_bytes(samples.make_pptx(2, text=token))
+    assert run(env, "add", str(pptx), "--yes") == 2
+    html = env.src / "h.html"
+    html.write_text("<title>h</title>", encoding="utf-8")
+    assert run(env, "add", str(html), "--pptx", str(pptx), "--yes") == 2     # 함께 올리는 PPTX 도 본다
+    assert "PPTX GitHub 토큰" in capsys.readouterr().out
+    assert run(env, "add", str(html), "--pptx", str(pptx), "--yes", "--ignore-scan") == 0
+
+
+def test_pptx_hidden_parts_and_damage_are_reported(env, capsys):
+    deck = env.src / "e.pptx"
+    deck.write_bytes(samples.make_pptx(3, embeds=2, svg="<svg><text>C:/Users/someone/pic.png</text></svg>"))
+    assert run(env, "add", str(deck), "--yes") == 0
+    out = capsys.readouterr().out
+    assert "PPTX 안에 붙은 파일 2개" in out and "이 PC 의 파일 경로" in out     # SVG 안의 글도 훑는다
+    # 압축이 깨진 조각이 있어도 멈추지 않고(예전에는 zlib.error 로 죽었다), 점검하지 못한 것을 알린다
+    deck.write_bytes(samples.break_member(samples.make_pptx(3), "ppt/slides/slide2.xml"))
+    assert run(env, "add", str(deck), "--yes") == 0
+    assert "글 조각 1개는 너무 크거나 깨져 점검하지 못했습니다" in capsys.readouterr().out
+    deck.write_bytes(samples.break_member(samples.make_pptx(4), "ppt/slides/slide3.xml"))
+    assert slides.sync(repo(env)) == ["e"]                  # sync·watch 도 멈추지 않는다
+    token = env.src / "t.pptx"
+    token.write_bytes(samples.make_pptx(2, svg="<svg><text>" + fake_token() + "</text></svg>"))
+    assert run(env, "add", str(token), "--yes") == 2
+    assert "GitHub 토큰" in capsys.readouterr().out
+
+
+def test_same_name_decks_do_not_collide(env, capsys):
+    """갤러리는 이름이 같은 파일을 한 덱으로 묶는다(HTML > PDF > PPTX) — 다른 덱 밑에 숨지 않게 막는다."""
+    html = env.src / "talk.html"
+    html.write_text("<title>t</title>", encoding="utf-8")
+    assert run(env, "add", str(html), "--yes") == 0
+    pdf = env.src / "talk.pdf"
+    pdf.write_bytes(samples.make_pdf(2))
+    assert run(env, "add", str(pdf), "--yes") == 2          # 등록한 talk.html 과 이름이 같다
+    web_upload(env, {"decks/w.pdf": "pdf"})
+    pptx = env.src / "w.pptx"
+    pptx.write_bytes(samples.make_pptx(2))
+    assert run(env, "add", str(pptx), "--yes") == 2         # w.pdf 밑에 붙어 보이지 않게 된다
+    # 뒤 차례의 파일은 이 덱에 붙는다 — 웹에서 올린 v.pptx 옆에 v.pdf 를 올리면 PDF 덱에 PPTX 가 붙는다
+    web_upload(env, {"decks/v.pptx": "pptx"})
+    v = env.src / "v.pdf"
+    v.write_bytes(samples.make_pdf(2))
+    capsys.readouterr()
+    assert run(env, "add", str(v), "--yes") == 0
+    assert "이름이 같은 decks/v.pptx 는 이 덱에 붙습니다" in capsys.readouterr().out
+    # 그 PPTX 를 이 PC 의 다른 PPTX 로 덮으려면 --force
+    assert run(env, "add", str(v), "--pptx", str(pptx), "--yes") == 2
+    assert remote_show(env, "decks/v.pptx") == "pptx"
+    assert run(env, "add", str(v), "--pptx", str(pptx), "--yes", "--force") == 0
+    assert remote_bytes(env, "decks/v.pptx") == pptx.read_bytes()
+
+
+def test_remove_takes_the_whole_name_group(env):
+    pdf = env.src / "g.pdf"
+    pdf.write_bytes(samples.make_pdf(2))
+    pptx = env.src / "g.pptx"
+    pptx.write_bytes(samples.make_pptx(2))
+    assert run(env, "add", str(pdf), "--pptx", str(pptx), "--title", "G", "--yes") == 0
+    web_upload(env, {"decks/g.html": "html 판"})           # 웹에서 같은 이름의 HTML 판을 더 올렸다
+    assert run(env, "remove", "decks/g.pptx", "--yes") == 0    # 확장자를 적어도 덱 하나(묶음)째 내린다
+    assert not any(f.startswith("decks/g.") for f in remote_files(env))
+    assert slides.load_registry(repo(env))["decks"] == {}
+    pdf.write_bytes(samples.make_pdf(3))
+    assert slides.sync(repo(env)) == []                     # 되살아나지 않는다
+    web_upload(env, {"decks/web/only.pptx": "p", "decks/web/only.meta.json": "{}"})
+    assert run(env, "remove", "web/only", "--yes") == 0     # 웹에서만 올린 PPTX 덱도 이름으로
+    assert not any(f.startswith("decks/web/") for f in remote_files(env))
 
 
 # ---------------------------------------------------------------- sync
@@ -757,7 +940,7 @@ def test_registry_is_validated(env, capsys):
     assert path.parent == r.gitdir
     data = json.loads(path.read_text(encoding="utf-8"))
     good = data["decks"]["decks/d.html"]
-    digest = good["known"]["html"][0]
+    digest = good["known"]["main"][0]
     data["decks"].update({
         "decks/../../evil.html": dict(good),
         "decks/_x.html": dict(good),
@@ -765,14 +948,17 @@ def test_registry_is_validated(env, capsys):
         "decks/rel.html": {**good, "source": "relative.html"},
         "decks/bad.html": "not a dict",
         "outside/x.html": dict(good),
+        "decks/k.pdf": dict(good),                                  # 원본(HTML)과 저장소 쪽(PDF)의 종류가 다르다
+        "decks/p.pptx": {**good, "source": str(env.src / "p.pptx"), "pptx_source": str(env.src / "q.pptx")},
     })
+    # 예전 등록부는 덱 파일의 지문 기록을 'html' 로 적었다 — 'main' 으로 옮겨 읽는다
     data["decks"]["decks/d.html"] = {**good, "known": {"html": ["zz", 3, digest], "evil": ["x"]}}
     path.write_text(json.dumps(data), encoding="utf-8")
     capsys.readouterr()
     reg = slides.load_registry(r)
     assert list(reg["decks"]) == ["decks/d.html"]
-    assert reg["decks"]["decks/d.html"]["known"] == {"html": [digest]}
-    assert capsys.readouterr().out.count("[경고] 등록부 항목을 무시합니다") == 6
+    assert reg["decks"]["decks/d.html"]["known"] == {"main": [digest]}
+    assert capsys.readouterr().out.count("[경고] 등록부 항목을 무시합니다") == 8
 
 
 def test_preflight_refuses_unsafe_states(env):

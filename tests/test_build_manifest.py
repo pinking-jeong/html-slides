@@ -1,4 +1,6 @@
+import http.client
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import build_manifest as bm
+import samples
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -279,3 +282,223 @@ def test_guide_deck_preview(tmp_path):
     from PIL import Image
     with Image.open(cache / Path(d["thumb"]).name) as img:
         assert img.size == (960, 540)                       # 무대(16:9)만 잘라 찍었다
+
+
+# ---------------------------------------------------------------- PDF·PPTX
+
+def test_same_name_files_make_one_deck(tmp_path, capsys):
+    write(tmp_path / "decks/talk.html", deck(title="HTML 판"))
+    (tmp_path / "decks/talk.pdf").write_bytes(samples.make_pdf(2))
+    (tmp_path / "decks/talk.pptx").write_bytes(samples.make_pptx(2))
+    (tmp_path / "decks/doc.pdf").write_bytes(samples.make_pdf(3))
+    (tmp_path / "decks/Doc.pptx").write_bytes(samples.make_pptx(3))      # 이름의 대소문자는 가리지 않는다
+    (tmp_path / "decks/only.pptx").write_bytes(samples.make_pptx(4, title="PPTX 제목"))
+    write(tmp_path / "decks/two.html", deck(title="둘"))
+    write(tmp_path / "decks/two.htm", deck(title="둘 htm"))
+    by_id = {d["id"]: d for d in bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)["decks"]}
+    assert sorted(by_id) == ["doc", "only", "talk", "two"]
+    talk = by_id["talk"]                                    # HTML > PDF > PPTX — 뒤의 것은 붙는 파일
+    assert (talk["kind"], talk["path"], talk["pdf"], talk["pptx"]) == (
+        "file", "decks/talk.html", "decks/talk.pdf", "decks/talk.pptx")
+    assert talk["pdfSize"] == (tmp_path / "decks/talk.pdf").stat().st_size
+    assert talk["pdfRev"] == bm.sha256_file(tmp_path / "decks/talk.pdf")[:12]
+    assert talk["pptxRev"] == bm.sha256_file(tmp_path / "decks/talk.pptx")[:12]
+    assert talk["rev"] == talk["hash"][:12]
+    doc = by_id["doc"]
+    assert (doc["kind"], doc["path"], doc["pdf"], doc["pptx"]) == ("pdf", "decks/doc.pdf", None, "decks/Doc.pptx")
+    assert doc["slides"] is None and doc["title"] == "doc"     # PDF 의 장 수·제목은 뷰어로 열어 본 뒤에 채운다
+    only = by_id["only"]
+    assert (only["kind"], only["slides"], only["title"], only["pptx"], only["pdf"]) == ("pptx", 4, "PPTX 제목", None, None)
+    assert only["size"] == (tmp_path / "decks/only.pptx").stat().st_size
+    assert by_id["two"]["path"] == "decks/two.html"
+    assert "파일로만 실림): decks/two.htm" in capsys.readouterr().out   # 덱이 되지 못한 파일은 알린다
+
+
+def test_site_carries_viewer_and_pdf_pptx_decks(tmp_path):
+    root = tmp_path / "repo"
+    write(root / "index.html", "<html></html>")
+    write(root / "viewer/pdf.html", "<html>viewer</html>")
+    write(root / "vendor/pdfjs/pdf.min.mjs", "export {}")
+    pdf = samples.make_pdf(2)
+    (root / "decks").mkdir(parents=True)
+    (root / "decks/open.pdf").write_bytes(pdf)
+    (root / "decks/open.pptx").write_bytes(samples.make_pptx(2))
+    (root / "decks/secret.pdf").write_bytes(pdf)
+    (root / "decks/secret.pptx").write_bytes(samples.make_pptx(2))
+    write(root / "decks/secret.meta.json", json.dumps({"hidden": True}))
+    m = bm.build_manifest(root, False, None, False)
+    assert [d["id"] for d in m["decks"]] == ["open"]
+    out = tmp_path / "site"
+    bm.build_site(root, out, m, None)
+    built = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert [p for p in built if p.startswith("decks/")] == ["decks/open.pdf", "decks/open.pptx"]   # 숨긴 덱은 묶음째 빠진다
+    assert "viewer/pdf.html" in built and "vendor/pdfjs/pdf.min.mjs" in built
+    assert (out / "decks/open.pdf").read_bytes() == pdf    # PDF 는 바이트 그대로(noindex 는 HTML 에만)
+
+
+def test_pptx_previews_come_from_the_file(tmp_path, monkeypatch):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    def no_browser(*a, **k):
+        raise AssertionError("PPTX 만 있으면 브라우저를 띄우지 않는다")
+    monkeypatch.setattr(bm, "serve_preview", no_browser)
+    (tmp_path / "decks").mkdir()
+    (tmp_path / "decks/a.pptx").write_bytes(samples.make_pptx(3, thumbnail=samples.jpeg((320, 180))))
+    (tmp_path / "decks/b.pptx").write_bytes(samples.make_pptx(2))
+    (tmp_path / "decks/c.pptx").write_bytes(b"PK not a zip")
+    cache = tmp_path / "cache"
+    by_id = {d["id"]: d for d in bm.build_manifest(tmp_path, thumbs=True, cache=cache, use_git=False)["decks"]}
+    a, b, c = by_id["a"], by_id["b"], by_id["c"]
+    assert a["slides"] == 3 and a["thumb"]
+    with Image.open(cache / Path(a["thumb"]).name) as img:
+        assert img.size == (320, 180)
+    assert (b["thumb"], b["slides"]) == (None, 2)
+    assert (c["thumb"], c["slides"]) == (None, None)        # 깨진 PPTX 도 덱으로 싣는다(받기만)
+    assert json.loads((cache / f"{b['hash'][:16]}.json").read_text(encoding="utf-8"))["noimage"] is True
+    monkeypatch.setattr(bm, "pptx_thumbnail", lambda p: pytest.fail("그림이 없던 PPTX 도 캐시를 써야 한다"))
+    again = {d["id"]: d for d in bm.build_manifest(tmp_path, thumbs=True, cache=cache, use_git=False)["decks"]}
+    assert (again["a"]["thumb"], again["b"]["thumb"], again["a"]["slides"]) == (a["thumb"], None, 3)
+
+
+def test_pdf_preview_uses_the_site_viewer(tmp_path):
+    """사이트의 PDF 뷰어(PDF.js)로 첫 장을 그려 찍고 장 수·제목을 읽는다(Playwright 가 있을 때만)."""
+    pytest.importorskip("playwright.sync_api")
+    pytest.importorskip("PIL")
+    from PIL import Image
+    root = tmp_path / "repo"
+    for name in ("viewer", "vendor"):
+        shutil.copytree(REPO / name, root / name)
+    (root / "decks").mkdir()
+    (root / "decks/p.pdf").write_bytes(samples.make_pdf(5, info={"Title": "Microsoft PowerPoint - 시험 발표.pptx",
+                                                                 "Producer": "test"}))
+    (root / "decks/q.pdf").write_bytes(b"%PDF-1.7\nbroken\n")
+    cache = tmp_path / "cache"
+    by_id = {d["id"]: d for d in bm.build_manifest(root, thumbs=True, cache=cache, use_git=False)["decks"]}
+    p = by_id["p"]
+    assert (p["slides"], p["title"]) == (5, "시험 발표")     # 내보내기 프로그램이 붙인 앞뒤 군더더기는 뗀다
+    with Image.open(cache / Path(p["thumb"]).name) as img:
+        w, h = img.size
+        rgb = img.convert("RGB")
+
+        def teal(box) -> int:                               # 견본 PDF 의 초록(0,113,94) 화소 수
+            part = rgb.crop(box)
+            return sum(n for n, (r, g, b) in part.getcolors(part.width * part.height)
+                       if r < 60 and 80 < g < 150 and 60 < b < 130)
+        text, bar = teal((0, 0, w, int(h * 0.7))), teal((0, int(h * 0.9), w, h))
+    assert w <= 960 and h <= 540 and abs(w / h - 16 / 9) < 0.02
+    assert bar > w * 5 and text > 300                       # 빈 그림이 아니다 — 아래 막대와 위의 글자가 찍혔다
+    assert (by_id["q"]["thumb"], by_id["q"]["slides"]) == (None, None)   # 깨진 PDF 도 싣는다
+
+
+def test_preview_server_serves_only_site_parts(tmp_path):
+    root = tmp_path / "repo"
+    write(root / "index.html", "<html></html>")
+    write(root / "decks/a.html", deck())
+    write(root / "decks/_draft/b.html", deck())
+    write(root / "decks/.c.html", deck())
+    write(root / "viewer/pdf.js", "export {}")
+    write(root / "vendor/pdfjs/pdf.min.mjs", "export {}")
+    write(root / "tools/secret.py", "SECRET")
+    write(root / ".git/config", "[core]")
+    try:
+        (root / "decks/link.py").symlink_to(root / "tools/secret.py")
+        link = True
+    except (OSError, NotImplementedError):
+        link = False
+    httpd, _ = bm.serve_preview(root)
+    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+
+    def get(path: str) -> tuple[int, str | None]:
+        conn.request("GET", path)
+        r = conn.getresponse()
+        r.read()
+        return r.status, r.getheader("Content-Type")
+    try:
+        assert get("/decks/a.html")[0] == 200
+        assert get("/viewer/pdf.js") == (200, "text/javascript")
+        assert get("/vendor/pdfjs/pdf.min.mjs") == (200, "text/javascript")   # Windows 레지스트리와 무관하게
+        for bad in ("/", "/index.html", "/tools/secret.py", "/.git/config", "/decks/", "/decks/_draft/b.html",
+                    "/decks/.c.html", "/decks/../tools/secret.py", "/decks/%2e%2e/tools/secret.py",
+                    "/viewer/..%2f.git/config"):
+            assert get(bad)[0] == 404, bad
+        if link:
+            assert get("/decks/link.py")[0] == 404          # 바로가기를 거쳐 밖의 파일을 내주지 않는다
+    finally:
+        conn.close()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_damaged_pptx_parts_do_not_stop_the_build(tmp_path, monkeypatch):
+    pytest.importorskip("PIL")
+    monkeypatch.setattr(bm, "serve_preview", lambda root: pytest.fail("PPTX 만 있으면 브라우저를 띄우지 않는다"))
+    (tmp_path / "decks").mkdir()
+    thumb = samples.make_pptx(3, thumbnail=samples.jpeg((320, 180)))
+    (tmp_path / "decks/a.pptx").write_bytes(samples.break_member(thumb, "docProps/thumbnail.jpeg"))
+    pres = samples.make_pptx(4, title="B 제목")
+    (tmp_path / "decks/b.pptx").write_bytes(samples.break_member(pres, "ppt/presentation.xml"))
+    cache = tmp_path / "cache"
+    by_id = {d["id"]: d for d in bm.build_manifest(tmp_path, thumbs=True, cache=cache, use_git=False)["decks"]}
+    assert (by_id["a"]["thumb"], by_id["a"]["slides"]) == (None, 3)        # 깨진 그림 — 그림 없이 싣는다
+    assert (by_id["b"]["slides"], by_id["b"]["title"]) == (None, "B 제목")  # 깨진 장 목록 — 제목은 읽는다
+
+
+def test_pathological_markup_does_not_stall_the_build(tmp_path):
+    """짝 없는 태그를 잔뜩 넣은 덱도 금방 끝난다(예전 정규식은 길이의 제곱으로 느려져 빌드가 멈췄다)."""
+    import time
+    import zipfile
+    root = tmp_path / "repo"
+    write(root / "index.html", "<html></html>")
+    write(root / "decks/t.html", "<head " * 10000 + "<title>" * 30000 + "<meta name=description " * 10000
+          + "<div class=x " * 30000)
+    pptx = root / "decks/p.pptx"
+    with zipfile.ZipFile(pptx, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("ppt/presentation.xml", "<p:sldIdLst>" * 50000)
+        z.writestr("docProps/core.xml", "<dc:title a" * 50000)
+    started = time.perf_counter()
+    m = bm.build_manifest(root, False, None, False)
+    bm.build_site(root, tmp_path / "site", m, None)
+    assert time.perf_counter() - started < 10
+    assert sorted(d["id"] for d in m["decks"]) == ["p", "t"]
+
+
+def test_symlinked_top_folders_are_not_followed(tmp_path):
+    outside = tmp_path / "outside"
+    write(outside / "secret.txt", "runner secret")
+    write(outside / "x.html", deck())
+    root = tmp_path / "repo"
+    write(root / "index.html", "<html></html>")
+    try:
+        (root / "vendor").symlink_to(outside, target_is_directory=True)
+        (root / "decks").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 환경에서는 바로가기(symlink)를 만들 수 없습니다")
+    m = bm.build_manifest(root, False, None, False)
+    assert m["count"] == 0
+    out = tmp_path / "site"
+    bm.build_site(root, out, m, None)
+    assert not (out / "vendor").exists() and not (out / "decks").exists()
+
+
+def test_browser_sandbox_falls_back_with_notice(capsys):
+    calls = []
+
+    def launch(**kw):
+        calls.append(kw)
+        if kw.get("chromium_sandbox"):
+            raise RuntimeError("No usable sandbox!\n자세한 설명")
+        return "browser"
+    assert bm.launch_browser(SimpleNamespace(chromium=SimpleNamespace(launch=launch))) == "browser"
+    assert calls == [{"chromium_sandbox": True}, {}]                  # 샌드박스를 먼저 시도한다
+    out = capsys.readouterr().out
+    assert "샌드박스 없이" in out and "No usable sandbox!" in out
+
+
+def test_vendored_pdfjs_matches_its_sums():
+    base = REPO / "vendor/pdfjs"
+    listed = dict(reversed(line.split("  ", 1))
+                  for line in (base / "SHA256SUMS").read_text(encoding="ascii").splitlines())
+    files = {p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()} - {"README.md", "SHA256SUMS"}
+    assert set(listed) == files                             # 목록에 없는 파일이 끼어들지 않았다
+    assert [rel for rel, digest in listed.items() if bm.sha256_file(base / rel) != digest] == []

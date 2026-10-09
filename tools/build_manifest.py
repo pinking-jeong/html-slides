@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """html-slides 사이트 빌더.
 
-decks/ 아래의 HTML 발표자료를 찾아 목록(decks.json)과 첫 장 미리보기 그림을 만들고,
-갤러리와 덱을 한 사이트 폴더로 꾸린다. GitHub Actions 가 push 마다 돌리고,
+decks/ 아래의 발표자료(HTML·PDF·PPTX)를 찾아 목록(decks.json)과 첫 장 미리보기 그림을 만들고,
+갤러리·뷰어와 덱을 한 사이트 폴더로 꾸린다. GitHub Actions 가 push 마다 돌리고,
 로컬에서는 `slides serve` 가 부른다.
 
     python tools/build_manifest.py --out _site [--thumbs] [--cache .thumbcache] [--no-git]
@@ -10,8 +10,11 @@ decks/ 아래의 HTML 발표자료를 찾아 목록(decks.json)과 첫 장 미�
 덱을 찾는 규칙
 - decks/<폴더…>/<이름>.html            → 파일 하나로 된 덱
 - decks/<폴더…>/<이름>/index.html      → 여러 파일로 된 덱(그 폴더 안은 에셋으로 본다)
+- decks/<폴더…>/<이름>.pdf             → PDF 덱(갤러리 안의 PDF.js 뷰어로 재생)
+- decks/<폴더…>/<이름>.pptx            → PPTX 덱(Office 웹 뷰어로 재생, 10 MB 이하)
+- 이름이 같은 파일은 한 덱이다: HTML > PDF > PPTX 차례로 앞의 것이 덱이 되고,
+  뒤의 PDF·PPTX 는 그 덱에 붙는다(받기·다른 뷰어로 보기)
 - <이름>.meta.json(폴더 덱은 meta.json) → 제목·설명·발표일·학회·숨김 등을 덮어쓴다
-- 같은 이름의 .pptx                     → 내려받기 단추가 붙는다
 - decks/folders.json                    → 폴더 키의 표시 이름과 순서
 - _ 나 . 로 시작하는 파일·폴더와 바로가기(symlink)는 덱으로 보지 않고 사이트에도 싣지 않는다
 - hidden: true 인 덱은 목록에서 빼고 사이트에도 싣지 않는다(공개 저장소에는 그대로 있다)
@@ -33,15 +36,22 @@ import shutil
 import subprocess
 import sys
 import threading
+import zipfile
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DECKS_DIR = "decks"
 SITE_FILES = ("index.html",)
-SITE_DIRS = ("assets",)
+SITE_DIRS = ("assets", "viewer", "vendor")
 HTML_SUFFIXES = (".html", ".htm")
+PRIMARY_ORDER = (".html", ".htm", ".pdf", ".pptx")   # 이름이 같은 파일 가운데 덱이 되는 차례
+DECK_SUFFIXES = PRIMARY_ORDER
 META_SUFFIX = ".meta.json"
+PDF_VIEWER = "viewer/pdf.html"
+REV_LEN = 12                           # 뷰어 주소에 붙이는 판 표시(내용 지문 앞부분) — 바뀐 판을 새로 받게
+ZIP_PART_MAX = 20 * 1024 * 1024        # PPTX 안에서 읽을 XML·그림 한 조각의 최대 크기(압축 폭탄 막기)
+PREVIEW_PREFIXES = (f"/{DECKS_DIR}/", "/viewer/", "/vendor/")
 FOLDERS_FILE = "folders.json"
 SITE_MARKER = ".html-slides-site"
 HEAD_BYTES = 262144                    # <title>·<meta> 는 문서 앞부분에서만 찾는다
@@ -53,13 +63,20 @@ THUMB_SELECTORS = (                    # 첫 장만 잘라 찍을 요소(앞에�
 ROBOTS_META = '<meta name="robots" content="noindex, nofollow">'
 BOM = chr(0xFEFF)
 
-TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
-META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.I)
+# 덱은 믿을 수 없는 입력이라 태그 하나를 찾는 정규식은 길이를 묶는다(짝 없는 태그가 많아도 빌드가 멈추지 않게).
+TITLE_OPEN_RE = re.compile(r"<title\b[^<>]{0,1024}>", re.I)
+TITLE_CLOSE_RE = re.compile(r"</title", re.I)
+META_TAG_RE = re.compile(r"<meta\b[^>]{0,4096}>", re.I)
 ATTR_RE = re.compile(r"""([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
-SLIDE_RE = re.compile(r"""<(?:div|section)\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?slide(?:\s[^"']*)?["']""", re.I)
-HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.I)
-HTML_OPEN_RE = re.compile(r"<html\b[^>]*>", re.I)
-DOCTYPE_RE = re.compile(r"<!doctype[^>]*>", re.I)
+BLOCK_TAG_RE = re.compile(r"<(?:div|section)\b([^<>]{0,4096})>", re.I)
+CLASS_RE = re.compile(r"""\bclass\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+HEAD_OPEN_RE = re.compile(r"<head\b[^>]{0,4096}>", re.I)
+HTML_OPEN_RE = re.compile(r"<html\b[^>]{0,4096}>", re.I)
+DOCTYPE_RE = re.compile(r"<!doctype[^>]{0,4096}>", re.I)
+SLD_LIST_RE = re.compile(r"<(?:\w{1,32}:)?sldIdLst\b[^<>]{0,1024}>")
+SLD_LIST_END_RE = re.compile(r"</(?:\w{1,32}:)?sldIdLst\s*>")
+SLD_ID_RE = re.compile(r"<(?:\w{1,32}:)?sldId\b")
+CORE_TITLE_RE = re.compile(r"<(?:\w{1,32}:)?title\b[^<>]{0,1024}>([^<]{0,4000})<")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CACHE_NAME_RE = re.compile(r"^[0-9a-f]{16}\.(?:json|webp)$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -77,6 +94,8 @@ FONTS_JS = """() => Promise.race([
   document.fonts ? document.fonts.ready.then(() => true) : true,
   new Promise(r => setTimeout(() => r(false), 5000)),
 ])"""
+PDF_DONE_JS = "() => ['ready', 'error'].includes(document.documentElement.dataset.state)"
+PDF_TITLE_JUNK = re.compile(r"^(?:Microsoft (?:PowerPoint|Word) - )|\.(?:pptx?|docx?|pdf|key)$", re.I)
 
 
 def log(msg: str) -> None:
@@ -145,8 +164,9 @@ def read_text(path: Path, limit: int | None = None) -> str:
 
 
 def extract_title(text: str) -> str:
-    m = TITLE_RE.search(text)
-    return clean_text(m.group(1)) if m else ""
+    m = TITLE_OPEN_RE.search(text)
+    end = TITLE_CLOSE_RE.search(text, m.end()) if m else None
+    return clean_text(text[m.end():end.start()]) if end else ""
 
 
 def extract_description(text: str) -> str:
@@ -162,7 +182,12 @@ def extract_description(text: str) -> str:
 
 
 def count_slides_heuristic(text: str) -> int | None:
-    n = len(SLIDE_RE.findall(text))
+    """class 에 slide 가 든 div·section 의 수(브라우저로 세지 못할 때 쓰는 어림값)."""
+    n = 0
+    for attrs in BLOCK_TAG_RE.findall(text):
+        m = CLASS_RE.search(attrs)
+        if m and "slide" in (m.group(1) or m.group(2) or "").split():
+            n += 1
     return n or None
 
 
@@ -220,6 +245,9 @@ def discover(root: Path) -> list[dict]:
     found: list[dict] = []
     if not base.is_dir():
         return found
+    if base.is_symlink():                      # os.walk 는 맨 위 폴더의 바로가기는 따라간다
+        log(f"  [경고] {DECKS_DIR}/ 가 바로가기(symlink)라 덱을 찾지 않습니다")
+        return found
     for cur, dirs, files in os.walk(base):
         cur_p = Path(cur)
         dirs[:] = sorted(d for d in dirs if not d.startswith((".", "_")) and not (cur_p / d).is_symlink())
@@ -231,25 +259,91 @@ def discover(root: Path) -> list[dict]:
             found.append({"kind": "dir", "abs": cur_p, "entry": cur_p / "index.html"})
             dirs[:] = []                       # 폴더 덱 안은 에셋 — 더 내려가지 않는다
             continue
+        groups: dict[str, list[Path]] = {}     # 이름(확장자·대소문자 뺀) → 그 이름의 덱 파일들
         for name in sorted(files):
             p = cur_p / name
-            if name.lower().endswith(HTML_SUFFIXES) and not name.startswith((".", "_")) and not p.is_symlink():
-                found.append({"kind": "file", "abs": p, "entry": p})
+            if p.suffix.lower() in DECK_SUFFIXES and not name.startswith((".", "_")) and not p.is_symlink():
+                groups.setdefault(p.stem.lower(), []).append(p)
+        for key in sorted(groups):
+            found.append(group_item(groups[key], root))
     return found
 
 
-def git_dates(root: Path, rel: str) -> tuple[str | None, str | None]:
-    """(처음 들어온 시각, 마지막으로 바뀐 시각) — git 기록이 없으면 (None, None)."""
+def group_item(paths: list[Path], root: Path) -> dict:
+    """이름이 같은 덱 파일 묶음 → 덱 하나. HTML > PDF > PPTX 차례로 앞의 것이 덱, 뒤의 PDF·PPTX 는 붙는 파일."""
+    by_suffix: dict[str, Path] = {}
+    for p in paths:
+        by_suffix.setdefault(p.suffix.lower(), p)
+    primary_suffix = next(s for s in PRIMARY_ORDER if s in by_suffix)
+    primary = by_suffix[primary_suffix]
+    kind = "file" if primary_suffix in HTML_SUFFIXES else primary_suffix[1:]
+    item = {"kind": kind, "abs": primary, "entry": primary, "pdf": None, "pptx": None}
+    if kind == "file":
+        item["pdf"] = by_suffix.get(".pdf")
+    if kind in ("file", "pdf"):
+        item["pptx"] = by_suffix.get(".pptx")
+    used = {primary, item["pdf"], item["pptx"]}
+    extra = [p.relative_to(root).as_posix() for p in paths if p not in used]
+    if extra:
+        log(f"  [경고] 이름이 같은 덱 파일이 여럿이라 {primary.relative_to(root).as_posix()} 만 덱으로 봅니다 "
+            f"(나머지는 사이트에 파일로만 실림): {', '.join(extra)}")
+    return item
+
+
+def git_dates(root: Path, *rels: str) -> tuple[str | None, str | None]:
+    """(처음 들어온 시각, 마지막으로 바뀐 시각) — 덱과 그 덱에 붙은 파일 가운데. git 기록이 없으면 (None, None)."""
     env = {**os.environ, "GIT_LITERAL_PATHSPECS": "1"}     # 파일 이름의 ':' 따위를 pathspec 기호로 읽지 않게
 
     def run(*args: str) -> str:
         r = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(root), *args],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
         return r.stdout.strip() if r.returncode == 0 else ""
-    updated = run("log", "-1", "--format=%cI", "--", rel) or None
-    added = run("log", "--diff-filter=A", "--format=%cI", "--", rel).splitlines()
+    updated = run("log", "-1", "--format=%cI", "--", *rels) or None
+    added = run("log", "--diff-filter=A", "--format=%cI", "--", *rels).splitlines()
     created = added[-1] if added else updated
     return created, updated
+
+
+def read_zip_part(z: zipfile.ZipFile, name: str) -> bytes | None:
+    """PPTX(zip) 안의 한 조각 — 없거나 너무 크거나 압축이 깨졌으면(zlib.error·EOFError 등) None."""
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > ZIP_PART_MAX:
+        return None
+    try:
+        return z.read(info)
+    except Exception:  # noqa: BLE001 — 깨진 조각 하나 때문에 나머지를 못 읽지 않게
+        return None
+
+
+def pptx_info(path: Path) -> dict:
+    """PPTX 의 장 수(presentation.xml 의 sldIdLst)와 제목(core.xml 의 dc:title). 읽지 못하면 빈 값."""
+    out: dict = {"slides": None, "title": ""}
+    try:
+        with zipfile.ZipFile(path) as z:
+            pres = read_zip_part(z, "ppt/presentation.xml")
+            if pres:
+                xml = pres.decode("utf-8", "replace")
+                m = SLD_LIST_RE.search(xml)
+                if m:
+                    end = SLD_LIST_END_RE.search(xml, m.end())
+                    out["slides"] = len(SLD_ID_RE.findall(xml, m.end(), end.start() if end else len(xml))) or None
+            core = read_zip_part(z, "docProps/core.xml")
+            if core:
+                m = CORE_TITLE_RE.search(core.decode("utf-8", "replace"))
+                out["title"] = clean_text(m.group(1)) if m else ""
+    except Exception as e:  # noqa: BLE001 — 깨진 PPTX(압축이 깨진 조각 등)도 덱으로는 싣는다(받기만)
+        log(f"  [경고] {path.name} 을 PPTX 로 읽지 못했습니다: {e}")
+    return out
+
+
+def attachment(root: Path, p: Path | None) -> tuple[str | None, int | None, str | None]:
+    """덱에 붙은 PDF·PPTX → (경로, 크기, 판 표시)."""
+    if not p or not p.is_file():
+        return None, None, None
+    return p.relative_to(root).as_posix(), p.stat().st_size, sha256_file(p)[:REV_LEN]
 
 
 def describe(root: Path, item: dict, folders: dict[str, dict], use_git: bool) -> dict:
@@ -257,51 +351,69 @@ def describe(root: Path, item: dict, folders: dict[str, dict], use_git: bool) ->
     base = root / DECKS_DIR
     abs_p: Path = item["abs"]
     entry: Path = item["entry"]
-    if item["kind"] == "file":
-        name = abs_p.stem
-        meta_p = abs_p.with_name(abs_p.stem + META_SUFFIX)
-        pptx = abs_p.with_suffix(".pptx")
-        pptx = pptx if pptx.is_file() else None
-        digest = sha256_file(abs_p)
-        size = abs_p.stat().st_size
-    else:
+    kind = item["kind"]
+    pdf = item.get("pdf")
+    if kind == "dir":
         name = abs_p.name
         meta_p = abs_p / "meta.json"
         pptxs = sorted(p for p in abs_p.glob("*.pptx") if not p.is_symlink())
         pptx = pptxs[0] if pptxs else None
         digest = sha256_tree(abs_p)
         size = tree_size(abs_p)
+    else:
+        name = abs_p.stem
+        meta_p = abs_p.with_name(abs_p.stem + META_SUFFIX)
+        pptx = item.get("pptx")
+        digest = sha256_file(abs_p)
+        size = abs_p.stat().st_size
     meta = read_meta(meta_p)
     folder = "/".join(abs_p.parent.relative_to(base).parts)
     rel_entry = entry.relative_to(root).as_posix()
     rel_item = abs_p.relative_to(root).as_posix()
     if is_hidden(meta):
-        files = [rel_item] + [p.relative_to(root).as_posix() for p in (meta_p, pptx) if p and p.is_file()]
-        return {"_hidden": True, "kind": item["kind"], "files": files, "dir": rel_item}
-    head = read_text(entry, HEAD_BYTES)
-    created, updated = git_dates(root, rel_item) if use_git else (None, None)
+        files = [rel_item] + [p.relative_to(root).as_posix() for p in (meta_p, pptx, pdf) if p and p.is_file()]
+        return {"_hidden": True, "kind": kind, "files": files, "dir": rel_item}
+    if kind in ("file", "dir"):
+        head = read_text(entry, HEAD_BYTES)
+        found_title, found_desc = extract_title(head), extract_description(head)
+        slides = count_slides_heuristic(read_text(entry))
+    elif kind == "pptx":
+        info = pptx_info(abs_p)
+        found_title, found_desc, slides = info["title"], "", info["slides"]
+    else:                                  # PDF — 장 수·제목은 뷰어로 열어 본 뒤에 채운다(render_previews)
+        found_title, found_desc, slides = "", "", None
+    attached = [p.relative_to(root).as_posix() for p in (pptx, pdf) if p and kind != "dir"]
+    created, updated = git_dates(root, rel_item, *attached) if use_git else (None, None)
     date = meta.get("date")
     if date is not None and not (isinstance(date, str) and DATE_RE.match(date)):
         log(f"  [경고] {rel_item}: date 는 YYYY-MM-DD 꼴이어야 해서 무시합니다 ({date!r})")
         date = None
+    pptx_rel, pptx_size, pptx_rev = attachment(root, pptx)
+    pdf_rel, pdf_size, pdf_rev = attachment(root, pdf)
     return {
         "id": (Path(folder) / name).as_posix() if folder else name,
         "name": name,
-        "kind": item["kind"],
+        "kind": kind,
         "path": rel_entry,
         "dir": Path(rel_entry).parent.as_posix(),
         "folder": folder,
         "folderLabel": folders.get(folder, {}).get("label", folder),
-        "title": text_field(meta, "title") or extract_title(head) or name,
-        "description": text_field(meta, "description") or extract_description(head),
+        "title": text_field(meta, "title") or found_title or name,
+        "description": text_field(meta, "description") or found_desc,
         "date": date,
         "venue": text_field(meta, "venue") or None,
         "authors": text_field(meta, "authors") or None,
         "tags": tags_field(meta),
         "order": meta["order"] if is_number(meta.get("order")) else None,
-        "slides": count_slides_heuristic(read_text(entry)),
+        "slides": slides,
         "size": size,
-        "pptx": pptx.relative_to(root).as_posix() if pptx else None,
+        "rev": digest[:REV_LEN],
+        "pptx": pptx_rel,
+        "pptxSize": pptx_size,
+        "pptxRev": pptx_rev,
+        "pdf": pdf_rel,
+        "pdfSize": pdf_size,
+        "pdfRev": pdf_rev,
         "hash": digest,
         "thumb": None,
         "created": created,
@@ -309,80 +421,181 @@ def describe(root: Path, item: dict, folders: dict[str, dict], use_git: bool) ->
     }
 
 
-class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+class PreviewHandler(http.server.SimpleHTTPRequestHandler):
+    """미리보기를 찍는 동안만 띄우는 서버. 저장소 뿌리에서 decks/·viewer/·vendor/ 만 내준다 —
+    덱의 스크립트가 tools/·.git/ 같은 다른 파일을 읽어 그림에 찍지 못하게. 숨긴 이름·바로가기(symlink)도 내주지 않는다."""
+    extensions_map = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json",
+        ".wasm": "application/wasm", ".pdf": "application/pdf", ".svg": "image/svg+xml",
+    }
+
+    def send_head(self):
+        path = unquote(urlsplit(self.path).path)
+        parts = path.split("/")[1:]
+        asked = os.path.normcase(os.path.normpath(self.translate_path(self.path)))
+        real = os.path.normcase(os.path.realpath(asked))
+        root = os.path.normcase(os.path.realpath(self.directory))
+        if (not path.startswith(PREVIEW_PREFIXES) or any(p.startswith((".", "_")) for p in parts if p)
+                or not real.startswith(root + os.sep) or real != asked):     # 마지막: 바로가기를 거친 경로
+            self.send_error(404)
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(404)                   # 폴더 목록은 내주지 않는다
+        return None
+
     def log_message(self, *args) -> None:
         pass
 
 
-def serve_decks(base: Path):
-    """덱 폴더만 127.0.0.1 에 잠깐 띄운다 — file:// 로 열면 덱의 스크립트가 이 PC·러너의 다른 파일을 읽어
+def serve_preview(root: Path):
+    """저장소를 127.0.0.1 에 잠깐 띄운다 — file:// 로 열면 덱의 스크립트가 이 PC·러너의 다른 파일을 읽어
     그림에 찍을 수 있고, 덱이 같은 폴더의 자료를 fetch 하는 것도 실제 사이트와 같게 동작한다."""
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_QuietHandler, directory=str(base)))
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                            functools.partial(PreviewHandler, directory=str(root)))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/"
 
 
+def clean_pdf_title(title) -> str:
+    return clean_text(PDF_TITLE_JUNK.sub("", title)) if isinstance(title, str) else ""
+
+
+def shoot_html(page, base_url: str, d: dict) -> tuple[dict, bytes]:
+    page.goto(base_url + quote(d["path"], safe="/"), wait_until="load", timeout=60000)
+    page.wait_for_timeout(1500)
+    page.evaluate(FONTS_JS)
+    info = page.evaluate(PROBE_JS)
+    for sel in THUMB_SELECTORS:
+        handle = page.query_selector(sel)
+        box = handle.bounding_box() if handle else None
+        if box and box["width"] >= 200 and box["height"] >= 100:
+            return info, handle.screenshot()
+    return info, page.screenshot()
+
+
+def shoot_pdf(page, base_url: str, d: dict) -> tuple[dict, bytes]:
+    """사이트의 PDF 뷰어로 첫 장을 그려 찍는다 — 갤러리에서 보는 것과 같은 그림."""
+    page.goto(f"{base_url}{PDF_VIEWER}#file={quote(d['path'], safe='')}&probe=1", wait_until="load", timeout=60000)
+    page.wait_for_function(PDF_DONE_JS, timeout=90000)
+    if page.evaluate("() => document.documentElement.dataset.state") != "ready":
+        raise RuntimeError(page.evaluate("() => document.getElementById('msg').innerText") or "PDF 를 열지 못함")
+    probe = page.evaluate("() => window.__probe || {}")
+    canvas = page.query_selector("#sheet canvas")
+    if canvas is None:
+        raise RuntimeError("첫 장을 그리지 못함")
+    return {"slides": probe.get("slides"), "title": clean_pdf_title(probe.get("title"))}, canvas.screenshot()
+
+
+def pptx_thumbnail(path: Path) -> bytes | None:
+    """PowerPoint 가 저장할 때 넣어 두는 첫 장 그림(docProps/thumbnail.*). 없으면 None."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = {n.lower(): n for n in z.namelist()}
+            for cand in ("docprops/thumbnail.jpeg", "docprops/thumbnail.jpg", "docprops/thumbnail.png"):
+                if cand in names:
+                    return read_zip_part(z, names[cand])
+    except Exception:  # noqa: BLE001 — 압축이 깨진 조각(zlib.error·EOFError 등)이면 그림 없이
+        return None
+    return None
+
+
+def save_thumb(data: bytes, img_p: Path) -> None:
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.thumbnail(THUMB_BOX)
+        img.save(img_p, "WEBP", quality=80, method=6)
+
+
 def render_previews(root: Path, decks: list[dict], cache: Path, want_thumbs: bool) -> None:
-    """Playwright 로 장 수를 다시 세고 첫 장 그림을 찍는다. 결과는 내용 지문으로 캐시한다."""
+    """장 수를 다시 세고 첫 장 그림을 만든다(HTML·PDF 는 Playwright, PPTX 는 파일 안의 그림).
+    결과는 내용 지문으로 캐시한다."""
     cache.mkdir(parents=True, exist_ok=True)
-    todo = []
+    todo, todo_pptx = [], []
     for d in decks:
         key = d["hash"][:16]
         info_p, img_p = cache / f"{key}.json", cache / f"{key}.webp"
-        if info_p.is_file() and (img_p.is_file() or not want_thumbs):
-            apply_probe(d, load_json(info_p), img_p)
+        info = load_json(info_p) if info_p.is_file() else None
+        if info is not None and (img_p.is_file() or not want_thumbs or info.get("noimage") is True):
+            apply_probe(d, info, img_p)
+        elif d["kind"] == "pptx":
+            todo_pptx.append(d)
         else:
             todo.append(d)
-    if not todo or not want_thumbs:     # 그림을 찍지 않으면 브라우저도 띄우지 않는다(장 수는 HTML 에서 센 값)
+    if not want_thumbs:                 # 그림을 찍지 않으면 브라우저도 띄우지 않는다(장 수는 HTML 에서 센 값)
+        return
+    try:
+        from PIL import Image  # noqa: F401 — 있는지만 본다
+    except ImportError:
+        log("  [안내] pillow 가 없어 미리보기 그림을 건너뜁니다(pip install playwright pillow)")
+        return
+    for d in todo_pptx:
+        key = d["hash"][:16]
+        info_p, img_p = cache / f"{key}.json", cache / f"{key}.webp"
+        info = {"slides": d["slides"], "title": "", "noimage": True}
+        try:
+            data = pptx_thumbnail(root / d["path"])
+            info["noimage"] = data is None
+            if data:
+                save_thumb(data, img_p)
+        except Exception as e:  # noqa: BLE001 — 그림이 깨져도 덱은 싣는다
+            log(f"  [경고] {d['id']} 의 PPTX 첫 장 그림을 읽지 못했습니다: {e}")
+            info["noimage"] = True
+        info_p.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        apply_probe(d, info, img_p)
+        log(f"  그림 {d['id']}: {d['slides'] or '?'}장" + (" (PPTX 에 첫 장 그림 없음)" if info["noimage"] else ""))
+    if not todo:
         return
     try:
         from playwright.sync_api import sync_playwright
-        from PIL import Image
     except ImportError:
-        log("  [안내] playwright·pillow 가 없어 미리보기 그림을 건너뜁니다(pip install playwright pillow)")
+        log("  [안내] playwright 가 없어 HTML·PDF 미리보기 그림을 건너뜁니다(pip install playwright pillow)")
         return
-    httpd, base_url = serve_decks(root / DECKS_DIR)
+    httpd, base_url = serve_preview(root)
     try:
         with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch()
-            except Exception as e:  # noqa: BLE001 — 브라우저가 없어도 사이트는 만든다
-                log(f"  [안내] 브라우저를 띄우지 못해 미리보기 그림을 건너뜁니다: {e}")
+            browser = launch_browser(p)
+            if browser is None:
                 return
-            ctx = browser.new_context(viewport={"width": 1600, "height": 900}, device_scale_factor=1)
             for d in todo:
                 key = d["hash"][:16]
                 info_p, img_p = cache / f"{key}.json", cache / f"{key}.webp"
-                page = ctx.new_page()
+                # 덱마다 새 문맥 — 한 덱이 남긴 저장소·서비스 워커가 다음 덱의 그림·제목을 바꾸지 못하게
+                ctx = browser.new_context(viewport={"width": 1600, "height": 900}, device_scale_factor=1,
+                                          service_workers="block")
                 try:
-                    rel = d["path"][len(DECKS_DIR) + 1:]
-                    page.goto(base_url + quote(rel, safe="/"), wait_until="load", timeout=60000)
-                    page.wait_for_timeout(1500)
-                    page.evaluate(FONTS_JS)
-                    info = page.evaluate(PROBE_JS)
-                    shot = None
-                    for sel in THUMB_SELECTORS:
-                        handle = page.query_selector(sel)
-                        box = handle.bounding_box() if handle else None
-                        if box and box["width"] >= 200 and box["height"] >= 100:
-                            shot = handle.screenshot()
-                            break
-                    if shot is None:
-                        shot = page.screenshot()
-                    img = Image.open(io.BytesIO(shot)).convert("RGB")
-                    img.thumbnail(THUMB_BOX)
-                    img.save(img_p, "WEBP", quality=80, method=6)
+                    info, shot = (shoot_pdf if d["kind"] == "pdf" else shoot_html)(ctx.new_page(), base_url, d)
+                    save_thumb(shot, img_p)
                     info_p.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
                     apply_probe(d, info, img_p)
                     log(f"  그림 {d['id']}: {info.get('slides') or '?'}장")
                 except Exception as e:  # noqa: BLE001 — 한 덱이 깨져도 나머지는 계속
                     log(f"  [경고] {d['id']} 미리보기 실패: {e}")
                 finally:
-                    page.close()
+                    ctx.close()
             browser.close()
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def launch_browser(p):
+    """덱의 스크립트·PDF 는 믿을 수 없는 입력이라 크로미엄 샌드박스를 켜고 띄운다. 켤 수 없는 곳(사용자 네임스페이스를
+    막아 둔 리눅스 러너 등)에서만 샌드박스 없이 띄우고 알린다. 브라우저가 없으면 None."""
+    try:
+        return p.chromium.launch(chromium_sandbox=True)
+    except Exception as first:  # noqa: BLE001
+        try:
+            browser = p.chromium.launch()
+        except Exception as e:  # noqa: BLE001 — 브라우저가 없어도 사이트는 만든다
+            log(f"  [안내] 브라우저를 띄우지 못해 미리보기 그림을 건너뜁니다: {e}")
+            return None
+        log("  [안내] 크로미엄 샌드박스를 켜지 못해 샌드박스 없이 미리보기를 찍습니다: "
+            + (str(first).strip().splitlines() or ["?"])[0][:200])
+        return browser
 
 
 def prune_cache(cache: Path, decks: list[dict]) -> None:
@@ -499,7 +712,9 @@ def build_site(root: Path, out: Path, manifest: dict, cache: Path | None) -> Non
         if (root / name).is_file() and not (root / name).is_symlink():
             shutil.copy2(root / name, out / name)
     for name in SITE_DIRS:
-        if (root / name).is_dir():
+        if (root / name).is_symlink():         # 맨 위 폴더가 바로가기면 그 너머(러너의 다른 파일 등)를 싣지 않는다
+            log(f"  [경고] {name}/ 가 바로가기(symlink)라 사이트에 싣지 않습니다")
+        elif (root / name).is_dir():
             for src in walk_files(root / name):
                 dst = out / src.relative_to(root)
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -507,7 +722,7 @@ def build_site(root: Path, out: Path, manifest: dict, cache: Path | None) -> Non
     hidden_files = set(manifest.get("_hidden_files", []))
     hidden_dirs = tuple(d + "/" for d in manifest.get("_hidden_dirs", []))
     base = root / DECKS_DIR
-    for cur, dirs, files in os.walk(base):
+    for cur, dirs, files in ([] if base.is_symlink() else os.walk(base)):
         cur_p = Path(cur)
         dirs[:] = sorted(d for d in dirs if not d.startswith((".", "_")) and not (cur_p / d).is_symlink())
         for name in sorted(files):
@@ -517,7 +732,7 @@ def build_site(root: Path, out: Path, manifest: dict, cache: Path | None) -> Non
                     or rel == f"{DECKS_DIR}/{FOLDERS_FILE}" or rel in hidden_files or rel.startswith(hidden_dirs)
                     or (name == "meta.json" and (cur_p / "index.html").is_file())):
                 continue
-            if name.lower().endswith(HTML_SUFFIXES + (".pptx",)):
+            if name.lower().endswith(DECK_SUFFIXES):
                 # 폴더 덱 안에 묻혀 목록에는 없는 덱도 제 정보 파일의 숨김(또는 깨진 정보 파일)을 지킨다
                 side = cur_p / (Path(name).stem + META_SUFFIX)
                 if side.is_file() and is_hidden(read_meta(side, quiet=True)):

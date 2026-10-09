@@ -1,7 +1,7 @@
 # html-slides
 
-이 PC 에서 만든 **HTML 발표자료**를 이 저장소에 모아 두고, 갤러리에서 미리 보고 바로 발표하는 곳입니다.
-원본 HTML 을 고치면 저장소와 갤러리가 따라 바뀝니다.
+이 PC 에서 만든 **HTML·PDF·PPTX 발표자료**를 이 저장소에 모아 두고, 갤러리에서 미리 보고 바로 발표하는 곳입니다.
+원본을 고치면 저장소와 갤러리가 따라 바뀝니다.
 
 - 갤러리: <https://pinking-jeong.github.io/html-slides/>
 - **공개 저장소입니다.** 올린 덱은 누구나 볼 수 있고(갤러리 목록과 저장소에 다 보임), 올릴 때마다 공개 기록으로
@@ -10,13 +10,13 @@
 ## 어떻게 돌아가나
 
 ```
-원본 HTML (이 PC, 저장소 폴더 밖 어디든)
+원본 HTML·PDF·PPTX (이 PC, 저장소 폴더 밖 어디든)
    │  slides add      ← 처음 한 번
    │  slides watch    ← 켜 두면 저장할 때마다 / slides sync ← 한 번만
    ▼
-decks/<폴더>/<이름>.html  ──push──▶  GitHub  ──Actions──▶  갤러리(GitHub Pages)
-                                      ▲                    목록·첫 장 그림을 새로 만든다(1~2분)
-                     웹 업로드(‘올리기’) ┘
+decks/<폴더>/<이름>.<html|pdf|pptx>  ──push──▶  GitHub  ──Actions──▶  갤러리(GitHub Pages)
+                                                 ▲                    목록·첫 장 그림을 새로 만든다(1~2분)
+                                웹 업로드(‘올리기’) ┘
 ```
 
 - 원본은 **저장소 폴더 밖**에 둡니다. 저장소의 `decks/` 는 slides 가 원본을 비춰 두는 거울이라 손으로 고치지 않습니다.
@@ -52,6 +52,8 @@ decks/<폴더>/<이름>.html  ──push──▶  GitHub  ──Actions──�
 | 하려는 일 | 명령 |
 |---|---|
 | 덱을 등록하고 올린다 | `slides add "발표.html" --name my-talk --folder conf --title "발표 제목"` |
+| PDF 로 올리고 PPTX 를 붙인다 | `slides add "발표.pdf" --pptx "발표.pptx"` |
+| PPTX 만 올린다 | `slides add "발표.pptx"` (10 MB 이하만 갤러리에서 재생) |
 | 원본을 고치면 자동으로 올린다 | `slides watch` (켜 둔 동안 저장할 때마다, 8초 더 바뀌지 않으면 올림) |
 | 바뀐 것만 한 번 올린다 | `slides sync` |
 | 등록한 덱과 상태를 본다 | `slides list` |
@@ -61,16 +63,40 @@ decks/<폴더>/<이름>.html  ──push──▶  GitHub  ──Actions──�
 | 갤러리 주소 | `slides url` |
 
 `slides add` 에 함께 붙일 수 있는 것: `--date 2026-10-29`(발표일) · `--venue "학회 이름"` · `--authors "발표자"` ·
-`--desc "한두 줄 설명"` · `--tags "핵안보,KG"` · `--pptx "발표.pptx"`(내려받기 단추) · `--folder-label "학회 발표"`(폴더 표시 이름).
+`--desc "한두 줄 설명"` · `--tags "핵안보,KG"` · `--pptx "발표.pptx"`(HTML·PDF 덱에 함께 올릴 PPTX — 받기·PowerPoint 로 보기) ·
+`--folder-label "학회 발표"`(폴더 표시 이름).
 같은 덱을 다시 `add` 하면 원본을 다시 복사하고 적은 정보만 고칩니다. 올릴 때마다 공개 저장소라는 확인을 묻습니다(`--yes` 로 건너뜀).
+
+### PDF·PPTX 덱
+
+- **PDF** 는 갤러리 안의 PDF 뷰어로 바로 재생됩니다. 저장소에 함께 둔 PDF.js 로 그려 바깥 서비스로 보내지 않고,
+  글꼴·배치가 원본 그대로라 PowerPoint 덱도 **PDF 로 내보내 올리는 것**이 가장 확실합니다.
+  ←/→·PgUp/PgDn·Space 로 넘기고, 숫자 + Enter 로 그 장, Home/End 로 처음·끝, F 로 전체 화면.
+- **PPTX** 는 Microsoft Office 웹 뷰어로 재생됩니다. 파일 주소가 Microsoft 로 전달되고 Microsoft 서버가 공개된 파일을
+  가져가 그립니다(없는 글꼴은 바뀌고, 애니메이션 일부가 빠질 수 있음). 이 뷰어는 10 MB 가 넘는 파일을 열지 않아
+  ([Microsoft Q&A 답변, 2017](https://learn.microsoft.com/en-us/answers/a/10335546) — 공식 문서의 값이 아니라 바뀔 수 있음)
+  갤러리도 10 MB(10,000,000 바이트)가 넘는 PPTX 는 재생하지 않고 받기만 둡니다. `slides serve` 의 미리 보기에서도
+  재생하지 않습니다(Microsoft 가 이 PC 의 파일을 가져갈 수 없음).
+- **PDF + PPTX**: `slides add "발표.pdf" --pptx "발표.pptx"` — PDF 로 재생하고, PPTX 는 카드의 ⋯ 메뉴에
+  ‘PowerPoint 로 보기’·‘PPTX 받기’로 붙습니다.
+- 이름(확장자를 뺀, 대소문자 무시)이 같은 파일은 한 덱입니다. HTML > PDF > PPTX 차례로 앞의 것이 덱이 되고 뒤의 것은
+  그 덱에 붙습니다. `slides add` 는 새 덱이 이름이 같은 다른 덱 밑에 가려지게 되면 멈추고, `slides remove` 는 이름이 같은
+  묶음(HTML·PDF·PPTX·정보 파일)을 함께 내립니다.
+- 첫 장 그림: PDF 는 갤러리의 뷰어로 그려 찍고, PPTX 는 파일 안에 저장된 미리 보기 그림(`docProps/thumbnail`)을 씁니다
+  — 만든 프로그램에 따라 그 그림이 없으면 그림 없이 보입니다.
 
 ### 올리기 전 점검
 
 `slides add` 는 올리기 전에 원본을 훑어 보여 줍니다.
 
-- **멈추는 것**: API 키·토큰·개인 키처럼 보이는 글. 잘못 찾은 것이면 `--ignore-scan` 으로 올립니다.
+- **멈추는 것**: API 키·토큰·개인 키처럼 보이는 글(PDF·PPTX 는 안에 든 글까지, 함께 올리는 PPTX 도).
+  잘못 찾은 것이면 `--ignore-scan` 으로 올립니다.
   `watch`·`sync` 도 고친 원본에 이런 글이 새로 생기면 그 덱은 올리지 않고 알립니다.
 - **알려 주는 것**: 이 PC 의 파일 경로(`C:\Users\…`)·`file://`·`localhost` 주소·사용자 이름, PPTX 의 만든 이·발표자 노트·메모·바깥 링크.
+- **PDF**: 문서 정보(만든 이·주제·키워드)·붙은 파일·스크립트·바깥 링크·암호를 알려 줍니다. 문서 정보와 압축을 푼 흐름까지
+  훑지만, **본문 글자는 글꼴에 따라 코드로 들어 있어 다 훑지 못합니다** — 공개해도 되는지 직접 확인하세요.
+- **PPTX**: 장·발표자 노트·메모·문서 정보의 XML 과 SVG 그림을 모두 훑고, 만든 이·마지막으로 고친 이·노트 수·
+  붙은 파일(차트·표의 원본 엑셀 등 — 그 안은 훑지 않음)·바깥 링크를 알려 줍니다. 깨졌거나 너무 커서 읽지 못한 조각도 알립니다.
 - 크기: 50 MB 가 넘으면 알리고, 95 MB 가 넘으면 올리지 않습니다(GitHub 은 100 MB 넘는 파일을 받지 않음).
 
 ### 웹에서 올리기
@@ -84,7 +110,7 @@ decks/<폴더>/<이름>.html  ──push──▶  GitHub  ──Actions──�
 
 ## 덱 파일 규칙
 
-- `decks/<폴더…>/<이름>.html` — 파일 하나로 된 덱. 폴더는 갤러리의 폴더 단추가 됩니다.
+- `decks/<폴더…>/<이름>.html`(`.pdf`·`.pptx`) — 파일 하나로 된 덱. 폴더는 갤러리의 폴더 단추가 됩니다.
 - `decks/<폴더…>/<이름>/index.html` — 그림·스크립트가 따로 있는 덱(폴더째). 그 폴더 안은 덱의 에셋으로 봅니다.
   그래서 덱 이름을 `index` 로 하면 slides 가 원본 폴더 이름으로 바꿉니다.
 - `<이름>.meta.json`(폴더 덱은 그 안의 `meta.json`) — 갤러리에 보일 정보. 모두 선택입니다.
@@ -106,16 +132,19 @@ decks/<폴더>/<이름>.html  ──push──▶  GitHub  ──Actions──�
   그대로 있어 누구나 볼 수 있습니다**(감추기가 아니라 목록에서 빼기). 등록한 덱의 정보 파일을 손으로 고치면
   다음 `sync`·`watch` 가 함께 올립니다. JSON 으로 읽히지 않는 정보 파일은 slides 가 올리지 않고, 사이트도 그 덱을
   뺍니다(숨기려던 덱이 새지 않게 — 고치면 다시 실립니다).
-- 같은 이름의 `.pptx` 가 있으면 카드에 PPTX 내려받기가 붙습니다. PPTX 의 만든 이·발표자 노트도 함께 공개됩니다.
+- 이름이 같은 `.pdf`·`.pptx` 는 그 덱에 붙습니다(HTML 덱에는 PDF·PPTX, PDF 덱에는 PPTX — 위 ‘PDF·PPTX 덱’).
+  PDF 의 문서 정보, PPTX 의 만든 이·발표자 노트도 함께 공개됩니다.
 - `decks/folders.json` — 폴더의 표시 이름과 순서: `{"conf": {"label": "학회 발표", "order": 1}}`.
 - `_` 나 `.` 로 시작하는 파일·폴더는 덱으로 보지 않고 사이트에도 싣지 않습니다. 커밋했다면 저장소에서는 여전히 보입니다.
-- 장 수와 첫 장 그림은 덱을 실제 브라우저로 열어 셉니다. `.stage .slide.on`·reveal.js·`.slide` 구조를 알아보고,
-  모르는 구조면 첫 화면 전체를 찍습니다.
+- HTML 덱의 장 수와 첫 장 그림은 덱을 실제 브라우저로 열어 셉니다. `.stage .slide.on`·reveal.js·`.slide` 구조를 알아보고,
+  모르는 구조면 첫 화면 전체를 찍습니다. PDF·PPTX 는 위 ‘PDF·PPTX 덱’.
 
 ## 저장소 구성
 
 ```
 index.html, assets/          갤러리 화면
+viewer/                      PDF 뷰어(pdf.html)·PPTX 뷰어(pptx.html) — 갤러리의 ‘발표’와 미리보기 창이 연다
+vendor/pdfjs/                PDF.js 6.4.299(Apache-2.0) — 받은 곳·무결성·바꾸는 법은 그 안의 README.md
 decks/                       발표자료 (decks/guide/ 는 사용 안내 견본 — 필요 없으면 slides remove guide/html-slides-guide)
 tools/build_manifest.py      목록(decks.json)·첫 장 그림·사이트를 만든다 (Actions 와 slides serve 가 부름)
 tools/slides.py              이 PC 의 도구 (slides.ps1·slides.cmd 가 부름)
@@ -140,7 +169,10 @@ tests/                       pytest (python -m pytest tests)
 - `watch` 는 저장할 때마다(올린 뒤 30초 간격으로 묶어) 공개 커밋을 만듭니다.
 - 갤러리 사이트의 덱 사본에는 검색 제외 표시가 붙지만, 저장소의 원본 파일은 바이트 그대로 둡니다
   (`.gitattributes` 의 `decks/** -text` — 줄바꿈도 바꾸지 않음). 저장소 화면·원본 파일은 검색될 수 있습니다.
-- 갤러리의 미리보기 창은 덱을 격리해(sandbox) 엽니다. 덱이 브라우저 저장소를 쓰면 미리보기에서는 동작하지 않을 수
-  있습니다 — ‘발표’로 열면 됩니다.
+  **PDF·PPTX 파일에는 이 표시를 붙일 수 없어** 사이트의 파일도 검색될 수 있습니다.
+- 첫 장 그림은 덱마다 새 브라우저 문맥에서, 크로미엄 샌드박스를 켜고 찍습니다(켤 수 없는 리눅스 러너에서는 끄고 찍는다고
+  빌드 기록에 남깁니다). 저장소의 `decks/`·`viewer/`·`vendor/` 만 내주는 임시 서버로 엽니다.
+- 갤러리의 미리보기 창은 HTML 덱을 격리해(sandbox) 엽니다. 덱이 브라우저 저장소를 쓰면 미리보기에서는 동작하지 않을 수
+  있습니다 — ‘발표’로 열면 됩니다. PDF·PPTX 는 저장소의 뷰어(`viewer/`)로 엽니다.
 - 이 저장소에 push 할 수 있으면 `slides` 가 다음에 받아 쓰는 `tools/` 코드도 바꿀 수 있습니다. GitHub 계정에
   2단계 인증을 켜 두세요.

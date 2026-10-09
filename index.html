@@ -37,7 +37,7 @@
 <main class="wrap">
   <section class="intro">
     <h1 id="siteTitle">HTML 발표자료</h1>
-    <p class="sub" id="siteSub">로컬에서 만든 HTML 발표자료를 모아 보고, 바로 발표합니다.</p>
+    <p class="sub" id="siteSub">로컬에서 만든 HTML·PDF·PPTX 발표자료를 모아 보고, 바로 발표합니다.</p>
     <p class="stats" id="stats" aria-live="polite">목록을 읽는 중…</p>
   </section>
 
@@ -70,7 +70,7 @@
 
 <footer class="foot">
   <div class="wrap foot-in">
-    <p>공개 저장소입니다 — 여기 올린 덱은 누구나 볼 수 있고 저장소에도 그대로 있습니다. 검색 제외(noindex)를 요청해 두었지만 보장되지는 않습니다.</p>
+    <p>공개 저장소입니다 — 여기 올린 덱은 누구나 볼 수 있고 저장소에도 그대로 있습니다. 검색 제외(noindex)를 요청해 두었지만 보장되지는 않습니다(PDF·PPTX 파일에는 붙일 수 없음).</p>
     <p class="gen" id="gen"></p>
   </div>
 </footer>
@@ -83,10 +83,8 @@
       <button class="btn ghost" type="button" id="viewerClose">닫기</button>
     </div>
   </div>
-  <div class="viewer-stage">
-    <iframe id="viewerFrame" title="발표자료 미리보기" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="fullscreen; clipboard-write" allowfullscreen></iframe>
-  </div>
-  <p class="viewer-hint">화면을 한 번 누른 뒤 ← → 키로 장을 넘깁니다 · 바깥을 누르거나 ‘닫기’로 닫습니다</p>
+  <div class="viewer-stage" id="viewerStage"></div>
+  <p class="viewer-hint" id="viewerHint">화면을 한 번 누른 뒤 ← → 키로 장을 넘깁니다 · 바깥을 누르거나 ‘닫기’로 닫습니다</p>
 </dialog>
 
 <dialog class="help" id="help" aria-labelledby="helpTitle">
@@ -100,6 +98,15 @@
       <p>저장소 폴더에서 원본 HTML 을 한 번 등록하면 저장소에 올라가고, 1~2분 뒤 이 화면에 나타납니다. 원본은 저장소 폴더 밖 어디에 두어도 됩니다(PowerShell 에서는 <code>.\slides</code>).</p>
       <pre><code>slides add "발표.html" --name my-talk --folder conf --title "발표 제목"</code></pre>
       <p>발표일·학회·PPTX 도 함께 붙일 수 있습니다: <code>--date 2026-10-29 --venue "학회 이름" --pptx "발표.pptx"</code></p>
+    </section>
+    <section>
+      <h3><span class="step">+</span>PDF·PPTX 도 올릴 수 있습니다</h3>
+      <p>같은 명령에 PDF 나 PPTX 를 주면 됩니다. <b>PDF</b> 는 이 갤러리 안에서 바로 재생되고(외부 서비스 없음),
+        <b>PPTX</b> 는 Microsoft Office 웹 뷰어로 재생됩니다 — 파일 주소가 Microsoft 로 전달되고, <b>10 MB 가 넘으면</b> 받기만 됩니다.</p>
+      <pre><code>slides add "발표.pdf" --title "발표 제목"
+slides add "발표.pptx" --title "발표 제목"</code></pre>
+      <p>10 MB 가 넘는 PPTX 는 PowerPoint 에서 PDF 로 내보내 함께 올리세요 — PDF 로 재생하고 PPTX 는 받기로 붙습니다:
+        <code>slides add "발표.pdf" --pptx "발표.pptx"</code></p>
     </section>
     <section>
       <h3><span class="step">2</span>고치면 바로 반영</h3>
@@ -117,8 +124,8 @@
       <ul>
         <li>공개 저장소라 올린 덱은 누구나 볼 수 있습니다(갤러리 목록과 저장소에 다 보임).</li>
         <li>올린 것은 지워지지 않는다고 보세요 — 내린 덱과 이전 판도 기록에 남습니다. 민감한 내용은 올리지 마세요.</li>
-        <li>PPTX 를 함께 올리면 만든 이·발표자 노트도 함께 공개됩니다.</li>
-        <li>검색 제외(noindex)는 요청일 뿐 보장되지 않습니다.</li>
+        <li>PPTX 를 올리면 만든 이·발표자 노트도, PDF 를 올리면 만든 이·제목 같은 문서 정보도 함께 공개됩니다.</li>
+        <li>검색 제외(noindex)는 요청일 뿐 보장되지 않고, PDF·PPTX 파일에는 붙일 수도 없습니다.</li>
         <li>다른 사람이 보낸 제안(pull request)의 덱은 합치지 마세요.</li>
         <li>내리기: <code>slides remove my-talk</code></li>
       </ul>
