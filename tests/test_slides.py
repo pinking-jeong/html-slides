@@ -200,6 +200,16 @@ def test_add_commits_only_deck_files(env):
     assert (clone / "decks/conf/my-talk.html").read_bytes() == deck.read_bytes()
 
 
+def test_add_of_same_content_does_not_claim_an_upload(env, capsys):
+    deck = env.src / "d.html"
+    deck.write_text("v1", encoding="utf-8")
+    assert run(env, "add", str(deck), "--yes") == 0
+    assert "에 올렸습니다" in capsys.readouterr().out
+    assert run(env, "add", str(deck), "--yes") == 0         # 같은 내용을 다시 등록
+    out = capsys.readouterr().out
+    assert "커밋할 것이 없습니다" in out and "올릴 것이 없습니다" in out and "에 올렸습니다" not in out
+
+
 def test_add_refuses_sources_inside_repo(env):
     for p in (env.work / "decks" / "inplace.html", env.work / "draft.html"):
         p.write_text("x", encoding="utf-8")

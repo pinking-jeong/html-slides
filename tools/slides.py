@@ -1037,9 +1037,11 @@ def cmd_add(repo: Repo, args) -> int:
         committed = repo.commit_paths(changed, f"docs: 덱 {verb} — {name}")
         print(f"커밋: 덱 {verb} — {name}" if committed else "저장소와 내용이 같아 커밋할 것이 없습니다.")
         if push and repo.has_remote():
+            pending = committed or repo.unpushed()
             taken += repo.publish(regen_paths(reg))
             report_taken(taken)
-            print(f"{repo.remote}/{repo.target_branch} 에 올렸습니다")
+            print(f"{repo.remote}/{repo.target_branch} 에 올렸습니다" if pending
+                  else f"{repo.remote}/{repo.target_branch} 와 같아 올릴 것이 없습니다")
             print_urls(repo, rel)
         elif push:
             print(f"원격 저장소({repo.remote})가 없어 이 PC 에만 커밋했습니다.")
