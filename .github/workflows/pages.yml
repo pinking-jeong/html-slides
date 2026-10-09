@@ -17,7 +17,8 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 버전을 고정한다 — ubuntu-latest 가 바뀌면 apt 글꼴·Playwright 의 --with-deps 가 새 OS 를 몰라 깨질 수 있다.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read       # 덱을 렌더링하는 이 단계에는 배포 권한을 주지 않는다
@@ -59,7 +60,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
