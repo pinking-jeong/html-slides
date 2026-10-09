@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>html-slides 사용 안내</title>
+<meta name="description" content="로컬에서 만든 HTML 발표자료를 이 갤러리에 올리고, 고치면 바로 반영하는 방법을 다섯 장으로 정리했습니다.">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.css" integrity="sha384-uR1wgObmx89ZQ4VVXHdzjbDJZ1PvBK01K+E3GebmaBKdZ87qRJvBWPoPbzWeEd5T" crossorigin="anonymous">
+<style>
+  :root {
+    --room: #0E1A20; --paper: #FFFFFF; --ink: #15212A; --ink2: #3F4E5A; --muted: #66737E;
+    --line: #DCE3E7; --accent: #00715E; --accent2: #0A8F78; --soft: #E2F0EC; --code: #F1F5F6;
+    --warn: #8A5A00; --warn-soft: #FFF4DC;
+    --sans: "Pretendard Variable", Pretendard, "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
+    --mono: "Cascadia Mono", Consolas, "D2Coding", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--room); overflow: hidden; }
+  body { font-family: var(--sans); color: var(--ink); word-break: keep-all; -webkit-font-smoothing: antialiased; }
+
+  /* 1600×900 무대를 화면에 맞춰 줄인다 */
+  .stage { position: absolute; left: 50%; top: 50%; width: 1600px; height: 900px; transform: translate(-50%, -50%); }
+  .slide {
+    position: absolute; inset: 0; display: none; flex-direction: column;
+    background: var(--paper); padding: 92px 120px 76px; overflow: hidden;
+  }
+  .slide.on { display: flex; }
+  .foot { margin-top: auto; display: flex; justify-content: space-between; color: var(--muted); font-size: 21px; padding-top: 24px; }
+  .foot b { color: var(--accent); font-weight: 650; }
+
+  h1, h2 { margin: 0; letter-spacing: -0.02em; }
+  h1 { font-size: 78px; line-height: 1.16; font-weight: 800; }
+  h2 { font-size: 54px; line-height: 1.2; font-weight: 750; }
+  p { margin: 0; }
+  code, pre { font-family: var(--mono); }
+
+  /* 1장 — 표지 */
+  .cover { flex-direction: row; gap: 72px; align-items: center; padding-bottom: 92px; }
+  .cover .text { flex: 1 1 0; display: flex; flex-direction: column; gap: 34px; }
+  .kicker { font-size: 26px; font-weight: 700; color: var(--accent); letter-spacing: 0.02em; }
+  .lead { font-size: 31px; line-height: 1.55; color: var(--ink2); max-width: 30em; }
+  .keys { display: flex; gap: 14px; flex-wrap: wrap; font-size: 22px; color: var(--muted); align-items: center; }
+  .keys kbd { font-family: var(--sans); font-size: 20px; font-weight: 700; color: var(--ink2); background: var(--code);
+    border: 1px solid var(--line); border-bottom-width: 3px; border-radius: 8px; padding: 3px 11px; }
+  .mock { position: relative; flex: 0 0 520px; height: 520px; }
+  .m { position: absolute; border-radius: 26px; }
+  .m3 { left: 150px; top: 0; width: 370px; height: 250px; background: var(--soft); border: 3px solid #A3CFC5; }
+  .m2 { left: 75px; top: 60px; width: 370px; height: 250px; background: #CBE6DF; border: 3px solid #7FBFB1; }
+  .m1 { left: 0; top: 120px; width: 400px; padding: 18px; background: var(--paper); border: 3px solid var(--accent);
+    box-shadow: 0 24px 60px rgba(14, 26, 32, 0.18); display: flex; flex-direction: column; gap: 14px; }
+  .m-thumb { height: 190px; border-radius: 14px; background: linear-gradient(135deg, var(--accent), #2FA88F);
+    display: grid; place-items: center; color: #FFFFFF; font-size: 24px; font-weight: 700; }
+  .m-line { height: 16px; border-radius: 8px; background: var(--line); }
+  .w70 { width: 70%; } .w45 { width: 45%; }
+  .m-pills { display: flex; gap: 10px; margin-top: 4px; }
+  .pill { font-size: 19px; font-weight: 700; padding: 8px 16px; border-radius: 10px; border: 2px solid var(--line); color: var(--ink2); }
+  .pill.solid { background: var(--accent); border-color: var(--accent); color: #FFFFFF; }
+
+  /* 2~4장 — 단계 */
+  .head { display: flex; align-items: center; gap: 28px; }
+  .num { flex: none; width: 84px; height: 84px; border-radius: 22px; background: var(--accent); color: #FFFFFF;
+    display: grid; place-items: center; font-size: 48px; font-weight: 800; }
+  .sub { margin-top: 14px; font-size: 28px; color: var(--ink2); }
+  .cmd { margin: 42px 0 0; padding: 26px 32px; border-radius: 18px; background: var(--ink); color: #E6F2EF;
+    font-size: 29px; line-height: 1.5; white-space: pre-wrap; }
+  .cmd .p { color: #6FD3BD; user-select: none; }
+  .flow { list-style: none; margin: 46px 0 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 44px; }
+  .flow li { position: relative; background: var(--code); border: 2px solid var(--line); border-radius: 20px; padding: 26px 26px 28px;
+    display: flex; flex-direction: column; gap: 10px; }
+  .flow li + li::before { content: ""; position: absolute; left: -36px; top: 50%; width: 26px; height: 26px; margin-top: -13px;
+    border-top: 5px solid var(--accent2); border-right: 5px solid var(--accent2); transform: rotate(45deg); border-radius: 3px; }
+  .flow b { font-size: 31px; font-weight: 750; }
+  .flow span { font-size: 24px; line-height: 1.5; color: var(--ink2); }
+  .flow code { font-size: 21px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+  .note { margin-top: 38px; font-size: 25px; line-height: 1.6; color: var(--ink2); display: flex; flex-direction: column; gap: 8px; }
+  .note code { font-size: 22px; background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 1px 8px; color: var(--ink); white-space: nowrap; }
+
+  /* 5장 — 알아 둘 것 */
+  .facts { margin: 50px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 28px 36px; }
+  .facts li { border-radius: 20px; padding: 30px 32px; background: var(--code); border: 2px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+  .facts li.warn { background: var(--warn-soft); border-color: #EBCB8B; }
+  .facts b { font-size: 31px; font-weight: 750; }
+  .facts li.warn b { color: var(--warn); }
+  .facts span { font-size: 24px; line-height: 1.55; color: var(--ink2); }
+  .facts code { font-size: 22px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 1px 8px; color: var(--ink); }
+
+  .bar { position: fixed; left: 0; bottom: 0; height: 4px; background: var(--accent2); transition: width .25s; }
+  @media (prefers-reduced-motion: reduce) { .bar { transition: none; } }
+</style>
+</head>
+<body>
+<div class="stage" aria-live="polite">
+
+  <section class="slide cover on" aria-label="1 / 5">
+    <div class="text">
+      <p class="kicker">html-slides · 사용 안내</p>
+      <h1>HTML 발표자료를 올리고,<br>고치면 바로 반영</h1>
+      <p class="lead">로컬에서 만든 발표자료를 GitHub 저장소에 모아 두고, 갤러리에서 미리 보고 바로 발표합니다.</p>
+      <p class="keys"><kbd>←</kbd><kbd>→</kbd> 넘기기 <span aria-hidden="true">·</span> <kbd>F</kbd> 전체 화면</p>
+    </div>
+    <div class="mock" aria-hidden="true">
+      <div class="m m3"></div>
+      <div class="m m2"></div>
+      <div class="m m1">
+        <div class="m-thumb">첫 장 미리보기</div>
+        <div class="m-line w70"></div>
+        <div class="m-line w45"></div>
+        <div class="m-pills"><span class="pill solid">▶ 발표</span><span class="pill">미리보기</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide" aria-label="2 / 5">
+    <div class="head"><span class="num">1</span><div><h2>한 번 등록하기</h2><p class="sub">원본 HTML 을 한 번 등록합니다 — 원본은 저장소 폴더 밖 어디에 있어도 됩니다.</p></div></div>
+    <pre class="cmd"><span class="p">&gt; </span>slides add "발표.html" --name my-talk --folder conf --title "발표 제목"</pre>
+    <ol class="flow">
+      <li><b>복사</b><span>저장소의 <code>decks/conf/my-talk.html</code> 로 옮겨 둡니다</span></li>
+      <li><b>커밋·올리기</b><span>그 덱 파일만 골라 커밋하고 GitHub 에 올립니다</span></li>
+      <li><b>갤러리</b><span>1~2분 뒤 첫 장 그림이 붙은 카드가 생깁니다</span></li>
+    </ol>
+    <div class="note">
+      <p>발표일·학회·PPTX 도 함께: <code>--date 2026-10-29</code> <code>--venue "학회 이름"</code> <code>--pptx 발표.pptx</code></p>
+    </div>
+    <footer class="foot"><span>html-slides 사용 안내</span><span><b>2</b> / 5</span></footer>
+  </section>
+
+  <section class="slide" aria-label="3 / 5">
+    <div class="head"><span class="num">2</span><div><h2>고치면 바로 반영</h2><p class="sub">켜 두면 원본을 저장할 때마다 저장소에 올라갑니다(저장마다 공개 기록이 하나씩 쌓입니다).</p></div></div>
+    <pre class="cmd"><span class="p">&gt; </span>slides watch</pre>
+    <ol class="flow">
+      <li><b>저장</b><span>등록한 원본 HTML 을 평소처럼 고치고 저장합니다</span></li>
+      <li><b>8초 기다림</b><span>저장이 이어지는 동안은 기다렸다가 한 번에 올립니다</span></li>
+      <li><b>바뀐 덱만</b><span>바뀐 덱 파일만 커밋하고 GitHub 에 올립니다</span></li>
+      <li><b>갤러리</b><span>1~2분 뒤 새 판이 보입니다</span></li>
+    </ol>
+    <div class="note">
+      <p>한 번만 맞추려면 <code>slides sync</code>, 상태는 <code>slides list</code></p>
+      <p>저장소 쪽 사본이 웹 업로드 등으로 바뀌었으면 덮지 않고 알려 줍니다.</p>
+    </div>
+    <footer class="foot"><span>html-slides 사용 안내</span><span><b>3</b> / 5</span></footer>
+  </section>
+
+  <section class="slide" aria-label="4 / 5">
+    <div class="head"><span class="num">3</span><div><h2>웹에서 올리기</h2><p class="sub">명령 없이 브라우저만으로도 올릴 수 있습니다(저장소 주인만).</p></div></div>
+    <ol class="flow">
+      <li><b>‘올리기’</b><span>갤러리 오른쪽 위 단추를 누르면 GitHub 업로드 화면이 열립니다</span></li>
+      <li><b>끌어 놓기</b><span>HTML 파일을 끌어 놓고 <code>Commit changes</code> 를 누릅니다</span></li>
+      <li><b>갤러리</b><span>1~2분 뒤 카드가 생깁니다</span></li>
+    </ol>
+    <div class="note">
+      <p>고친 판은 카드의 <b>⋯ → 새 판 올리기</b>에서 <b>같은 파일 이름</b>으로 올리면 바뀝니다.</p>
+      <p>그림·스크립트가 따로 있는 덱은 폴더째 올리고, 첫 화면 파일 이름을 <code>index.html</code> 로 둡니다.</p>
+    </div>
+    <footer class="foot"><span>html-slides 사용 안내</span><span><b>4</b> / 5</span></footer>
+  </section>
+
+  <section class="slide" aria-label="5 / 5">
+    <h2>알아 둘 것</h2>
+    <ul class="facts">
+      <li class="warn"><b>공개 저장소</b><span>올린 덱은 누구나 볼 수 있습니다 — 갤러리 목록과 저장소에 다 보입니다.</span></li>
+      <li class="warn"><b>지워지지 않는 기록</b><span>내린 덱과 이전 판도 기록에 남습니다. 민감한 내용은 올리지 마세요.</span></li>
+      <li><b>검색 제외 요청</b><span>noindex 표시를 붙이지만 보장되지는 않습니다(저장소 화면 등은 검색될 수 있음).</span></li>
+      <li><b>내리기</b><span><code>slides remove my-talk</code> — 갤러리에서 빠집니다.</span></li>
+    </ul>
+    <footer class="foot"><span>html-slides 사용 안내</span><span><b>5</b> / 5</span></footer>
+  </section>
+
+</div>
+<div class="bar" aria-hidden="true"></div>
+<script>
+(() => {
+  const stage = document.querySelector('.stage');
+  const slides = Array.from(stage.querySelectorAll('.slide'));
+  const bar = document.querySelector('.bar');
+  let cur = 0;
+
+  function fit() {
+    const s = Math.min(innerWidth / 1600, innerHeight / 900);
+    stage.style.transform = `translate(-50%, -50%) scale(${s})`;
+  }
+  function go(i) {
+    cur = Math.max(0, Math.min(slides.length - 1, i));
+    slides.forEach((el, k) => el.classList.toggle('on', k === cur));
+    bar.style.width = `${((cur + 1) / slides.length) * 100}%`;
+    try { history.replaceState(null, '', `#${cur + 1}`); } catch (e) { /* 주소를 못 바꿔도 넘기기는 된다 */ }
+  }
+  function fullscreen() {
+    const doc = document;
+    const p = doc.fullscreenElement ? doc.exitFullscreen() : doc.documentElement.requestFullscreen();
+    if (p && p.catch) p.catch(() => {});
+  }
+
+  addEventListener('resize', fit);
+  addEventListener('keydown', (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'Enter'].includes(e.key)) { e.preventDefault(); go(cur + 1); }
+    else if (['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'].includes(e.key)) { e.preventDefault(); go(cur - 1); }
+    else if (e.key === 'Home') { e.preventDefault(); go(0); }
+    else if (e.key === 'End') { e.preventDefault(); go(slides.length - 1); }
+    else if (e.key === 'f' || e.key === 'F') fullscreen();
+  });
+  // 화면 왼쪽 1/3 을 누르면 앞으로, 나머지는 다음 장. 명령 줄을 고르려고 누른 것은 넘기지 않는다.
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('pre, code, a, button') || String(getSelection())) return;
+    go(e.clientX < innerWidth / 3 ? cur - 1 : cur + 1);
+  });
+  let x0 = null;
+  addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
+  addEventListener('touchend', (e) => {
+    if (x0 === null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) > 50) go(dx < 0 ? cur + 1 : cur - 1);
+  });
+
+  // 주소의 #3 처럼 장 번호를 바꾸면 그 장으로 간다(go 는 replaceState 를 써서 이 이벤트를 다시 부르지 않는다).
+  const fromHash = () => parseInt(location.hash.slice(1), 10) - 1;
+  addEventListener('hashchange', () => { const n = fromHash(); if (Number.isFinite(n) && n !== cur) go(n); });
+  fit();
+  go(Number.isFinite(fromHash()) ? fromHash() : 0);
+})();
+</script>
+</body>
+</html>

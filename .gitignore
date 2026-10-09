@@ -1,0 +1,12 @@
+# 이 PC 에만 두는 것(미리보기)
+.site/
+.thumbcache/
+_site/
+
+# slides 가 복사하다 멈추면 남는 임시 파일
+decks/**/.slides-*.tmp
+
+# 파이썬
+__pycache__/
+.pytest_cache/
+*.pyc
