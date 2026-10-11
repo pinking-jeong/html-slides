@@ -48,9 +48,41 @@
   </aside>
 
   <section class="work" aria-label="편집 화면">
+    <div class="fmt" id="fmt" role="toolbar" aria-label="글 서식">
+      <select id="fFont" aria-label="글꼴" title="글꼴"></select>
+      <span class="fsize"><input id="fSize" type="number" inputmode="decimal" min="1" max="400" step="0.5" list="fSizes" aria-label="글자 크기(pt)" title="글자 크기(pt) — 숫자를 넣고 Enter"><span class="unit">pt</span></span>
+      <datalist id="fSizes"></datalist>
+      <button type="button" class="tb" id="fSmaller" title="글자 작게 (Ctrl+[)" aria-label="글자 작게">가<sub>−</sub></button>
+      <button type="button" class="tb" id="fBigger" title="글자 크게 (Ctrl+])" aria-label="글자 크게">가<sup>+</sup></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="tb" id="fBold" aria-pressed="false" title="굵게 (Ctrl+B)" aria-label="굵게"><b>B</b></button>
+      <button type="button" class="tb" id="fItalic" aria-pressed="false" title="기울임 (Ctrl+I)" aria-label="기울임"><i>I</i></button>
+      <button type="button" class="tb" id="fUnder" aria-pressed="false" title="밑줄 (Ctrl+U)" aria-label="밑줄"><u>U</u></button>
+      <button type="button" class="tb" id="fStrike" aria-pressed="false" title="취소선" aria-label="취소선"><s>S</s></button>
+      <span class="sep" aria-hidden="true"></span>
+      <label class="tb swatch" title="글자색"><span class="glyph" aria-hidden="true">가</span><input id="fColor" type="color" value="#16212a" aria-label="글자색"></label>
+      <label class="tb swatch mark" title="형광펜"><span class="glyph" aria-hidden="true">가</span><input id="fMark" type="color" value="#fff176" aria-label="형광펜 색"></label>
+      <button type="button" class="tb" id="fUnmark" title="형광펜 지우기" aria-label="형광펜 지우기"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13h10M5 10l6-6 2 2-6 6H5z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2 2l12 12" stroke="currentColor" stroke-width="1.4"/></svg></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="tb" id="fLeft" aria-pressed="false" title="왼쪽 맞춤" aria-label="왼쪽 맞춤"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 6.5h8M2 10h12M2 13.5h8" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button type="button" class="tb" id="fCenter" aria-pressed="false" title="가운데 맞춤" aria-label="가운데 맞춤"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M4 6.5h8M2 10h12M4 13.5h8" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button type="button" class="tb" id="fRight" aria-pressed="false" title="오른쪽 맞춤" aria-label="오른쪽 맞춤"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M6 6.5h8M2 10h12M6 13.5h8" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button type="button" class="tb" id="fJustify" aria-pressed="false" title="양쪽 맞춤" aria-label="양쪽 맞춤"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 6.5h12M2 10h12M2 13.5h12" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="tb wide" id="fClear" title="고른 글에 따로 입힌 글자 서식(굵게·색·크기 등)을 걷어 문단의 모양으로 되돌립니다">서식 지우기</button>
+      <span class="fbox off" id="fBox" data-fmt-box>
+        <span class="sep" aria-hidden="true"></span>
+        <label>가로<input id="bW" type="number" min="8" max="10000" step="1"></label>
+        <label>세로<input id="bH" type="number" min="8" max="10000" step="1"></label>
+        <label class="pos-field">왼쪽<input id="bX" type="number" min="-10000" max="10000" step="1"></label>
+        <label class="pos-field">위<input id="bY" type="number" min="-10000" max="10000" step="1"></label>
+        <span class="unit">px</span>
+      </span>
+    </div>
     <div class="canvas" id="canvas">
       <div class="sheet" id="sheet">
         <iframe id="frame" sandbox="allow-same-origin" title="편집 중인 장" width="1280" height="720"></iframe>
+        <div class="pick-layer" id="pickLayer"></div>
       </div>
     </div>
     <div class="under">

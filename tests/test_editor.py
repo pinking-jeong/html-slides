@@ -37,7 +37,7 @@ body{margin:0;background:#222;font-family:sans-serif}
 .stage{position:relative;width:1280px;height:720px;transform:scale(var(--s));transform-origin:0 0;overflow:hidden}
 .slide{position:absolute;inset:0;display:none}
 .slide.on{display:block}
-.el{position:absolute;display:flex;flex-direction:column;margin:0}
+.el{position:absolute;display:flex;flex-direction:column;margin:0;user-select:none;cursor:move}
 .pp{margin:0}
 .controls{position:fixed;left:0;right:0;bottom:0;height:48px;background:#333;color:#fff}
 .toc[hidden],.notes[hidden]{display:none}
@@ -49,7 +49,7 @@ body{margin:0;background:#222;font-family:sans-serif}
 <section class="slide" data-i="2" data-key="s02" data-title="둘째" aria-label="2. 둘째" style="background:#FFFFFF">
 <div class="el tx" data-name="kicker" style="left:64px;top:40px;width:800px;height:24px"><div class="tin"><p class="pp" style="font-size:16px;color:#335">1. 서론</p></div></div>
 <div class="el tx" data-name="title" style="left:64px;top:70px;width:1100px;height:60px"><div class="tin"><p class="pp" style="font-size:40px;color:#111">둘째 장 제목</p></div></div>
-<div class="el tx" data-name="body" style="left:64px;top:160px;width:1100px;height:200px"><div class="tin"><p class="pp" style="font-size:24px;color:#222">첫 문단</p><p class="pp" style="font-size:24px;color:#222">둘째 문단</p></div></div>
+<div class="el tx" data-name="body" style="left:64px;top:160px;width:1100px;height:200px"><div class="tin"><p class="pp" style="font-size:24px;line-height:31.2px;color:#222">첫 문단</p><p class="pp" style="font-size:24px;line-height:31.2px;color:#222">둘째 문단</p></div></div>
 <svg class="el" style="left:64px;top:400px;width:200px;height:20px" viewBox="0 0 200 20"><defs><marker id="m0a1b2c3d" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10z"></path></marker></defs><line x1="0" y1="10" x2="180" y2="10" stroke="#000" marker-end="url(#m0a1b2c3d)"></line></svg>
 <div class="el tx" data-name="pageno" style="left:1150px;top:680px;width:80px;height:20px"><div class="tin"><p class="pp" style="font-size:12px">2 / 3</p></div></div>
 </section>
@@ -779,6 +779,508 @@ def test_builder_text_box_keeps_paragraph_style(browser, decks):
     assert ps.count() == 3
     assert ps.nth(2).get_attribute("class") == "pp" and "font-size:24px" in ps.nth(2).get_attribute("style").replace(" ", "")
     ctx.close()
+
+
+# ---------- 서식 막대
+
+def bar(page) -> dict:
+    return page.evaluate("""() => {
+        const v = (id) => document.getElementById(id);
+        const on = (id) => v(id).getAttribute('aria-pressed') === 'true';
+        return { size: v('fSize').value, font: v('fFont').value, bold: on('fBold'), italic: on('fItalic'),
+                 under: on('fUnder'), center: on('fCenter'), off: v('fBold').disabled, box: !v('fBox').classList.contains('off') };
+    }""")
+
+
+def look(loc, text: str) -> dict | None:
+    """글 text 를 가진 글 마디의 보이는 모양(밑줄·형광은 조상까지 본다)."""
+    return loc.evaluate("""(e, text) => {
+        const w = e.ownerDocument.createTreeWalker(e, 4);
+        for (let t = w.nextNode(); t; t = w.nextNode()) {
+            if (!t.data.includes(text)) continue;
+            const el = t.parentElement, cs = getComputedStyle(el);
+            let deco = '', bg = '';
+            for (let n = el; n && n !== e.parentElement; n = n.parentElement) {
+                const c = getComputedStyle(n);
+                deco += ' ' + c.textDecorationLine;
+                if (!bg && c.backgroundColor !== 'rgba(0, 0, 0, 0)') bg = c.backgroundColor;
+            }
+            return { weight: cs.fontWeight, style: cs.fontStyle, deco, color: cs.color, family: cs.fontFamily,
+                     size: cs.fontSize, bg };
+        }
+        return null; }""", text)
+
+
+def test_format_size_in_points_whole_box_and_one_undo_step(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    assert bar(page)["off"] is True                        # 글을 고르기 전에는 막대가 꺼져 있다
+    page.keyboard.press("PageDown")
+    body = frame(page).locator("[data-name=body] .tin")
+    ps = body.locator("p")
+    ps.first.click()
+    assert bar(page)["off"] is False and bar(page)["size"] == "18"    # 24px = 18pt
+    # 글을 고르지 않고 크기를 넣으면 그 글 칸 전체에 — 문단을 통째로 덮은 서식은 문단으로 올라간다
+    page.fill("#fSize", "30")
+    page.keyboard.press("Enter")
+    styles = [ps.nth(i).get_attribute("style").replace(" ", "") for i in range(2)]
+    assert all("font-size:40px" in s for s in styles), styles
+    assert all("line-height:1.3;" in s for s in styles), styles    # px 줄 높이(31.2px)는 같은 모양의 비율로
+    assert body.locator("span").count() == 0 and state(page)["undo"] == 1
+    assert bar(page)["size"] == "30"
+    # 서식을 넣었다고 글 칸 전체가 골라진 채 남지 않는다 — 다음 글자가 글을 덮어쓰지 않는다
+    page.keyboard.type("X")
+    assert ps.first.inner_text() == "첫 문단X" and ps.nth(1).inner_text() == "둘째 문단"
+    # Ctrl+] / Ctrl+[ 는 크기 목록의 다음·앞 크기로
+    page.keyboard.press("Control+BracketRight")
+    assert "font-size:42.67px" in ps.first.get_attribute("style").replace(" ", "") and bar(page)["size"] == "32"
+    page.keyboard.press("Control+BracketLeft")
+    assert bar(page)["size"] == "28"
+    text = page.evaluate("window.__hse.serialize()")
+    assert "xxx-large" not in text and "data-hse" not in text and "contenteditable" not in text
+    for _ in range(4):                                     # 크기(28·32), 글자 X, 처음 크기(30)
+        page.keyboard.press("Control+z")
+    styles = [ps.nth(i).get_attribute("style").replace(" ", "") for i in range(2)]
+    assert all("font-size:24px" in s and "line-height:31.2px" in s for s in styles), styles
+    assert same_dom(page, hub.saved("decks/builder.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+def test_format_selection_shortcuts_color_font_align_and_clear(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    p = frame(page).locator("[data-name=body] .tin p").first
+    p.click()
+    page.keyboard.press("End")
+    page.keyboard.press("Shift+ArrowLeft")
+    page.keyboard.press("Shift+ArrowLeft")                 # '문단' — .el 의 user-select:none 이어도 고를 수 있다
+    assert frame(page).locator("body").evaluate("(b) => b.ownerDocument.getSelection().toString()") == "문단"
+    page.keyboard.press("Control+b")
+    page.keyboard.press("Control+i")
+    page.keyboard.press("Control+u")
+    got = look(p, "문단")
+    assert got["weight"] == "700" and got["style"] == "italic" and "underline" in got["deco"]
+    assert look(p, "첫")["weight"] == "400"                # 고른 글만
+    assert bar(page)["bold"] and bar(page)["italic"] and bar(page)["under"]
+    page.locator("#fColor").fill("#ff0000")                # 색 창을 닫을 때(change) 한 번
+    assert look(p, "문단")["color"] == "rgb(255, 0, 0)" and look(p, "첫")["color"] == "rgb(34, 34, 34)"
+    page.select_option("#fFont", label="Georgia")
+    assert look(p, "문단")["family"].startswith("Georgia")
+    page.locator("#fMark").fill("#ffff00")
+    assert look(p, "문단")["bg"] == "rgb(255, 255, 0)"
+    page.click("#fCenter")
+    assert p.evaluate("(e) => e.style.textAlign") == "center" and bar(page)["center"]
+    assert state(page)["undo"] == 7                        # 고른 것마다 되돌리기 한 칸
+    page.click("#fClear")                                  # 글자 서식 지우기 — 문단의 모양(크기·색·맞춤)은 그대로
+    got = look(p, "문단")
+    assert got["weight"] == "400" and got["style"] == "normal" and "underline" not in got["deco"] and got["bg"] == ""
+    assert got["size"] == "24px" and got["color"] == "rgb(34, 34, 34)" and got["family"] == look(p, "첫")["family"]
+    assert p.evaluate("(e) => [e.style.textAlign, e.style.fontSize, e.innerHTML]") == ["center", "24px", "첫 문단"]
+    for _ in range(8):
+        page.keyboard.press("Control+z")
+    assert same_dom(page, hub.saved("decks/builder.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+def test_clear_format_reverts_whole_box_formatting_but_keeps_the_paragraph(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    ps = frame(page).locator("[data-name=body] .tin p")
+    ps.first.click()
+    page.keyboard.press("Control+b")                       # 캐럿만 — 글 칸 전체가 굵게(문단으로 올라간다)
+    page.click("#fCenter")
+    assert [look(ps.nth(i), "문단")["weight"] for i in range(2)] == ["700", "700"]
+    page.click("#fClear")                                  # 굵게는 걷히고 맞춤·문단 크기는 남는다
+    got = [ps.nth(i).evaluate("(e) => [e.style.fontWeight, e.style.textAlign, e.style.fontSize, e.innerHTML]") for i in range(2)]
+    assert got == [["", "center", "24px", "첫 문단"], ["", "center", "24px", "둘째 문단"]]
+    assert frame(page).locator("[data-hse-st]").count() == 0
+    for _ in range(3):
+        page.keyboard.press("Control+z")
+    assert same_dom(page, hub.saved("decks/builder.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+def test_paragraph_look_stays_on_the_paragraph(browser, decks):
+    """브라우저 명령이 문단의 색·굵기를 걷어 글 쪽으로 밀어 넣지 않게 — 문단에 새로 친 글도 덱의 모양을 따른다."""
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    p = frame(page).locator("[data-name=body] .tin p").first
+    p.click()
+    page.keyboard.press("End")
+    page.keyboard.press("Shift+ArrowLeft")
+    page.locator("#fColor").fill("#ff0000")                # '단'만 빨강
+    assert p.evaluate("(e) => [e.style.color, e.innerHTML]") == ["rgb(34, 34, 34)", '첫 문<span style="color: rgb(255, 0, 0);">단</span>']
+    page.keyboard.press("Home")
+    page.keyboard.type("새 ")                              # 문단 앞에 친 글은 문단의 색
+    assert look(p, "새")["color"] == "rgb(34, 34, 34)"
+    # 문단 style 로 굵은 제목의 일부만 굵게 끄기 — 문단은 굵은 채, 고른 글만 보통
+    title = frame(page).locator("section.slide").nth(0).locator("[data-name=title] .tin p")
+    page.keyboard.press("Escape")                          # 글 칸에서 나와야 PageUp 이 장을 넘긴다
+    page.keyboard.press("PageUp")
+    title.evaluate("(e) => { e.style.fontWeight = '700'; }")
+    title.click()
+    page.keyboard.press("End")
+    page.keyboard.press("Shift+ArrowLeft")
+    page.keyboard.press("Shift+ArrowLeft")
+    page.keyboard.press("Control+b")
+    assert title.evaluate("(e) => e.style.fontWeight") == "700"
+    assert look(title, "표지")["weight"] == "400" and look(title, "시험")["weight"] == "700"
+    ctx.close()
+    assert errors == []
+
+
+def test_notes_keep_their_own_shortcuts(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    page.click("#notes")
+    page.keyboard.press("Control+a")
+    page.keyboard.press("Control+b")                       # 노트 칸은 글만 받는다 — 덱에 서식이 들어가지 않는다
+    assert state(page)["undo"] == 0 and "font-weight" not in page.evaluate("window.__hse.serialize()")
+    ctx.close()
+    assert errors == []
+
+
+# ---------- 상자 옮기기·크기 바꾸기
+
+def drag(page, handle: str, dx: float, dy: float, shift: bool = False, at: float = 0.5) -> None:
+    b = page.locator(handle).bounding_box()
+    x, y = b["x"] + b["width"] * at, b["y"] + b["height"] / 2
+    page.mouse.move(x, y)
+    if shift:
+        page.keyboard.down("Shift")
+    page.mouse.down()
+    page.mouse.move(x + dx, y + dy, steps=6)
+    page.mouse.up()
+    if shift:
+        page.keyboard.up("Shift")
+
+
+def test_builder_boxes_move_resize_nudge_delete_and_fields(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    f = frame(page)
+    f.locator("section.slide").nth(1).locator("[data-name=title] .tin p").click()   # 글상자를 누르면 그 상자를 고른다
+    assert page.locator(".pick").is_visible() and bar(page)["box"]
+    assert state(page)["box"] == {"x": 64, "y": 70, "w": 1100, "h": 60}
+    s = state(page)["scale"]
+    drag(page, ".pick-h.se", -100 * s, 40 * s)             # 오른쪽 아래 손잡이 — 글상자는 비율을 지키지 않는다
+    assert state(page)["box"] == {"x": 64, "y": 70, "w": 1000, "h": 100}
+    drag(page, ".pick-edge.top", 30 * s, 20 * s, at=0.25)  # 테두리를 끌어 옮기기(가운데는 손잡이)
+    assert state(page)["box"] == {"x": 94, "y": 90, "w": 1000, "h": 100}
+    drag(page, ".pick-h.nw", 10 * s, 10 * s)               # 왼쪽 위 손잡이 — 오른쪽 아래 모서리는 제자리
+    assert state(page)["box"] == {"x": 104, "y": 100, "w": 990, "h": 90}
+    assert state(page)["undo"] == 3
+    page.fill("#bW", "500")
+    page.keyboard.press("Enter")
+    assert state(page)["box"]["w"] == 500 and state(page)["undo"] == 4
+    # 글이 없는 상자(그림·도형)는 눌러 고른 뒤 방향키로 옮긴다 — 잇달아 누른 것이 되돌리기 한 칸
+    f.locator("svg.el").click()
+    assert state(page)["box"] == {"x": 64, "y": 400, "w": 200, "h": 20}
+    for key in ("ArrowRight", "ArrowRight", "ArrowRight", "Shift+ArrowDown"):
+        page.keyboard.press(key)
+    assert state(page)["box"] == {"x": 67, "y": 410, "w": 200, "h": 20}
+    page.wait_for_timeout(900)
+    assert state(page)["undo"] == 5 and state(page)["cur"] == 1    # 장은 넘어가지 않았다
+    page.keyboard.press("Delete")
+    assert f.locator("section.slide").nth(1).locator("svg.el").count() == 0 and state(page)["box"] is None
+    page.keyboard.press("Control+z")
+    assert f.locator("section.slide").nth(1).locator("svg.el").count() == 1
+    page.keyboard.press("Escape")
+    page.keyboard.press("ArrowRight")                      # 고른 상자가 없으면 방향키는 다시 장을 넘긴다
+    assert state(page)["cur"] == 2
+    for _ in range(5):
+        page.keyboard.press("Control+z")
+    assert same_dom(page, hub.saved("decks/builder.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+PICS = f"""<!doctype html><html><head><meta charset="utf-8"><title>그림 시험 덱</title>
+<style>.slide{{display:none;width:1280px;height:720px}}.slide.on{{display:block}}img{{max-width:100%}}</style></head><body>
+<div class="deck"><section class="slide on"><h2>그림 장</h2><figure><img id="pic" src="{GIF}" width="200" height="100" alt=""></figure></section>
+<section class="slide"><h2>둘째 장</h2></section></div></body></html>
+"""
+
+
+def test_flow_pictures_resize_keeping_their_shape(browser, tmp_path, serve):
+    site, root = make_site(tmp_path, {"pics.html": PICS})
+    hub = DeckHub({"decks/pics.html": (root / "decks" / "pics.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "pics", hub)
+    img = frame(page).locator("#pic")
+    img.click()
+    assert state(page)["box"]["w"] == 200 and state(page)["box"]["h"] == 100
+    assert page.locator(".pick.fixed").count() == 1 and not page.locator("#bX").is_visible()   # 자리는 흐름이 정한다
+    s = state(page)["scale"]
+    drag(page, ".pick-h.se", 100 * s, 10 * s)              # 모서리 — 그림은 보이던 비율(2:1)을 지킨다
+    assert img.evaluate("(e) => [e.style.width, e.style.height, e.style.maxWidth]") == ["300px", "150px", "none"]
+    drag(page, ".pick-h.se", 50 * s, 30 * s, shift=True)   # Shift — 비율을 풀고
+    assert img.evaluate("(e) => [e.style.width, e.style.height]") == ["350px", "180px"]
+    page.fill("#bW", "100")                                # 가로만 넣어도 세로가 비율대로
+    page.keyboard.press("Enter")
+    assert img.evaluate("(e) => [e.style.width, e.style.height]") == ["100px", "51px"]
+    for _ in range(3):
+        page.keyboard.press("Control+z")
+    assert img.evaluate("(e) => e.getAttribute('style')") is None
+    ctx.close()
+    assert errors == []
+
+
+SELECT_JS = """([css, a, b, k]) => {
+    const d = document.getElementById('frame').contentDocument;
+    const root = d.querySelector(css);
+    const w = d.createTreeWalker(root, 4);
+    const texts = [];
+    for (let t = w.nextNode(); t; t = w.nextNode()) texts.push(t);
+    const s = texts.find((t) => t.data.includes(a));
+    const so = s.data.indexOf(a);
+    const r = d.createRange();
+    if (b === null) {
+        r.setStart(s, so + k);
+        r.collapse(true);
+    } else {
+        const e = texts.slice(texts.indexOf(s)).find((t) => t.data.indexOf(b, t === s ? so : 0) >= 0);
+        r.setStart(s, so);
+        r.setEnd(e, e.data.indexOf(b, e === s ? so : 0) + b.length);
+    }
+    (root.closest('[data-hse-ce]') || root).focus();
+    const sel = d.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return sel.toString();
+}"""
+
+
+def select_text(page, css: str, a: str, b: str = "") -> str:
+    """덱 화면에서 css 안의 글 a 부터 b(없으면 a)의 끝까지 고른다."""
+    got = page.evaluate(SELECT_JS, [css, a, b or a, 0])
+    page.wait_for_timeout(60)                              # selectionchange 가 막대에 닿도록
+    return got
+
+
+def caret(page, css: str, a: str, k: int = 0) -> None:
+    """덱 화면에서 css 안의 글 a 의 k 번째 글자 앞에 캐럿만 둔다."""
+    page.evaluate(SELECT_JS, [css, a, None, k])
+    page.wait_for_timeout(60)
+
+
+FMT = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>서식 시험 덱</title>
+<style>
+body{margin:0;font-family:sans-serif}
+.deck{position:relative;width:1280px;height:720px;background:#FFFFFF}
+.slide{position:absolute;inset:0;padding:40px 72px;display:none}
+.slide.on{display:block}
+h2 span{color:#2563EB}
+.sw{display:inline-block;width:12px;height:12px;background:#f00;margin-right:6px}
+a{color:#0a58ca}
+p,li{font-size:20px}
+</style></head><body>
+<div class="deck">
+<section class="slide on"><h2 id="h">TITLE <span>ACCENT</span> END</h2>
+<p id="p1">aa <b>BOLD</b> zz</p>
+<p id="p2"><a href="https://example.com/">LINKONLY</a></p>
+<p id="p3">x <a href="https://example.com/">LINK</a> y</p>
+<ul id="u1"><li>one first</li><li><span class="sw"></span>sales</li><li><span style="font-size:0.8em">small item</span></li></ul>
+</section>
+<section class="slide"><h2>둘째 장</h2><p>문단</p></section>
+</div></body></html>
+"""
+
+
+def test_format_touches_only_the_chosen_text_and_keeps_deck_markup(browser, tmp_path, serve):
+    """서식은 고른 글에만 — 덱 CSS 가 꾸미는 span·빈 범례 칸·em 크기 span 은 그대로, 크기 표시(xxx-large)는 남지 않는다."""
+    site, root = make_site(tmp_path, {"fmt.html": FMT})
+    hub = DeckHub({"decks/fmt.html": (root / "decks" / "fmt.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "fmt", hub)
+    f = frame(page)
+    # 제목의 한 낱말만 굵게 끄기 — 브라우저가 만든 span 에 덱의 h2 span { color } 가 걸려도 글자색은 그대로
+    select_text(page, "#h", "TITLE")
+    page.click("#fBold")
+    h = f.locator("#h")
+    assert look(h, "TITLE")["weight"] == "400" and look(h, "TITLE")["color"] == "rgb(0, 0, 0)"
+    assert look(h, "ACCENT")["color"] == "rgb(37, 99, 235)" and look(h, "END")["weight"] == "700"
+    # 링크만 든 문단(캐럿 — 칸 전체)과 꼭 맞게 고른 <b> 에 30pt — 크기 표시가 a·b 에 남지 않는다
+    caret(page, "#p2", "LINKONLY", 3)
+    page.fill("#fSize", "30")
+    page.keyboard.press("Enter")
+    select_text(page, "#p1", "BOLD")
+    page.fill("#fSize", "30")
+    page.keyboard.press("Enter")
+    assert look(f.locator("#p2"), "LINKONLY")["size"] == "40px" and look(f.locator("#p1"), "BOLD")["size"] == "40px"
+    assert look(f.locator("#p1"), "aa")["size"] == "20px"
+    assert "xxx-large" not in page.evaluate("window.__hse.serialize()")
+    # 목록 한 항목의 낱말만 굵게 — 다른 항목의 빈 범례 칸·em 크기 span 은 그대로
+    select_text(page, "#u1", "one")
+    page.click("#fBold")
+    u = f.locator("#u1")
+    assert u.locator("span.sw").count() == 1
+    assert u.locator("li").nth(2).evaluate("(e) => [e.getAttribute('style'), e.innerHTML]") == [
+        None, '<span style="font-size:0.8em">small item</span>']
+    # 링크에 입힌 색도 서식 지우기로 걷힌다
+    select_text(page, "#p3", "LINK")
+    page.locator("#fColor").fill("#ff0000")
+    assert look(f.locator("#p3"), "LINK")["color"] == "rgb(255, 0, 0)"
+    page.click("#fClear")
+    assert look(f.locator("#p3"), "LINK")["color"] == "rgb(10, 88, 202)"
+    assert f.locator("#p3 a").evaluate("(e) => e.getAttribute('style')") is None
+    # 형광 칸은 고른 글의 형광 — 앞 글에 고른 노랑을 다음 글에 또 골라도 바뀐 값이라 입혀진다
+    select_text(page, "#p1", "aa")
+    page.locator("#fMark").fill("#ffff00")
+    select_text(page, "#p1", "zz")
+    assert page.input_value("#fMark") == "#ffffff"
+    select_text(page, "#p1", "aa")
+    assert page.input_value("#fMark") == "#ffff00"
+    text = page.evaluate("window.__hse.serialize()")
+    assert "xxx-large" not in text and "data-hse" not in text and 'style=""' not in text
+    n = state(page)["undo"]
+    assert n == 7
+    page.keyboard.press("Escape")
+    for _ in range(n):
+        page.keyboard.press("Control+z")
+    assert same_dom(page, hub.saved("decks/fmt.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+BUILDER_NL = BUILDER.replace('첫 문단</p><p class="pp"', '첫 문단</p>\n<p class="pp"')
+
+
+def test_format_aligns_keeps_the_caret_and_clears_part_of_a_formatted_box(browser, tmp_path, serve):
+    assert BUILDER_NL != BUILDER
+    site, root = make_site(tmp_path, {"builder.html": BUILDER_NL})
+    hub = DeckHub({"decks/builder.html": (root / "decks" / "builder.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "builder", hub)
+    page.keyboard.press("PageDown")
+    body = "[data-name=body] .tin"
+    ps = frame(page).locator(f"{body} p")
+    # 세 번 눌러 고른 문단(범위 끝이 다음 문단 처음에 닿는다)의 맞춤은 그 문단에만
+    ps.first.click(click_count=3)
+    page.click("#fCenter")
+    assert [ps.nth(i).evaluate("(e) => e.style.textAlign") for i in range(2)] == ["center", ""]
+    # 둘째 문단 처음의 캐럿 — 칸 전체를 굵게 한 뒤에도 그 자리(문단 사이의 줄바꿈 글이 아니라)
+    caret(page, body, "둘째")
+    page.keyboard.press("Control+b")
+    assert bar(page)["bold"] and bar(page)["size"] == "18"
+    page.keyboard.type("Z")
+    assert ps.nth(1).inner_text() == "Z둘째 문단" and ps.count() == 2
+    # 칸 전체를 굵게 한 뒤 한 낱말만 서식 지우기 — 그 낱말만 보통, 나머지는 굵은 채
+    select_text(page, body, "문단")
+    page.click("#fClear")
+    assert look(ps.first, "문단")["weight"] == "400" and look(ps.first, "첫")["weight"] == "700"
+    assert look(ps.nth(1), "둘째")["weight"] == "700"
+    # 글을 다 지운 칸 — 크기는 문단에 적혀 다음에 친 글이 따른다
+    title = frame(page).locator("section.slide").nth(1).locator("[data-name=title] .tin")
+    title.locator("p").click()
+    page.keyboard.press("Control+a")
+    page.keyboard.press("Delete")
+    page.fill("#fSize", "36")
+    page.keyboard.press("Enter")
+    page.keyboard.type("Q")
+    assert look(title, "Q")["size"] == "48px" and title.locator("p").count() == 1
+    # 덱 화면의 빈 곳을 누르면 옛 선택을 버린다 — 보이지 않는 글에 서식이 들어가지 않게
+    select_text(page, body, "첫")
+    sheet = page.locator("#sheet").bounding_box()
+    page.mouse.click(sheet["x"] + sheet["width"] * 0.8, sheet["y"] + sheet["height"] * 0.9)
+    page.wait_for_timeout(60)
+    assert bar(page)["off"]
+    ctx.close()
+    assert errors == []
+
+
+def test_box_drag_ignores_keys_and_fields_apply_to_their_own_box(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    f = frame(page)
+    s2 = f.locator("section.slide").nth(1)
+    sheet = page.locator("#sheet").bounding_box()
+    svg = s2.locator("svg.el")
+    svg.click()
+    assert page.locator("#sheet").bounding_box() == sheet   # 상자를 골라도 서식 막대의 줄 수·덱 화면의 배율은 그대로
+    # 끄는 동안의 키는 쓰지 않는다 — 장을 넘기거나 되돌리지 않고, 놓으면 끈 것이 한 칸
+    b = svg.bounding_box()
+    x, y = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 40, y, steps=4)
+    for key in ("ArrowRight", "PageDown", "Control+z"):
+        page.keyboard.press(key)
+    assert state(page)["cur"] == 1 and state(page)["undo"] == 0
+    page.mouse.move(x + 80, y, steps=4)
+    page.mouse.up()
+    assert state(page)["undo"] == 1 and state(page)["box"]["x"] > 64 and state(page)["box"]["y"] == 400
+    # Esc 는 끌기를 거둔다 — 상자는 제자리에 고른 채로, 되돌리기 칸은 그대로
+    s2.locator("[data-name=title] .tin p").click()
+    page.keyboard.press("Escape")
+    e = page.locator(".pick-edge.top").bounding_box()
+    ex, ey = e["x"] + e["width"] * 0.25, e["y"] + e["height"] / 2
+    page.mouse.move(ex, ey)
+    page.mouse.down()
+    page.mouse.move(ex + 30, ey + 20, steps=4)
+    assert state(page)["box"]["x"] != 64
+    page.keyboard.press("Escape")
+    page.mouse.up()
+    assert state(page)["box"] == {"x": 64, "y": 70, "w": 1100, "h": 60} and state(page)["undo"] == 1
+    # 칸에 치고 Enter 없이 다른 상자를 누르면 그 값은 누른 상자가 아니라 치던 상자에
+    page.fill("#bW", "500")
+    svg.click()
+    assert s2.locator("[data-name=title]").evaluate("(e) => e.style.width") == "500px"
+    assert svg.evaluate("(e) => e.style.width") == "200px" and page.input_value("#bW") == "200"
+    page.fill("#bW", "5")                                  # 받지 않는 값은 칸에도 실제 값으로 되돌린다
+    page.keyboard.press("Enter")
+    assert page.input_value("#bW") == "200" and svg.evaluate("(e) => e.style.width") == "200px"
+    page.fill("#bW", "300")
+    page.keyboard.press("Enter")
+    page.keyboard.press("Control+z")                       # 칸에서 되돌리면 고르기가 풀리고 칸에서도 나온다
+    assert state(page)["box"] is None
+    page.keyboard.press("PageDown")
+    assert state(page)["cur"] == 2
+    # 높이를 적지 않은 상자(표)는 옮겨도 높이가 굳지 않는다
+    table = f.locator("section.slide").nth(2).locator("table.el")
+    f.locator("section.slide").nth(2).locator("td").first.click()
+    page.keyboard.press("Escape")
+    page.keyboard.press("ArrowRight")
+    assert table.evaluate("(e) => [e.style.left, e.style.height]") == ["65px", ""]
+    assert page.locator(".pick-h.se").evaluate("(e) => getComputedStyle(e).touchAction") == "none"
+    page.wait_for_timeout(900)
+    n = state(page)["undo"]
+    for _ in range(n):
+        page.keyboard.press("Control+z")
+    assert same_dom(page, hub.saved("decks/builder.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+FORM = f"""<!doctype html><html><head><meta charset="utf-8"><title>입력 칸 시험 덱</title>
+<style>.slide{{display:none;width:1280px;height:720px}}.slide.on{{display:block}}</style></head><body>
+<div class="deck"><section class="slide on"><h2>입력 장</h2><p><img id="pic" src="{GIF}" width="200" height="100" alt=""></p>
+<label>값 <input id="val" value="12345"></label></section><section class="slide"><h2>둘째 장</h2></section></div></body></html>
+"""
+
+
+def test_deck_inputs_take_their_own_keys(browser, tmp_path, serve):
+    """덱에 원래 있던 입력 칸에서 친 키는 그 칸의 것 — 고른 그림을 지우거나 장을 넘기지 않는다."""
+    site, root = make_site(tmp_path, {"form.html": FORM})
+    hub = DeckHub({"decks/form.html": (root / "decks" / "form.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "form", hub)
+    f = frame(page)
+    f.locator("#pic").click()
+    assert state(page)["box"] is not None
+    page.keyboard.press("Tab")
+    assert f.locator("body").evaluate("(b) => b.ownerDocument.activeElement.id") == "val"
+    for key in ("End", "Backspace", "ArrowLeft", "Control+b"):
+        page.keyboard.press(key)
+    assert f.locator("#val").input_value() == "1234" and f.locator("#pic").count() == 1
+    assert state(page)["cur"] == 0 and state(page)["undo"] == 0 and state(page)["box"] is not None
+    ctx.close()
+    assert errors == []
 
 
 # ---------- 저장

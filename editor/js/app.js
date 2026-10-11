@@ -4,12 +4,16 @@
 import { download, objParticle } from './util.js';
 import { A, DeckModel } from './deck.js';
 import { Canvas } from './canvas.js';
+import { Formatter } from './format.js';
 import { History } from './history.js';
+import { Pick } from './pick.js';
 import { openSource } from './source.js';
 import { Toc } from './toc.js';
 
 const NOTES_MS = 700;
-const HINT = '글은 눌러서 바로 고칩니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
+const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
+  + '크기를 바꿉니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
+const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -21,11 +25,19 @@ const els = {
   tokenDlg: $('tokenDlg'), tokenForm: $('tokenForm'), token: $('token'), tokenErr: $('tokenErr'), tokenNew: $('tokenNew'),
   tokenCancel: $('tokenCancel'), cfDlg: $('cfDlg'), cfText: $('cfText'), cfCancel: $('cfCancel'),
   cfDownload: $('cfDownload'), cfOverwrite: $('cfOverwrite'),
+  fBox: $('fBox'), bW: $('bW'), bH: $('bH'), bX: $('bX'), bY: $('bY'),
+};
+const fmtEls = {
+  bar: $('fmt'), font: $('fFont'), size: $('fSize'), sizes: $('fSizes'), smaller: $('fSmaller'), bigger: $('fBigger'),
+  bold: $('fBold'), italic: $('fItalic'), under: $('fUnder'), strike: $('fStrike'), color: $('fColor'), mark: $('fMark'),
+  unmark: $('fUnmark'), left: $('fLeft'), center: $('fCenter'), right: $('fRight'), justify: $('fJustify'), clear: $('fClear'),
 };
 
 let source = null;
 let model = null;
 let canvas = null;
+let pick = null;
+let fmt = null;
 let toc = null;
 let hist = null;
 let notesPending = null;
@@ -95,6 +107,7 @@ function refresh() {
 /* ---------- 장 보기·바꾸기 */
 
 function settle() {
+  pick.end();
   canvas.stop();
   flushNotes();
 }
@@ -103,9 +116,31 @@ function go(i, focusToc) {
   settle();
   model.show(i);
   canvas.arm();
+  pick.clear();
   toc.select(model.cur, focusToc);
   showNotes();
+  fmt.update();
   refresh();
+}
+
+/* ---------- 고른 상자의 자리·크기 칸 */
+
+// 칸은 늘 자리를 차지한 채 보이고 숨는다(visibility) — 칸이 생기고 없어지며 서식 막대의 줄 수가 바뀌면 덱 화면의 배율이
+// 바뀌어, 누르는 사이 상자가 포인터 밑에서 움직인다. force 면 고치는 중인 칸의 값도 지금 상자의 값으로(받지 않은 값 등).
+function showBox(force = false) {
+  const box = pick.box;
+  els.fBox.classList.toggle('off', !box);
+  if (!box) {
+    // 숨긴 칸에 초점이 남으면 다음 키(PageDown 등)를 칸이 먹는다
+    if (els.fBox.contains(document.activeElement)) document.activeElement.blur();
+    return;
+  }
+  const g = pick.geom(box);
+  const movable = pick.movable(box);
+  for (const label of els.fBox.querySelectorAll('.pos-field')) label.classList.toggle('off', !movable);
+  for (const [input, v] of [[els.bW, g.w], [els.bH, g.h], [els.bX, g.x], [els.bY, g.y]]) {
+    if (force || document.activeElement !== input) input.value = String(v);
+  }
 }
 
 function rerender(i, focusToc) {
@@ -350,7 +385,14 @@ function downloadNow() {
 /* ---------- 키 */
 
 // fromFrame: 캔버스(덱 iframe)에서 온 키 — 방향키로도 장을 넘긴다. inText: 글 칸·노트 칸에서 쓰는 중.
-function onKey(e, inText, fromFrame) {
+// field: 덱에 원래 있던 입력 칸(input 등)에서 쓰는 중 — 글만 받는 칸이라 서식 단축키도 쓰지 않는다.
+function onKey(e, inText, fromFrame, field = false) {
+  // 상자를 끄는 동안에는 키를 쓰지 않는다(Esc 는 끌기 취소) — 장을 넘기거나 되돌리면 끌던 상자의 장과 기록이 엇갈린다
+  if (pick.drag) {
+    e.preventDefault();
+    pick.key(e);
+    return;
+  }
   const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
   const k = (e.key || '').toLowerCase();
   if (mod && (k === 'z' || k === 'y')) {
@@ -363,12 +405,25 @@ function onKey(e, inText, fromFrame) {
     save(false);
     return;
   }
+  // 서식 단축키 — 덱의 글(또는 고른 상자)에. 노트 칸에서는 쓰지 않는다(글만 받는 칸이다).
+  const fmtKey = mod && !e.shiftKey && (SHORTCUTS[e.code] || e.code === 'BracketLeft' || e.code === 'BracketRight');
+  if (fmtKey && !(inText && (!fromFrame || field))) {
+    e.preventDefault();
+    if (SHORTCUTS[e.code]) fmt.run(SHORTCUTS[e.code]);
+    else fmt.step(e.code === 'BracketRight' ? 1 : -1);
+    return;
+  }
   if (inText) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (fromFrame) canvas.stop();
+      if (fromFrame && !field) canvas.stop();
       else e.target.blur();
     }
+    return;
+  }
+  // 고른 상자가 있으면 방향키는 상자를 옮기고 Delete 는 상자를 지운다
+  if (pick.key(e)) {
+    e.preventDefault();
     return;
   }
   if (e.altKey || mod) return;
@@ -395,9 +450,20 @@ function bind() {
   els.download.addEventListener('click', downloadNow);
   els.notes.addEventListener('input', onNotesInput);
   els.notes.addEventListener('blur', flushNotes);
+  for (const [input, field] of [[els.bW, 'w'], [els.bH, 'h'], [els.bX, 'x'], [els.bY, 'y']]) {
+    // 받지 않은 값(최소보다 작은 크기 등)·반올림한 값은 칸에도 실제 값으로 되돌린다
+    input.addEventListener('change', () => { pick.set(field, parseFloat(input.value)); showBox(true); });
+  }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
-    if (t instanceof HTMLInputElement || (t instanceof Element && t.closest('dialog'))) return;
+    // 서식 막대의 칸(크기·자리 숫자, 글꼴)에서도 Ctrl+Z·Y·S 는 편집기의 것 — 칸은 Enter·떠날 때 바로 입히므로 칸 안의
+    // 되돌리기는 쓸 일이 없다
+    const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+    if (mod && t instanceof Element && t.closest('#fmt') && ['z', 'y', 's'].includes((e.key || '').toLowerCase())) {
+      onKey(e, false, false);
+      return;
+    }
+    if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || (t instanceof Element && t.closest('dialog'))) return;
     if (t instanceof Element && t.closest('#toc') && !e.ctrlKey && !e.metaKey) return;   // 차례는 제 키를 쓴다
     onKey(e, t === els.notes, false);
   });
@@ -448,12 +514,24 @@ async function boot() {
       hist.push([op]);
       const i = model.indexOfId(op.id);
       if (i >= 0) toc.updateTitle(i);
+      if (pick) pick.place();
       refresh();
     },
-    onKey: (e, inText) => onKey(e, inText, true),
-    onInput: refresh,
+    onKey: (e, inText, field) => onKey(e, inText, true, field),
+    onInput: () => { if (pick) pick.place(); refresh(); },
+    onFit: () => { if (pick) pick.place(); },
   });
+  pick = new Pick({
+    layer: $('pickLayer'), bar: fmtEls.bar, canvas, model,
+    onSelect: () => { showBox(); if (fmt) fmt.update(); },
+    onPlace: () => showBox(),
+  });
+  // 자리 칸(왼쪽·위)은 상자를 옮길 수 있는 빌더 덱에만 — 덱마다 한 번 정해 서식 막대의 폭이 바뀌지 않게
+  for (const label of els.fBox.querySelectorAll('.pos-field')) label.hidden = model.family !== 'builder';
   canvas.attach();
+  pick.attach();
+  fmt = new Formatter({ els: fmtEls, canvas, model, pick, msg });
+  fmt.attach();
   toc = new Toc({ list: els.toc, model, onGo: go, onMove: moveSlide, onDelete: deleteSlide, onRename: renameSlide });
   toc.render();
   bind();
@@ -466,7 +544,7 @@ async function boot() {
     state: () => ({
       cur: model.cur, n: model.slides.length, family: model.family, notesMode: model.notesMode, size: { ...model.size },
       titles: model.slides.map((s) => model.titleOf(s)), dirty: isDirty(), undo: hist.undoStack.length,
-      redo: hist.redoStack.length, saving,
+      redo: hist.redoStack.length, saving, scale: canvas.scale, box: pick.box ? pick.geom(pick.box) : null,
     }),
     serialize: () => { settle(); return model.serialize(); },
     notes: () => model.slides.map((s) => model.notesOf(s)),

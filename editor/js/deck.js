@@ -20,6 +20,7 @@ export const A = {
   off: `${P}off`,         // 지금 보지 않는 장
   force: `${P}force`,     // 덱 CSS 로는 보이지 않는 장을 억지로 보이게
   ce: `${P}ce`,           // 편집기가 contenteditable 을 붙인 글 칸
+  st: `${P}st`,           // 글자 서식을 블록으로 올리기 전 그 블록의 style — 서식 지우기가 되돌릴 값
 };
 
 const UI_STYLE = (w, h) => `
@@ -33,7 +34,7 @@ html, body { overflow: hidden !important; }
 [${A.chrome}], [${A.chrome}] * { visibility: hidden !important; }
 [${A.off}] { display: none !important; }
 [${A.force}] { display: block !important; }
-[${A.ce}] { cursor: text; }
+[${A.ce}] { cursor: text; -webkit-user-select: text !important; user-select: text !important; }
 [${A.ce}]:hover { outline: 1px dashed rgba(37, 99, 235, .55) !important; outline-offset: 2px !important; }
 [${A.ce}]:focus { outline: 2px solid #2563EB !important; outline-offset: 2px !important; }
 `;

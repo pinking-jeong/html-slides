@@ -42,12 +42,13 @@ export function textHosts(slide, family) {
 }
 
 export class Canvas {
-  constructor({ box, sheet, frame, model, onCommit, onKey, onInput }) {
-    Object.assign(this, { box, sheet, frame, model, onCommit, onKey, onInput });
+  constructor({ box, sheet, frame, model, onCommit, onKey, onInput, onFit }) {
+    Object.assign(this, { box, sheet, frame, model, onCommit, onKey, onInput, onFit });
     this.scale = 1;
     this.editing = null;     // 지금 고치는 글 칸
     this.pending = null;     // {id, before, t} — 아직 되돌리기 칸에 넣지 않은 글 고치기
     this.lastSnap = '';      // 지금 장의 마지막 사본(고치기 전 상태)
+    this.muted = false;      // change() 안 — 서식 명령이 내는 input 을 글 고치기로 세지 않는다
     this.armed = null;
     this.ro = new ResizeObserver(() => this.fit());
     this.ro.observe(this.box);
@@ -71,7 +72,12 @@ export class Canvas {
     d.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'none'; });
     d.addEventListener('drop', (e) => e.preventDefault());
     d.addEventListener('submit', (e) => e.preventDefault(), true);
-    d.addEventListener('keydown', (e) => this.onKey(e, !!this.hostOf(e.target)), true);
+    // 덱에 원래 있던 입력 칸(input·textarea·select)에서 친 키도 글 — 고른 상자를 지우거나 장을 넘기지 않는다
+    d.addEventListener('keydown', (e) => {
+      const host = this.hostOf(e.target);
+      const field = !host && !!e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '');
+      this.onKey(e, !!host || field, field);
+    }, true);
     this.fit();
     this.arm();
   }
@@ -87,6 +93,7 @@ export class Canvas {
     this.frame.style.transform = `scale(${s})`;
     this.sheet.style.width = `${Math.round(w * s)}px`;
     this.sheet.style.height = `${Math.round(h * s)}px`;
+    if (this.onFit) this.onFit();
   }
 
   /* ---------- 글 칸 */
@@ -160,7 +167,7 @@ export class Canvas {
     const host = this.hostOf(e.target);
     if (!host) return;
     if (this.model.family === 'builder' && host.classList.contains('tin')) normalizeTin(host);
-    this.touch();
+    if (!this.muted) this.touch();
   }
 
   onPaste(e) {
@@ -199,6 +206,34 @@ export class Canvas {
     if (slide === this.armed) this.lastSnap = after;
     if (after === p.before) return false;
     this.onCommit({ t: 'edit', id: p.id, a: p.before, b: after });
+    return true;
+  }
+
+  // 한 번에 끝나는 고치기(서식·상자 지우기·숫자로 크기 바꾸기) — 기다리던 글 고치기를 먼저 넣고, fn 이 지금 장을 바꾼 것을
+  // 되돌리기 한 칸으로 넣는다. 그 사이 서식 명령이 내는 input 은 글 고치기로 세지 않는다.
+  change(fn) {
+    this.commit();
+    const slide = this.model.current;
+    const id = slide.getAttribute(A.id);
+    const before = this.model.snap(slide);
+    this.muted = true;
+    try {
+      fn();
+    } finally {
+      this.muted = false;
+    }
+    return this.record(before, id);
+  }
+
+  // before(고치기 전 사본)와 지금 장을 견줘 바뀌었으면 되돌리기 칸으로 — 상자를 끌어 옮긴 뒤 등
+  record(before, id = this.model.current.getAttribute(A.id)) {
+    if (this.pending) { clearTimeout(this.pending.t); this.pending = null; }
+    const slide = this.model.byId(id);
+    if (!slide) return false;
+    const after = this.model.snap(slide);
+    if (slide === this.armed) this.lastSnap = after;
+    if (after === before) return false;
+    this.onCommit({ t: 'edit', id, a: before, b: after });
     return true;
   }
 
