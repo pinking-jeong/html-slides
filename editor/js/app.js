@@ -1,0 +1,476 @@
+/* 덱 편집기 — 덱을 불러와 차례·캔버스·노트·저장을 잇는다.
+   갤러리에서는 editor/?deck=<덱 id>(GitHub 토큰으로 저장), 이 PC 에서는 slides edit 이 연 editor/?local=1#key=…(파일에 저장). */
+
+import { download, objParticle } from './util.js';
+import { A, DeckModel } from './deck.js';
+import { Canvas } from './canvas.js';
+import { History } from './history.js';
+import { openSource } from './source.js';
+import { Toc } from './toc.js';
+
+const NOTES_MS = 700;
+const HINT = '글은 눌러서 바로 고칩니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  app: $('app'), back: $('back'), title: $('title'), where: $('where'), dirty: $('dirty'),
+  undo: $('undo'), redo: $('redo'), present: $('present'), download: $('download'), save: $('save'),
+  count: $('count'), add: $('add'), dup: $('dup'), del: $('del'), up: $('up'), down: $('down'), toc: $('toc'),
+  canvas: $('canvas'), sheet: $('sheet'), frame: $('frame'), pos: $('pos'), hint: $('hint'), notes: $('notes'),
+  loading: $('loading'), fail: $('fail'), failMsg: $('failMsg'), status: $('status'),
+  tokenDlg: $('tokenDlg'), tokenForm: $('tokenForm'), token: $('token'), tokenErr: $('tokenErr'), tokenNew: $('tokenNew'),
+  tokenCancel: $('tokenCancel'), cfDlg: $('cfDlg'), cfText: $('cfText'), cfCancel: $('cfCancel'),
+  cfDownload: $('cfDownload'), cfOverwrite: $('cfOverwrite'),
+};
+
+let source = null;
+let model = null;
+let canvas = null;
+let toc = null;
+let hist = null;
+let notesPending = null;
+let saving = false;
+let msgTimer = 0;
+
+/* ---------- 알림 */
+
+function msg(text, kind = '', ms = 6000, link = null) {
+  const st = els.status;
+  st.replaceChildren(text);
+  if (link) {
+    const a = document.createElement('a');
+    a.href = link.href;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = link.label;
+    st.append(' ', a);
+  }
+  st.className = `status show${kind ? ` ${kind}` : ''}`;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => st.classList.remove('show'), ms);
+}
+
+// rescue: 편집 화면이 다른 문서로 넘어가 멈춘 경우 — 고친 덱(옛 문서)은 아직 손에 있으니 저장하지 않은 고침을 받아 두게 한다
+function fail(message, rescue = false) {
+  const keep = rescue && !!model && !!hist && isDirty();
+  els.loading.hidden = true;
+  els.app.hidden = true;
+  $('failTitle').textContent = rescue ? '편집을 멈췄습니다' : '편집기를 열지 못했습니다';
+  els.failMsg.textContent = keep ? `${message} 저장하지 않은 고침은 아래 단추로 HTML 파일로 받아 두세요.` : message;
+  // 이 PC 편집(slides edit)에는 돌아갈 갤러리가 없다
+  $('failBack').hidden = new URLSearchParams(location.search).get('local') === '1';
+  $('failRescue').hidden = !keep;
+  els.fail.hidden = false;
+}
+
+function rescue() {
+  try {
+    settle();
+    download(model.serialize(), editedName());
+  } catch (e) {
+    els.failMsg.textContent = `파일을 만들지 못했습니다 — ${e.message}`;
+  }
+}
+
+const isDirty = () => !!hist && (hist.dirty || !!canvas.pending || !!notesPending);
+
+function refresh() {
+  if (!model) return;
+  const n = model.slides.length;
+  const i = model.cur;
+  els.undo.disabled = !hist.canUndo && !canvas.pending && !notesPending;
+  els.redo.disabled = !hist.canRedo;
+  els.del.disabled = n <= 1;
+  els.up.disabled = i <= 0;
+  els.down.disabled = i >= n - 1;
+  els.count.textContent = `${n}장`;
+  els.pos.textContent = `${i + 1} / ${n}`;
+  const dirty = isDirty();
+  els.dirty.hidden = !dirty;
+  els.save.disabled = saving;
+  els.save.textContent = saving ? '저장하는 중…' : '저장';
+  document.title = `${dirty ? '● ' : ''}${source.title} — 덱 편집`;
+}
+
+/* ---------- 장 보기·바꾸기 */
+
+function settle() {
+  canvas.stop();
+  flushNotes();
+}
+
+function go(i, focusToc) {
+  settle();
+  model.show(i);
+  canvas.arm();
+  toc.select(model.cur, focusToc);
+  showNotes();
+  refresh();
+}
+
+function rerender(i, focusToc) {
+  toc.render();
+  go(i, focusToc);
+}
+
+function addSlide() {
+  settle();
+  const el = model.blankFrom(model.current);
+  const at = model.insert(el, model.cur + 1);
+  const id = el.getAttribute(A.id);
+  if (model.notesMode === 'json') model.notes.set(id, '');
+  hist.push([{ t: 'ins', id, at, html: model.snap(el), notes: '', ws: model.sep }]);
+  rerender(at);
+  msg('제목만 있는 새 장을 넣었습니다 — 글을 눌러 바로 고치세요.');
+}
+
+function duplicateSlide() {
+  settle();
+  const src = model.current;
+  const { el, scripted } = model.duplicate(src);
+  const notes = model.notesOf(src);
+  const at = model.insert(el, model.cur + 1);
+  const id = el.getAttribute(A.id);
+  if (model.notesMode === 'json') model.notes.set(id, notes);
+  hist.push([{ t: 'ins', id, at, html: model.snap(el), notes, ws: model.sep }]);
+  rerender(at);
+  if (scripted.length) {
+    msg('장을 복제했습니다 — 이 장의 차트·위젯은 덱 스크립트가 그리는 것이라 복제한 장에서는 비어 보일 수 있습니다.', 'warn', 12000);
+  } else {
+    msg('장을 복제했습니다.');
+  }
+}
+
+function deleteSlide(i = model.cur) {
+  if (model.slides.length <= 1) {
+    msg('마지막 한 장은 지울 수 없습니다.', 'warn');
+    return;
+  }
+  settle();
+  const el = model.slides[i];
+  const title = model.titleOf(el) || `${i + 1}장`;
+  const op = { t: 'del', id: el.getAttribute(A.id), at: i, html: model.snap(el), notes: model.notesOf(el) };
+  const fromToc = toc.focused() >= 0;
+  op.ws = model.remove(i);
+  hist.push([op]);
+  rerender(Math.min(i, model.slides.length - 1), fromToc);
+  msg(`${objParticle(`‘${title}’ 장`)} 지웠습니다 — 되돌리기(Ctrl+Z)로 살릴 수 있습니다.`);
+}
+
+function moveSlide(from, to, focusToc) {
+  const n = model.slides.length;
+  if (to < 0 || to >= n || to === from) return;
+  settle();
+  const id = model.slides[from].getAttribute(A.id);
+  model.move(from, to);
+  hist.push([{ t: 'move', id, from, to }]);
+  rerender(to, focusToc);
+}
+
+function renameSlide(i, title) {
+  const s = model.slides[i];
+  if (!s) return;
+  settle();
+  const before = model.titleOf(s);
+  model.setTitle(s, title);
+  hist.push([{ t: 'title', id: s.getAttribute(A.id), a: before, b: title }]);
+  rerender(i, true);
+}
+
+/* ---------- 되돌리기 */
+
+function applyOp(op, dir) {
+  const fwd = dir === 'redo';
+  const slide = () => model.byId(op.id);
+  if (op.t === 'edit') model.restore(op.id, fwd ? op.b : op.a);
+  else if (op.t === 'notes') { if (slide()) model.setNotes(slide(), fwd ? op.b : op.a); }
+  else if (op.t === 'title') { if (slide()) model.setTitle(slide(), fwd ? op.b : op.a); }
+  else if (op.t === 'move') {
+    const i = model.indexOfId(op.id);
+    if (i >= 0) model.move(i, fwd ? op.to : op.from);
+  } else if ((op.t === 'ins') === fwd) {
+    model.insertHtml(op.html, op.at, op.notes, op.ws);
+  } else {
+    const i = model.indexOfId(op.id);
+    if (i >= 0) model.remove(i);
+  }
+}
+
+function travel(dir) {
+  settle();
+  const g = dir === 'undo' ? hist.undo() : hist.redo();
+  if (!g) { refresh(); return; }
+  const last = dir === 'undo' ? g.ops[0] : g.ops[g.ops.length - 1];
+  let i = model.indexOfId(last.id);
+  if (i < 0) i = Math.min(Number.isInteger(last.at) ? last.at : model.cur, model.slides.length - 1);
+  rerender(i);
+  msg(dir === 'undo' ? '되돌렸습니다.' : '다시 했습니다.', '', 2500);
+}
+
+/* ---------- 노트 */
+
+function showNotes() {
+  const none = model.notesMode === 'none';
+  els.notes.disabled = none;
+  els.notes.value = none ? '' : model.notesOf(model.current);
+  els.notes.placeholder = none ? '이 덱에는 발표자 노트 자리가 없습니다.' : '이 장의 발표자 노트';
+}
+
+function onNotesInput() {
+  const s = model.current;
+  const id = s.getAttribute(A.id);
+  if (notesPending && notesPending.id !== id) flushNotes();
+  if (!notesPending) notesPending = { id, before: model.notesOf(s), t: 0 };
+  model.setNotes(s, els.notes.value);
+  clearTimeout(notesPending.t);
+  notesPending.t = setTimeout(flushNotes, NOTES_MS);
+  refresh();
+}
+
+function flushNotes() {
+  const p = notesPending;
+  if (!p) return;
+  clearTimeout(p.t);
+  notesPending = null;
+  const s = model.byId(p.id);
+  const now = s ? model.notesOf(s) : p.before;
+  if (now !== p.before) hist.push([{ t: 'notes', id: p.id, a: p.before, b: now }]);
+  canvas.resnap();
+  refresh();
+}
+
+/* ---------- 저장 */
+
+const editedName = () => `${String(source.fileName).replace(/\.html?$/i, '') || '발표자료'}_편집본.html`;
+
+function askToken(error) {
+  return new Promise((resolve) => {
+    const dlg = els.tokenDlg;
+    els.tokenErr.textContent = error || '';
+    els.tokenErr.hidden = !error;
+    els.tokenNew.href = source.tokenUrl;
+    els.token.value = '';
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      els.tokenForm.removeEventListener('submit', onSubmit);
+      els.tokenCancel.removeEventListener('click', onCancel);
+      dlg.removeEventListener('close', onClose);
+      if (dlg.open) dlg.close();
+      resolve(ok);
+    };
+    const onSubmit = (e) => {
+      e.preventDefault();
+      const v = els.token.value.trim();
+      if (!v) { els.token.focus(); return; }
+      source.setToken(v);
+      els.token.value = '';
+      finish(true);
+    };
+    const onCancel = () => finish(false);
+    const onClose = () => finish(false);
+    els.tokenForm.addEventListener('submit', onSubmit);
+    els.tokenCancel.addEventListener('click', onCancel);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+    els.token.focus();
+  });
+}
+
+function conflict(text, message) {
+  const dlg = els.cfDlg;
+  els.cfText.textContent = `${message} ${source.kind === 'github'
+    ? '덮어쓰면 저장소에 있던 그 판은 GitHub 의 바뀐 기록에 남습니다. 먼저 ‘편집본 HTML 받기’로 지금 편집을 파일로 받아 둘 수도 있습니다.'
+    : '덮어쓰면 파일에 있던 그 판은 백업 폴더에 남습니다. 먼저 ‘편집본 HTML 받기’로 지금 편집을 파일로 받아 둘 수도 있습니다.'}`;
+  const done = () => {
+    els.cfDownload.removeEventListener('click', onDl);
+    els.cfOverwrite.removeEventListener('click', onOver);
+    els.cfCancel.removeEventListener('click', onCancel);
+    if (dlg.open) dlg.close();
+  };
+  const onDl = () => download(text, editedName());
+  const onOver = () => { done(); save(true); };
+  const onCancel = () => done();
+  els.cfDownload.addEventListener('click', onDl);
+  els.cfOverwrite.addEventListener('click', onOver);
+  els.cfCancel.addEventListener('click', onCancel);
+  dlg.addEventListener('close', done, { once: true });
+  dlg.showModal();
+}
+
+async function save(force) {
+  if (saving || !model) return;
+  settle();
+  if (!source.hasToken() && !(await askToken())) return;
+  let text = '';
+  try {
+    text = model.serialize();
+  } catch (e) {
+    msg(`저장할 파일을 만들지 못했습니다 — ${e.message}`, 'err', 12000);
+    return;
+  }
+  const mark = hist.topSeq();
+  let tokenError = '';
+  saving = true;
+  refresh();
+  msg('저장하는 중…', '', 60000);
+  try {
+    const r = await source.save(text, { force: !!force });
+    hist.savedSeq = mark;                 // 저장하는 사이에 고친 것은 여전히 '저장 안 함'
+    msg(r.message, 'ok', 12000, r.link ? { href: r.link, label: '커밋 보기' } : null);
+  } catch (e) {
+    if (e.code === 'token') {
+      if (e.forget) source.forgetToken();
+      tokenError = e.message;
+    } else if (e.code === 'conflict') {
+      conflict(text, e.message);
+    } else {
+      msg(e.message, 'err', 15000);
+    }
+  } finally {
+    saving = false;
+    refresh();
+  }
+  if (!tokenError) return;
+  if (await askToken(tokenError)) await save(force);
+  else msg(`저장하지 않았습니다 — ${tokenError}`, 'err', 12000);
+}
+
+function downloadNow() {
+  settle();
+  try {
+    download(model.serialize(), editedName());
+    msg('지금 편집한 덱을 HTML 파일로 받았습니다(저장소·원본 파일은 그대로입니다).');
+  } catch (e) {
+    msg(`파일을 만들지 못했습니다 — ${e.message}`, 'err', 12000);
+  }
+}
+
+/* ---------- 키 */
+
+// fromFrame: 캔버스(덱 iframe)에서 온 키 — 방향키로도 장을 넘긴다. inText: 글 칸·노트 칸에서 쓰는 중.
+function onKey(e, inText, fromFrame) {
+  const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+  const k = (e.key || '').toLowerCase();
+  if (mod && (k === 'z' || k === 'y')) {
+    e.preventDefault();
+    travel(k === 'y' || e.shiftKey ? 'redo' : 'undo');
+    return;
+  }
+  if (mod && k === 's') {
+    e.preventDefault();
+    save(false);
+    return;
+  }
+  if (inText) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (fromFrame) canvas.stop();
+      else e.target.blur();
+    }
+    return;
+  }
+  if (e.altKey || mod) return;
+  const next = e.key === 'PageDown' || (fromFrame && (e.key === 'ArrowRight' || e.key === 'ArrowDown'));
+  const prev = e.key === 'PageUp' || (fromFrame && (e.key === 'ArrowLeft' || e.key === 'ArrowUp'));
+  if (next || prev) {
+    e.preventDefault();
+    go(model.cur + (next ? 1 : -1));
+  } else if (fromFrame && (e.key === 'Home' || e.key === 'End')) {
+    e.preventDefault();
+    go(e.key === 'Home' ? 0 : model.slides.length - 1);
+  }
+}
+
+function bind() {
+  els.add.addEventListener('click', addSlide);
+  els.dup.addEventListener('click', duplicateSlide);
+  els.del.addEventListener('click', () => deleteSlide());
+  els.up.addEventListener('click', () => moveSlide(model.cur, model.cur - 1));
+  els.down.addEventListener('click', () => moveSlide(model.cur, model.cur + 1));
+  els.undo.addEventListener('click', () => travel('undo'));
+  els.redo.addEventListener('click', () => travel('redo'));
+  els.save.addEventListener('click', () => save(false));
+  els.download.addEventListener('click', downloadNow);
+  els.notes.addEventListener('input', onNotesInput);
+  els.notes.addEventListener('blur', flushNotes);
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLInputElement || (t instanceof Element && t.closest('dialog'))) return;
+    if (t instanceof Element && t.closest('#toc') && !e.ctrlKey && !e.metaKey) return;   // 차례는 제 키를 쓴다
+    onKey(e, t === els.notes, false);
+  });
+  window.addEventListener('beforeunload', (e) => {
+    if (!isDirty()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+  // 덱 문서가 다른 주소로 바뀌면(자동 이동 설정 등) 편집을 멈춘다 — 그 문서는 이 덱이 아니다
+  els.frame.addEventListener('load', () => fail('덱 문서가 다른 주소로 바뀌어 편집을 멈췄습니다(자동으로 넘어가는 설정이 있는 덱일 수 있습니다).', true));
+  $('failDownload').addEventListener('click', rescue);
+}
+
+/* ---------- 시작 */
+
+async function boot() {
+  // 다른 창이 연 편집기(window.opener)나 다른 페이지 안에 든 편집기는 쓰지 않는다 — 같은 출처에서 도는 덱 스크립트가 그런
+  // 창을 손대 토큰을 가로챌 수 있다. 다만 이것만으로 다 막지는 못한다(README 의 ‘편집기와 토큰’).
+  if (window.top !== window || window.opener) {
+    fail('다른 창이나 페이지가 연 편집기는 쓰지 않습니다(토큰·열쇠를 지키려는 것입니다) — 편집기 주소를 브라우저에서 바로 '
+      + '열거나 갤러리의 덱 카드 ⋯ 메뉴에서 다시 여세요.');
+    return;
+  }
+  try {
+    source = await openSource(new URLSearchParams(location.search), location.hash);
+  } catch (e) {
+    fail(e.message);
+    return;
+  }
+  els.title.textContent = source.title;
+  els.where.textContent = source.label;
+  els.back.hidden = source.kind !== 'github';
+  els.present.hidden = !source.presentUrl;
+  if (source.presentUrl) els.present.href = source.presentUrl;
+  document.title = `${source.title} — 덱 편집`;
+  model = new DeckModel(els.frame);
+  try {
+    await model.load(source.text, source.base);
+  } catch (e) {
+    fail(e.message);
+    return;
+  }
+  source.text = '';
+  hist = new History(applyOp);
+  canvas = new Canvas({
+    box: els.canvas, sheet: els.sheet, frame: els.frame, model,
+    onCommit: (op) => {
+      hist.push([op]);
+      const i = model.indexOfId(op.id);
+      if (i >= 0) toc.updateTitle(i);
+      refresh();
+    },
+    onKey: (e, inText) => onKey(e, inText, true),
+    onInput: refresh,
+  });
+  canvas.attach();
+  toc = new Toc({ list: els.toc, model, onGo: go, onMove: moveSlide, onDelete: deleteSlide, onRename: renameSlide });
+  toc.render();
+  bind();
+  go(0);
+  els.hint.textContent = HINT;
+  els.loading.hidden = true;
+  els.app.classList.add('ready');
+  // 시험용 손잡이 — 토큰 등 저장소 정보는 내놓지 않는다
+  window.__hse = Object.freeze({
+    state: () => ({
+      cur: model.cur, n: model.slides.length, family: model.family, notesMode: model.notesMode, size: { ...model.size },
+      titles: model.slides.map((s) => model.titleOf(s)), dirty: isDirty(), undo: hist.undoStack.length,
+      redo: hist.redoStack.length, saving,
+    }),
+    serialize: () => { settle(); return model.serialize(); },
+    notes: () => model.slides.map((s) => model.notesOf(s)),
+  });
+}
+
+boot();

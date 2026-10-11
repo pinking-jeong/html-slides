@@ -11,6 +11,7 @@
   slides remove kns-2026                                               덱을 내린다(git 기록에는 남는다)
   slides forget kns-2026                                               등록만 지운다(올린 덱은 그대로)
   slides serve                                                         이 PC 에서 갤러리를 미리 본다
+  slides edit "원본.html"                                              덱을 편집기로 열어 고치고 그 파일에 저장한다(등록한 이름도 됨)
   slides url                                                           갤러리 주소를 알려 준다
 
 원칙
@@ -28,20 +29,26 @@ import argparse
 import datetime as dt
 import functools
 import hashlib
+import hmac
 import html
 import http.server
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import webbrowser
 import zipfile
 import zlib
 from pathlib import Path
+from secrets import token_urlsafe
+from urllib.parse import quote, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DECKS_DIR = "decks"
@@ -83,6 +90,11 @@ LOCAL_REWRITE_MSG = ("이 PC 의 저장소에서 이미 올린 커밋 {n}개를 
                      "원격의 기록도 고치려던 것이면 저장소 폴더에서 git push --force-with-lease {remote} {branch} 로 직접 "
                      "올리세요(그사이 원격에 새로 올라온 것이 있으면 함께 지워지니 git log {remote}/{branch} 로 먼저 살펴보세요).\n"
                      "실수였다면 git reset --hard {remote}/{branch} 로 이 PC 를 원격에 맞추세요(원본 HTML 은 저장소 밖에 있어 그대로입니다).")
+OUTSIDE_WEB_MSG = ("원격의 새 판이 decks/ 밖의 파일을 바꿨습니다 — 갤러리·편집기·웹 올리기는 decks/ 만 고치므로, 직접 올린 것이 "
+                   "아니면 토큰이 샜을 수 있습니다. 받으면 다음 slides 실행 때 그 코드가 이 PC 에서 돌기 때문에 저절로 받지 "
+                   "않았습니다:\n  {files}\n"
+                   "저장소 폴더에서 git log -p HEAD..{remote}/{branch} -- {paths} 로 살펴보고, 직접 올린 것이 맞으면 "
+                   "slides sync --trust-remote 로 받으세요.")
 RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 PUBLIC_WARNING = ("공개 저장소입니다 — 올린 덱은 누구나 볼 수 있고(갤러리 목록과 저장소에 다 보임), "
                   "올릴 때마다 공개 기록으로 남아 지울 수 없다고 보아야 합니다.")
@@ -565,6 +577,7 @@ class Repo:
         self.root = root.resolve()
         self.remote = remote
         self.interactive = interactive          # False 면 로그인 창을 띄우지 않는다(watch)
+        self.trust_remote = False               # True 면 원격의 새 판이 decks/ 밖을 바꿨어도 받는다(sync --trust-remote)
         if not (self.root / ".git").exists():
             raise SlidesError(f"git 저장소가 아닙니다: {self.root}")
         self._gitdir: Path | None = None
@@ -677,6 +690,23 @@ class Repo:
             if full and full not in made:
                 bad.append(f"{short} {subject}")
         return bad
+
+    def outside_web(self, up: str) -> list[str]:
+        """원격의 새 커밋이 decks/ 밖에서 바꾼 파일 — 웹(갤러리 배치·편집기 저장·웹 올리기)은 decks/ 만 고친다.
+        이름을 바꾼 것은 옛 이름·새 이름을 둘 다 본다(밖의 파일을 decks/ 로 옮겨 숨기지 못하게)."""
+        out = self.git("diff", "--name-only", "--no-renames", "-z", f"HEAD...{up}", "--")
+        return [p for p in out.split("\0") if p and not p.startswith(f"{DECKS_DIR}/")]
+
+    def refuse_outside_web(self, up: str) -> None:
+        """원격의 새 판이 decks/ 밖을 바꿨으면 받지 않고 멈춘다 — 샌 토큰으로 tools/ 를 고쳐 이 PC 에서 돌리지 못하게."""
+        if self.trust_remote:
+            return
+        outside = self.outside_web(up)
+        if outside:
+            more = f"\n  … 외 {len(outside) - 10}개" if len(outside) > 10 else ""
+            raise SlidesError(OUTSIDE_WEB_MSG.format(
+                files="\n  ".join(outside[:10]) + more, remote=self.remote, branch=self.target_branch,
+                paths=" ".join(f'"{p}"' for p in outside[:10])))
 
     def carries_purged(self, new: str) -> bool:
         """원격에 한때 있다가 지금(new)은 없는 커밋 — 기록을 고쳐 쓴 흔적 — 을 이 PC 의 HEAD 가 아직 품고 있는가.
@@ -860,6 +890,7 @@ class Repo:
             self.mark_synced()
             return []
         if not self.count(f"{up}..HEAD"):
+            self.refuse_outside_web(up)
             r = self.run("merge", "--ff-only", "-q", up, check=False)
             if r.returncode != 0:
                 raise SlidesError("원격의 새 판이 이 PC 에서 고치던 파일과 겹쳐 받지 못했습니다(고침은 그대로 둠) — "
@@ -871,6 +902,7 @@ class Repo:
             raise SlidesError("원격에 새 판이 있는데, 이 PC 에 slides 가 만들지 않은 올리지 못한 커밋이 있어 합치지 "
                               "않았습니다:\n  " + "\n  ".join(foreign[:10]) +
                               "\n저장소 폴더에서 git pull --rebase 로 합친 뒤 git push 해 주세요.")
+        self.refuse_outside_web(up)
         busy = self.git("status", "--porcelain", "--untracked-files=no").strip()
         if busy:
             raise SlidesError("원격의 새 판과 이 PC 의 올리지 못한 커밋을 합치려면, 저장소 안에서 고치던 파일을 먼저 "
@@ -1545,6 +1577,7 @@ def sync(repo: Repo, push: bool = True, quiet: bool = False, wait: float = 60) -
 
 
 def cmd_sync(repo: Repo, args) -> int:
+    repo.trust_remote = args.trust_remote
     if not sync(repo, push=not args.no_push):
         print("바뀐 덱이 없습니다.")
     return 0
@@ -1784,7 +1817,6 @@ def print_urls(repo: Repo, rel: str | None = None) -> None:
         return
     print(f"갤러리: {base}  (Actions 가 1~2분 뒤 반영)")
     if rel:
-        from urllib.parse import quote
         kind = kind_of(rel)
         if kind in (".pdf", ".pptx"):            # PDF·PPTX 는 갤러리의 뷰어로 연다
             print(f"이 덱: {base}viewer/{kind[1:]}.html#file={quote(rel, safe='')}")
@@ -1845,6 +1877,444 @@ def cmd_serve(repo: Repo, args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 이 PC 의 덱 고치기(slides edit)
+
+EDIT_MAX = 256 * 1024 * 1024            # 편집기가 읽고 쓰는 덱의 최대 크기
+BACKUP_KEEP = 30                        # 덱마다 남기는 '저장 전 판' 수
+BACKUP_RE = re.compile(r"^\d{8}-\d{6}-\d{6}-[0-9a-f]{8}\.html?$")     # 이름 순서 = 남긴 순서
+EDITOR_DIR = ROOT / "editor"
+# 편집 화면(스크립트가 돌지 않음)이 부르는 덱 폴더의 파일 — 웹에서 쓰는 형식만. 발표 화면은 그 가운데 SHOW_TYPES 만.
+EDIT_TYPES = {
+    ".html": "text/html", ".htm": "text/html", ".css": "text/css", ".js": "text/javascript",
+    ".mjs": "text/javascript", ".json": "application/json", ".map": "application/json", ".txt": "text/plain",
+    ".csv": "text/csv", ".tsv": "text/tab-separated-values", ".xml": "application/xml", ".vtt": "text/vtt",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+    ".avif": "image/avif", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".bmp": "image/bmp",
+    ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".ogv": "video/ogg", ".ogg": "audio/ogg",
+    ".opus": "audio/ogg", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac",
+    ".flac": "audio/flac", ".pdf": "application/pdf", ".wasm": "application/wasm",
+}
+EDITOR_TYPES = (".html", ".css", ".js", ".svg")     # 편집기 자신의 파일
+# 발표 화면(덱 스크립트가 도는 쪽)이 내주는 것 — 고치는 덱 자신과 화면을 그리는 자료(스타일·스크립트·그림·글꼴·소리·영상)만.
+# 덱 스크립트(덱이 불러 쓰는 남의 라이브러리 포함)가 이름을 맞혀 같은 폴더의 문서·자료(.json·.txt·.pdf·다른 HTML 등)를
+# 읽어 가지 못하게 한다.
+SHOW_TYPES = {".css", ".js", ".mjs", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico", ".bmp",
+              ".woff", ".woff2", ".ttf", ".otf", ".mp4", ".m4v", ".webm", ".ogv", ".ogg", ".opus", ".mp3", ".wav",
+              ".m4a", ".aac", ".flac", ".vtt"}
+# 개인 파일이 모이는 폴더 — 여기 둔 덱에는 발표 화면을 열지 않는다(덱 스크립트가 사진 이름 등을 맞혀 읽지 못하게)
+PERSONAL_DIRS = {"desktop", "documents", "downloads", "pictures", "videos", "music",
+                 "바탕 화면", "문서", "다운로드", "사진", "동영상", "음악"}
+
+
+def backup_home() -> Path:
+    """저장 전 판을 남기는 곳 — Windows 는 %LOCALAPPDATA% 아래 html-slides/backups."""
+    base = os.environ.get("LOCALAPPDATA")
+    return (Path(base) if base else Path.home() / ".local" / "share") / "html-slides" / "backups"
+
+
+def personal_folder(folder: Path) -> bool:
+    """드라이브 맨 위, 홈과 그 위, 홈(또는 OneDrive) 바로 아래의 바탕 화면·문서·다운로드·사진 등인가."""
+    try:
+        f = folder.resolve()
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return True
+    if f.parent == f or inside(home, f):
+        return True
+    name = f.name.lower()
+    if f.parent == home and (name in PERSONAL_DIRS or name.startswith("onedrive")):
+        return True
+    return f.parent.parent == home and f.parent.name.lower().startswith("onedrive") and name in PERSONAL_DIRS
+
+
+def write_atomic(dst: Path, data: bytes) -> None:
+    """임시 파일에 다 쓴 뒤 한 번에 바꿔 넣는다 — 쓰다 멈춰도 반쯤 쓴 덱이 남지 않는다."""
+    fd, tmp = tempfile.mkstemp(prefix=".slides-", suffix=".tmp", dir=str(dst.parent))
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        if os.name != "nt" and dst.exists():
+            shutil.copymode(dst, tmp)           # mkstemp 는 나만 읽는 권한(0600)으로 만든다
+        replace_retry(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def like_original(text: str, cur: bytes | None) -> bytes:
+    """편집기가 보낸 글(줄바꿈은 늘 LF)을 지금 파일의 줄바꿈(CRLF)·BOM 에 맞춘 바이트로 — 손대지 않은 줄까지 바뀐 것으로 보이지 않게."""
+    out = text.replace("\r\n", "\n")
+    if cur:
+        crlf = cur.count(b"\r\n")
+        if crlf and crlf == cur.count(b"\n"):
+            out = out.replace("\n", "\r\n")
+    data = out.encode("utf-8")
+    if cur and cur.startswith(b"\xef\xbb\xbf") and not data.startswith(b"\xef\xbb\xbf"):
+        data = b"\xef\xbb\xbf" + data
+    return data
+
+
+def safe_child(base: Path, rel: str) -> Path | None:
+    """주소에서 온 /-경로 rel 이 가리키는 base 안의 파일. 밖으로 나가거나, 숨긴 이름(. 으로 시작)이거나,
+    드라이브·스트림(:)·역슬래시가 섞였으면 None."""
+    parts = rel.split("/")
+    if not rel or any(p in ("", ".", "..") or p.startswith(".") or ":" in p or "\\" in p for p in parts):
+        return None
+    try:
+        root = base.resolve()
+        file = root.joinpath(*parts).resolve()
+        if not inside(file, root) or any(p.startswith(".") for p in file.relative_to(root).parts):
+            return None             # 짧은 이름(8.3)·링크로 숨긴 이름이나 밖을 가리킨 것
+        return file if file.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+class EditConflict(Exception):
+    """편집기를 연 뒤에 파일이 다른 곳에서 바뀌었다. now: 지금 파일의 지문(없으면 '')."""
+
+    def __init__(self, now: str):
+        super().__init__(now)
+        self.now = now
+
+
+class EditSession:
+    """slides edit 한 번 — 고칠 파일 하나와 열쇠 둘.
+    key: 편집기·저장 API·편집 화면이 부르는 덱 폴더(주소의 # 뒤로만 건넨다).
+    show_key: 발표 화면 — 덱 스크립트가 보는 주소에는 이 열쇠만 들어간다."""
+
+    def __init__(self, path: Path, backups: Path):
+        self.path = path
+        self.folder = path.parent
+        self.key = token_urlsafe(32)
+        self.show_key = token_urlsafe(32)
+        tag = hashlib.sha256(os.path.normcase(str(path)).encode("utf-8")).hexdigest()[:10]
+        self.backups = backups / f"{path.stem[:40]}-{tag}"
+        self.first: Path | None = None          # 이번 실행에서 처음 남긴 판 — 고치기 시작하기 전의 파일
+        self.lock = threading.Lock()
+        self.present_url = ""
+
+    def read(self) -> bytes | None:
+        try:
+            return self.path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def keep(self, data: bytes) -> Path:
+        """저장 전 판을 남기고, 오래된 것은 최근 BACKUP_KEEP 개만 남긴다. 이번 실행에서 처음 남긴 판(고치기 시작하기 전의
+        파일)은 수와 상관없이 둔다. 이름의 시각은 늘 앞 판보다 뒤로 매긴다 — 시계가 거칠거나(옛 Windows 의 Python 은 약
+        16ms) 뒤로 가도 이름 순서가 남긴 순서와 같아야 오래된 것부터 지운다."""
+        self.backups.mkdir(parents=True, exist_ok=True)
+        when = dt.datetime.now()
+        names = sorted(p.name for p in self.backups.iterdir() if BACKUP_RE.match(p.name))
+        if names:
+            try:
+                when = max(when, dt.datetime.strptime(names[-1][:22], "%Y%m%d-%H%M%S-%f") + dt.timedelta(microseconds=1))
+            except ValueError:
+                pass
+        dst = self.backups / f"{when:%Y%m%d-%H%M%S-%f}-{hashlib.sha256(data).hexdigest()[:8]}{self.path.suffix.lower()}"
+        write_atomic(dst, data)
+        if self.first is None:
+            self.first = dst
+        for old in sorted(p for p in self.backups.iterdir() if BACKUP_RE.match(p.name))[:-BACKUP_KEEP]:
+            if old == self.first:
+                continue
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return dst
+
+    def save(self, text: str, want: str, force: bool) -> tuple[str, Path | None]:
+        """편집기를 연 판(want: 지문)이 지금 파일과 같을 때만 쓴다. force 면 그대로 덮되 지금 판은 남긴다.
+        (새 지문, 남긴 판 — 바뀐 것이 없으면 None)"""
+        with self.lock:
+            cur = self.read()
+            now = hashlib.sha256(cur).hexdigest() if cur is not None else ""
+            if not force and (cur is None or want != now):
+                raise EditConflict(now)
+            data = like_original(text, cur)
+            if data == cur:
+                return now, None
+            kept = self.keep(cur) if cur is not None else None
+            write_atomic(self.path, data)
+            return hashlib.sha256(data).hexdigest(), kept
+
+
+class EditServer(http.server.ThreadingHTTPServer):
+    """Windows 의 SO_REUSEADDR 은 남이 쓰는 포트에도 붙으므로 끄고, 남이 이 포트를 가로채지 못하게 독점으로 연다."""
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class EditHandler(http.server.BaseHTTPRequestHandler):
+    """slides edit 의 서버. 편집기(edit)와 발표 화면(show)은 포트를 나눠 출처가 다르다.
+    - 둘 다 이 PC 의 이름(127.0.0.1·localhost)과 제 포트로 온 요청만 받는다(DNS rebinding 막기).
+    - edit: 편집기 파일, 덱 읽기·저장 API(열쇠 머리글 + 같은 출처에서 온 요청만), 편집 화면이 부르는 덱 폴더의 그림·글꼴.
+      덱 폴더의 파일은 문서로 열려도 스크립트가 돌지 않게 CSP sandbox 를 붙인다.
+    - show: 덱 폴더만 — 덱 스크립트가 도는 곳이라 저장 API 와 출처·열쇠를 나눈다."""
+    server_version = "slides-edit"
+    sys_version = ""
+    session: EditSession
+    role = "edit"
+    allowed_hosts: set = set()
+    origins: set = set()
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        if (self.headers.get("Host") or "").lower() not in self.allowed_hosts:
+            self.send_error(421, "Misdirected Request")
+            return False
+        return True
+
+    def log_message(self, *args) -> None:
+        pass
+
+    # ---- 응답
+    def _send(self, status: int, ctype: str, body: bytes, extra: dict | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, status: int, **obj) -> None:
+        self._send(status, "application/json; charset=utf-8", json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _missing(self) -> None:
+        self._send(404, "text/plain; charset=utf-8", "없는 주소입니다.".encode("utf-8"))
+
+    def _route(self) -> str | None:
+        path = unquote(urlsplit(self.path).path)
+        return None if "\x00" in path else path
+
+    # ---- GET
+    def do_GET(self) -> None:
+        path = self._route()
+        if path is None:
+            return self._missing()
+        if self.role == "show":
+            return self._deck_file(path, self.session.show_key)
+        if path == "/api/deck":
+            return self._get_deck()
+        if path.startswith("/deck-files/"):
+            return self._deck_file(path, self.session.key)
+        if path.startswith("/editor/"):
+            return self._static(EDITOR_DIR, path[len("/editor/"):] or "index.html")
+        if path == "/assets/favicon.svg":
+            return self._static(ROOT / "assets", "favicon.svg")
+        self._missing()
+
+    def _static(self, base: Path, rel: str) -> None:
+        file = safe_child(base, rel)
+        if file is None or file.suffix.lower() not in EDITOR_TYPES:
+            return self._missing()
+        try:
+            body = file.read_bytes()
+        except OSError:
+            return self._missing()
+        ctype = EDIT_TYPES[file.suffix.lower()]
+        self._send(200, ctype + ("; charset=utf-8" if ctype.startswith("text/") else ""), body)
+
+    def _deck_file(self, path: str, key: str) -> None:
+        parts = path.split("/", 3)                      # ['', 'deck-files', 열쇠, 덱 폴더 안의 경로]
+        if (len(parts) < 4 or parts[1] != "deck-files"
+                or not hmac.compare_digest(parts[2].encode("utf-8"), key.encode("ascii"))):
+            return self._missing()
+        file = safe_child(self.session.folder, parts[3])
+        ctype = EDIT_TYPES.get(file.suffix.lower()) if file else None
+        if ctype and self.role == "show" and file != self.session.path and file.suffix.lower() not in SHOW_TYPES:
+            ctype = None                                # 발표 화면에는 덱 자신과 화면 자료만
+        if not ctype:
+            return self._missing()
+        try:
+            body = file.read_bytes()
+        except OSError:
+            return self._missing()
+        if file == self.session.path:
+            ctype += "; charset=utf-8"                  # 고치는 덱은 UTF-8 이다(열 때 확인)
+        # 편집 쪽 출처에서는 문서로 열려도 스크립트가 돌지 않게(그림·글꼴처럼 불러 쓰는 것에는 상관없음)
+        self._send(200, ctype, body, {"Content-Security-Policy": "sandbox"} if self.role == "edit" else None)
+
+    # ---- 덱 읽기·저장 API
+    def _api_ok(self, put: bool) -> bool:
+        """열쇠 머리글이 맞고 편집기(같은 출처)에서 온 요청인가. 아니면 403 을 보내고 False."""
+        given = (self.headers.get("X-HSE-Key") or "").encode("latin-1", "replace")
+        origin = self.headers.get("Origin")
+        if not hmac.compare_digest(given, self.session.key.encode("ascii")):
+            why = "열쇠가 맞지 않습니다 — slides edit 이 알려 준 주소로 다시 여세요"
+        elif ((put or origin is not None) and origin not in self.origins) or \
+                self.headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
+            why = "편집기가 아닌 곳에서 온 요청은 받지 않습니다"
+        else:
+            return True
+        self.close_connection = True
+        self._json(403, error=why)
+        return False
+
+    def _get_deck(self) -> None:
+        if not self._api_ok(put=False):
+            return
+        s = self.session
+        data = s.read()
+        if data is None:
+            return self._json(404, error=f"파일이 없어졌습니다 — {s.path}")
+        if len(data) > EDIT_MAX:
+            return self._json(413, error=f"덱이 너무 큽니다 — 편집기는 {EDIT_MAX >> 20} MB 까지 엽니다")
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._json(415, error="UTF-8 로 저장된 HTML 이 아닙니다 — UTF-8 로 다시 저장한 뒤 여세요")
+        self._send(200, "application/octet-stream", data, {
+            "X-HSE-Hash": hashlib.sha256(data).hexdigest(),
+            "X-HSE-Name": quote(s.path.name, safe=""),
+            "X-HSE-Path": quote(str(s.path), safe=""),
+            "X-HSE-Present": s.present_url,
+        })
+
+    def do_PUT(self) -> None:
+        if self.role != "edit" or self._route() != "/api/deck":
+            self.close_connection = True
+            return self._missing()
+        if not self._api_ok(put=True):
+            return
+        size = self.headers.get("Content-Length") or ""
+        if not re.fullmatch(r"[0-9]{1,12}", size):
+            self.close_connection = True
+            return self._json(411, error="보낸 내용의 크기(Content-Length)가 없습니다")
+        n = int(size)
+        if n > EDIT_MAX:
+            self.close_connection = True
+            return self._json(413, error=f"덱이 너무 큽니다({n >> 20} MB) — {EDIT_MAX >> 20} MB 까지 저장합니다")
+        body = self.rfile.read(n)
+        if len(body) != n:
+            return self._json(400, error="보낸 내용이 중간에 끊겼습니다")
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._json(400, error="UTF-8 글이 아닙니다")
+        if not text.strip():
+            return self._json(400, error="빈 내용은 저장하지 않습니다")
+        want = (self.headers.get("If-Match") or "").strip().strip('"')
+        try:
+            digest, kept = self.session.save(text, want, self.headers.get("X-HSE-Force") == "1")
+        except EditConflict as e:
+            return self._json(409, error="편집기를 연 뒤에 파일이 다른 곳에서 바뀌었습니다", hash=e.now)
+        except OSError as e:
+            return self._json(500, error="파일에 쓰지 못했습니다 — 읽기 전용이거나 다른 프로그램이 쓰는 중일 수 "
+                                         f"있습니다({e.strerror or e.__class__.__name__})")
+        print(f"[{stamp()}] 저장했습니다 — {self.session.path.name}" + (f"  (저장 전 판: {kept})" if kept else ""),
+              flush=True)
+        self._json(200, hash=digest, backup=str(kept) if kept else "")
+
+
+def edit_target(repo: Repo, arg: str) -> Path:
+    """slides edit 이 고칠 파일 — 파일 경로, 아니면 slides add 로 등록한 덱 이름(그 원본)."""
+    p = Path(arg).expanduser()
+    if not p.exists():
+        reg = load_registry(repo, quiet=True)
+        key = find_entry(reg, arg)
+        if not key:
+            raise SlidesError(f"'{arg}' 라는 파일도, 그 이름으로 등록한 덱도 없습니다 — 파일 경로나 slides list 의 이름을 적어 주세요")
+        p = Path(reg["decks"][key]["source"])
+        if not p.exists():
+            raise SlidesError(f"등록한 원본이 없습니다: {p}")
+    p = p.resolve()
+    if not p.is_file():
+        raise SlidesError(f"파일이 아닙니다: {p}")
+    if p.suffix.lower() not in (".html", ".htm"):
+        raise SlidesError("HTML 덱만 고칠 수 있습니다 — PDF·PPTX 는 원래 프로그램에서 고친 뒤 slides sync 로 올리세요")
+    if inside(p, repo.root):
+        rel = p.relative_to(repo.root).as_posix()
+        entry = load_registry(repo, quiet=True)["decks"].get(rel)
+        hint = (f'원본을 고치세요: slides edit "{entry["source"]}"' if entry
+                else "저장소의 덱은 갤러리에서 덱 카드의 ⋯ → ‘편집기에서 열기’로 고칩니다")
+        raise SlidesError(f"저장소 안의 파일({rel})은 여기서 고치지 않습니다 — decks/ 는 원본을 비춰 두는 거울입니다. {hint}")
+    size = p.stat().st_size
+    if size > EDIT_MAX:
+        raise SlidesError(f"덱이 너무 큽니다({size >> 20} MB) — 편집기는 {EDIT_MAX >> 20} MB 까지 엽니다")
+    try:
+        p.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        raise SlidesError("UTF-8 로 저장된 HTML 만 고칠 수 있습니다 — 다른 편집기에서 UTF-8 로 다시 저장한 뒤 여세요") from None
+    return p
+
+
+def edit_servers(session: EditSession, port: int = 0) -> tuple[EditServer, EditServer | None, str]:
+    """편집기 서버와 발표 화면 서버를 연다(아직 돌리지는 않는다). 덱이 개인 파일이 모이는 폴더에 있으면 발표 화면
+    서버는 열지 않는다(None). (편집기 서버, 발표 화면 서버, 편집기 주소)"""
+    made: list[EditServer] = []
+    roles = [("edit", port)] + ([] if personal_folder(session.folder) else [("show", 0)])
+    for role, want in roles:
+        handler = type(f"Edit{role.title()}Handler", (EditHandler,), {"session": session, "role": role})
+        try:
+            srv = EditServer(("127.0.0.1", want), handler)
+        except OSError as e:
+            for s in made:
+                s.server_close()
+            raise SlidesError(f"127.0.0.1:{want} 에 서버를 열지 못했습니다 — {e.strerror or e}"
+                              + (" (다른 --port 로 해 보세요)" if want else ""))
+        p = srv.server_address[1]
+        handler.allowed_hosts = {f"127.0.0.1:{p}", f"localhost:{p}"}
+        handler.origins = {f"http://{h}" for h in handler.allowed_hosts}
+        made.append(srv)
+    edit, show = made[0], (made[1] if len(made) > 1 else None)
+    if show:
+        session.present_url = (f"http://127.0.0.1:{show.server_address[1]}/deck-files/{session.show_key}/"
+                               f"{quote(session.path.name)}")
+    return edit, show, f"http://127.0.0.1:{edit.server_address[1]}/editor/?local=1#key={session.key}"
+
+
+def run_edit(edit: EditServer, show: EditServer | None) -> None:
+    if show:
+        threading.Thread(target=show.serve_forever, daemon=True).start()
+    try:
+        edit.serve_forever()
+    except KeyboardInterrupt:
+        print("\n멈췄습니다 — 열려 있는 편집기에서는 더 저장되지 않습니다(고친 것이 남았으면 편집기의 ‘내려받기’로 받으세요).")
+    finally:
+        if show:
+            show.shutdown()
+            show.server_close()
+        edit.server_close()
+
+
+def cmd_edit(repo: Repo, args) -> int:
+    path = edit_target(repo, args.file)
+    session = EditSession(path, Path(args.backup_dir) if args.backup_dir else backup_home())
+    edit, show, url = edit_servers(session, args.port)
+    print(f"고칠 덱: {path}")
+    print(f"편집기: {url}")
+    print(f"  저장하면 이 파일에 바로 씁니다. 저장 전 판은 {session.backups} 에 남깁니다"
+          f"(최근 {BACKUP_KEEP}개와, 이번에 고치기 시작하기 전의 판).")
+    if show is None:
+        print("  덱이 개인 파일이 모이는 폴더(바탕 화면·문서·다운로드 등)에 있어 ‘발표로 보기’는 켜지 않습니다 — "
+              "발표는 파일을 바로 여세요(덱을 따로 만든 폴더에 두면 켜집니다).")
+    print("  주소의 key 는 이번 실행에만 쓰는 열쇠입니다. 다 고쳤으면 이 창에서 Ctrl+C 로 멈추세요.", flush=True)
+    if not args.no_open:
+        webbrowser.open(url)
+    run_edit(edit, show)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="slides", description="html-slides 로컬 도구")
     ap.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
@@ -1870,6 +2340,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sync", help="바뀐 덱을 맞춰 올린다")
     s.add_argument("--no-push", action="store_true")
+    s.add_argument("--trust-remote", action="store_true",
+                   help="원격의 새 판이 decks/ 밖(도구·사이트 코드)을 바꿨어도 받는다 — 직접 올린 것인지 살펴본 뒤에만")
     s.set_defaults(func=cmd_sync)
 
     w = sub.add_parser("watch", help="원본을 지켜보다 저장되면 자동으로 올린다")
@@ -1896,6 +2368,13 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--no-thumbs", action="store_true", help="미리보기 그림을 찍지 않는다")
     v.add_argument("--no-open", action="store_true", help="브라우저를 열지 않는다")
     v.set_defaults(func=cmd_serve)
+
+    e = sub.add_parser("edit", help="덱을 편집기로 열어 고치고 그 파일에 저장한다")
+    e.add_argument("file", help="고칠 HTML 덱(파일 경로, 또는 slides add 로 등록한 덱 이름 — 그 원본을 연다)")
+    e.add_argument("--port", type=int, default=0, help="편집기 포트(기본: 빈 포트를 고름)")
+    e.add_argument("--no-open", action="store_true", help="브라우저를 열지 않는다")
+    e.add_argument("--backup-dir", help=argparse.SUPPRESS)
+    e.set_defaults(func=cmd_edit)
 
     sub.add_parser("url", help="갤러리 주소").set_defaults(func=cmd_url)
     return ap

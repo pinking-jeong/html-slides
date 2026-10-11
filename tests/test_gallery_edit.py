@@ -7,10 +7,12 @@ import json
 import shutil
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
 import build_manifest as bm
+import samples
 
 pw = pytest.importorskip("playwright.sync_api")
 
@@ -582,4 +584,61 @@ def test_keyboard_focus_stays_in_place(tmp_path, browser, serve):
     assert page.locator("#catList .n").first.inner_text() == "0개"
     assert drop.is_disabled() and drop.get_attribute("title") == "덱 파일이 이 폴더에 있어 지울 수 없습니다"
     assert errors == []
+    ctx.close()
+
+
+# ---------- 덱 카드의 ⋯ 메뉴 → 덱 편집기
+
+def test_card_menu_opens_only_html_decks_in_the_editor(tmp_path, browser, serve):
+    root = tmp_path / "repo"
+    root.mkdir()
+    shutil.copy(REPO / "index.html", root / "index.html")
+    for d in ("assets", "editor"):
+        shutil.copytree(REPO / d, root / d)
+    write(root / "decks/a.html", deck("가 덱"))
+    write(root / "decks/talk/index.html", deck("폴더 덱"))
+    (root / "decks/p.pdf").write_bytes(samples.make_pdf(1))
+    write(root / "site.json", json.dumps({"title": "시험 갤러리", "repo": "owner/slides", "branch": "main",
+                                          "author": NOREPLY}, ensure_ascii=False))
+    manifest = bm.build_manifest(root, thumbs=False, cache=None, use_git=False)
+    out = tmp_path / "site"
+    bm.build_site(root, out, manifest, None)
+    assert (out / "editor/index.html").is_file() and (out / "editor/js/app.js").is_file()   # 사이트에 편집기가 실린다
+    url = serve(out)
+    ctx, page, errors = open_gallery(browser, url)
+    links = {}
+    for card in page.locator(".card").all():
+        more = card.locator("details.more")
+        more.locator("summary").click()
+        item = more.locator("[data-act=edit-deck]")
+        links[card.locator(".title").inner_text()] = (item.get_attribute("href"), item.get_attribute("target")) \
+            if item.count() else None
+        more.locator("summary").click()
+    ids = {d["title"]: d["id"] for d in manifest["decks"]}
+    pdf = next(d["title"] for d in manifest["decks"] if d["kind"] == "pdf")
+    assert links == {"가 덱": (f"editor/?deck={quote(ids['가 덱'], safe='')}", "_blank"),
+                     "폴더 덱": (f"editor/?deck={quote(ids['폴더 덱'], safe='')}", "_blank"),
+                     pdf: None}                                  # PDF·PPTX 는 원래 프로그램에서 고친다
+    assert page.request.get(url + links["가 덱"][0]).status == 200
+    assert errors == []
+    ctx.close()
+
+
+def test_gallery_opened_by_another_window_does_not_take_a_token(tmp_path, browser, serve):
+    """같은 출처의 다른 창(발표 중인 덱의 스크립트 등)이 연 갤러리에서는 토큰으로 저장하지 않는다 — 그 창이 가로챌 수 있다"""
+    site, _ = make_site(tmp_path, EMPTY)
+    gh = FakeGitHub(remote=EMPTY)
+    ctx, opener, errors = open_gallery(browser, serve(site), gh)
+    with ctx.expect_page() as pi:
+        opener.evaluate("window.open(location.href)")
+    page = pi.value
+    page.wait_for_selector(".card")
+    page.click("#editBtn")
+    page.locator(".card").first.locator("[data-act=next]").click()
+    page.click("#saveBtn")
+    page.fill("#token", TOKEN)
+    page.click("#saveGo")
+    pw.expect(page.locator("#saveStatus")).to_contain_text("다른 창")
+    assert gh.puts() == [] and all(c["auth"] is None for c in gh.calls)
+    assert page.input_value("#token") == ""                 # 넣은 토큰은 지운다
     ctx.close()

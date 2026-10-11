@@ -339,7 +339,13 @@
     h('a', { href, target: '_blank', rel: 'noopener' }, label, note ? h('small', null, note) : null);
 
   function menuFor(d) {
-    const items = [h('button', { type: 'button', onclick: () => copy(new URL(openUrl(d), location.href).href) }, '주소 복사')];
+    const items = [];
+    // HTML 덱만 덱 편집기로 연다(저장은 저장소 주인의 토큰) — 저장할 저장소를 모르면 두지 않는다
+    if ((d.kind === 'file' || d.kind === 'dir') && state.repo) {
+      items.push(h('a', { href: `editor/?deck=${encodeURIComponent(d.id)}`, target: '_blank', rel: 'noopener', 'data-act': 'edit-deck' },
+        '편집기에서 열기', h('small', null, '글 고치기·장 더하기·지우기·순서 바꾸기')));
+    }
+    items.push(h('button', { type: 'button', onclick: () => copy(new URL(openUrl(d), location.href).href) }, '주소 복사'));
     if (d.kind === 'file') items.push(getLink(d.path, 'HTML 받기'));
     if (d.kind === 'pdf') items.push(getLink(d.path, 'PDF 받기'));
     if (d.pdf) {
@@ -1000,6 +1006,14 @@
   async function onTokenSave(e) {
     e.preventDefault();
     if (edit.busy || !isDirty()) return;
+    // 다른 창이 연 갤러리(window.opener)나 다른 페이지 안의 갤러리에서는 토큰을 받지 않는다 — 같은 출처에서 도는 덱
+    // 스크립트가 그런 창을 손대 토큰을 가로챌 수 있다(이것만으로 다 막지는 못한다: README 의 ‘편집기와 토큰’).
+    if (window.top !== window || window.opener) {
+      els.token.value = '';
+      setStatus('다른 창이나 페이지가 연 갤러리에서는 토큰으로 저장하지 않습니다 — 갤러리 주소를 브라우저에서 바로 열어 '
+        + '주세요(‘복사하고 GitHub 열기’는 쓸 수 있습니다).', true);
+      return;
+    }
     if (!token) {
       const typed = els.token.value.trim();
       if (!/^[A-Za-z0-9_]{20,255}$/.test(typed)) {

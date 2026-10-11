@@ -45,7 +45,7 @@ from urllib.parse import quote, unquote, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 DECKS_DIR = "decks"
 SITE_FILES = ("index.html",)
-SITE_DIRS = ("assets", "viewer", "vendor")
+SITE_DIRS = ("assets", "viewer", "vendor", "editor")
 HTML_SUFFIXES = (".html", ".htm")
 PRIMARY_ORDER = (".html", ".htm", ".pdf", ".pptx")   # 이름이 같은 파일 가운데 덱이 되는 차례
 DECK_SUFFIXES = PRIMARY_ORDER

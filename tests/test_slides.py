@@ -4,6 +4,8 @@ import http.client
 import http.server
 import io
 import json
+import os
+import re
 import shutil
 import stat
 import subprocess
@@ -13,6 +15,7 @@ import time
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote, unquote
 
 import pytest
 
@@ -579,6 +582,36 @@ def test_local_commits_not_made_by_slides_block_merging(env):
         slides.sync(repo(env))
     assert git(env.work, "rev-parse", "HEAD") == head       # 손대지 않았다
     assert not repo(env).rebase_in_progress()
+
+
+def test_sync_holds_remote_changes_outside_decks(env):
+    """웹(갤러리 배치·편집기·웹 올리기)은 decks/ 만 고친다. 원격의 새 판이 그 밖(도구·사이트 코드)을 바꿨으면 받지 않고
+    멈춘다 — 샌 토큰으로 tools/slides.py 를 고쳐 이 PC 에서 돌리지 못하게."""
+    deck = env.src / "d.html"
+    deck.write_text("v1", encoding="utf-8")
+    assert run(env, "add", str(deck), "--yes") == 0
+    web_upload(env, {"tools/slides.py": "print('바뀐 도구')\n", "decks/w.html": "w"})
+    head = git(env.work, "rev-parse", "HEAD")
+    with pytest.raises(slides.SlidesError, match="decks/ 밖") as e:
+        slides.sync(repo(env))
+    assert "tools/slides.py" in str(e.value) and "decks/w.html" not in str(e.value)
+    assert git(env.work, "rev-parse", "HEAD") == head and not (env.work / "tools").exists()
+    assert "slides sync --trust-remote" in str(e.value)
+    deck.write_text("v2", encoding="utf-8")
+    assert slides.sync(repo(env), push=False) == ["d"]       # 커밋만 — 이 PC 의 커밋을 원격 위에 다시 얹어야 할 때도
+    with pytest.raises(slides.SlidesError, match="decks/ 밖"):
+        slides.sync(repo(env))
+    assert not (env.work / "tools").exists() and repo(env).unpushed()
+    # 살펴보고 받기로 하면 slides 가 받아(다시 얹기 포함) 평소처럼 올린다
+    assert run(env, "sync", "--trust-remote") == 0
+    assert remote_show(env, "decks/d.html") == "v2" and (env.work / "tools" / "slides.py").exists()
+    assert not repo(env).unpushed()
+    with pytest.raises(SystemExit):                         # 지켜보기(watch)는 받는 쪽을 늘 확인한다 — 이 선택이 없다
+        slides.build_parser().parse_args(["watch", "--trust-remote"])
+    # 밖의 파일을 decks/ 로 옮겨 숨겨도(이름 바꾸기) 옛 이름이 걸린다
+    web_upload(env, {"README.md": None, "decks/readme.md": "x\n"})
+    with pytest.raises(slides.SlidesError, match="README.md"):
+        slides.sync(repo(env))
 
 
 def test_conflicting_info_file_stops_without_losing_either_side(env):
@@ -1203,6 +1236,320 @@ def test_serve_rejects_other_host_names(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---------------------------------------------------------------- slides edit(이 PC 의 덱 고치기)
+
+EDIT_DECK = ('<!doctype html>\n<html><head><meta charset="utf-8"><title>고칠 덱</title></head>\n'
+             '<body><section class="slide"><h2>하나</h2><img src="pic.jpg" alt=""></section>\n'
+             '<section class="slide"><h2>둘</h2></section></body></html>\n')
+
+
+def call(port: int, method: str, path: str, body: bytes | None = None, headers: dict | None = None,
+         host: str | None = None) -> SimpleNamespace:
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        c.request(method, path, body=body, headers={"Host": host or f"127.0.0.1:{port}", **(headers or {})})
+        r = c.getresponse()
+        return SimpleNamespace(status=r.status, headers=r.headers, body=r.read())
+    finally:
+        c.close()
+
+
+@pytest.fixture
+def edit_env(tmp_path):
+    """slides edit 의 두 서버(편집기·발표 화면)를 띄운다. 덱은 CRLF 로 저장된 파일이고, 덱 폴더에 그림과 숨긴 파일·문서가 있다."""
+    folder = tmp_path / "talk"
+    folder.mkdir()
+    deck = folder / "발표 자료.html"
+    deck.write_bytes(EDIT_DECK.replace("\n", "\r\n").encode("utf-8"))
+    (folder / "pic.jpg").write_bytes(samples.jpeg())
+    (folder / ".env").write_text("SECRET=1", encoding="utf-8")
+    (folder / ".notes.txt").write_text("hidden", encoding="utf-8")          # 숨긴 이름 — 확장자는 내주는 것
+    (folder / ".private").mkdir()
+    (folder / ".private" / "pic.jpg").write_bytes(samples.jpeg())
+    (folder / "memo.docx").write_bytes(b"PK private")
+    (folder / "style.css").write_text("h2{color:red}", encoding="utf-8")
+    (folder / "data.json").write_text('{"secret": 1}', encoding="utf-8")     # 덱 스크립트에게는 내주지 않는 자료
+    (folder / "notes.txt").write_text("private", encoding="utf-8")
+    (folder / "other.html").write_text("<p>other</p>", encoding="utf-8")
+    (tmp_path / "outside.jpg").write_bytes(samples.jpeg())
+    try:                                                    # 덱 폴더 안에서 밖을 가리키는 연결(정션·심볼릭 링크)
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(tmp_path), str(folder / "linked"))
+        else:
+            os.symlink(tmp_path, folder / "linked")
+    except (OSError, AttributeError, ImportError):
+        pass
+    session = slides.EditSession(deck.resolve(), tmp_path / "backups")
+    edit, show, url = slides.edit_servers(session)
+    for srv in (edit, show):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    ep = edit.server_address[1]
+    yield SimpleNamespace(tmp=tmp_path, folder=folder, deck=deck, session=session, url=url, key=session.key,
+                          edit=ep, show=show.server_address[1], origin=f"http://127.0.0.1:{ep}")
+    for srv in (edit, show):
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_edit_api_reads_only_with_the_key_from_the_editor(edit_env):
+    e = edit_env
+
+    def get(headers=None, host=None):
+        return call(e.edit, "GET", "/api/deck", headers=headers, host=host)
+
+    assert get().status == 403                              # 열쇠 없이
+    assert get({"X-HSE-Key": "x" * 43}).status == 403       # 틀린 열쇠
+    r = get({"X-HSE-Key": e.key})
+    assert r.status == 200 and r.body == e.deck.read_bytes()
+    assert r.headers["X-HSE-Hash"] == hashlib.sha256(r.body).hexdigest()
+    assert unquote(r.headers["X-HSE-Name"]) == "발표 자료.html"
+    assert unquote(r.headers["X-HSE-Path"]) == str(e.deck.resolve())
+    assert r.headers["Cache-Control"] == "no-store"
+    present = r.headers["X-HSE-Present"]
+    assert present == f"http://127.0.0.1:{e.show}/deck-files/{e.session.show_key}/{quote('발표 자료.html')}"
+    assert e.key not in present                             # 덱 스크립트가 보는 주소에는 편집 열쇠가 없다
+    # 열쇠를 들고 와도 다른 출처(발표 화면 포함)·다른 사이트에서 온 요청, 다른 이름(DNS rebinding)은 받지 않는다
+    assert get({"X-HSE-Key": e.key, "Origin": "http://evil.example"}).status == 403
+    assert get({"X-HSE-Key": e.key, "Origin": f"http://127.0.0.1:{e.show}"}).status == 403
+    assert get({"X-HSE-Key": e.key, "Sec-Fetch-Site": "cross-site"}).status == 403
+    assert get({"X-HSE-Key": e.key}, host="rebind.example").status == 421
+    pre = call(e.edit, "OPTIONS", "/api/deck", headers={"Origin": "http://evil.example",
+                                                       "Access-Control-Request-Method": "PUT"})
+    assert pre.status >= 400 and "Access-Control-Allow-Origin" not in pre.headers   # 다른 출처의 사전 요청에 답하지 않는다
+
+
+def test_edit_saves_only_over_the_version_it_opened(edit_env, monkeypatch):
+    e = edit_env
+    first = e.deck.read_bytes()
+    h0 = hashlib.sha256(first).hexdigest()
+    text = EDIT_DECK.replace("둘", "둘째 장")                  # 편집기는 늘 LF 로 보낸다
+
+    def put(body: bytes, extra: dict | None = None, origin: bool = True):
+        headers = {"X-HSE-Key": e.key, "Content-Type": "text/html; charset=utf-8", **(extra or {})}
+        if origin:
+            headers["Origin"] = e.origin
+        return call(e.edit, "PUT", "/api/deck", body=body, headers=headers)
+
+    assert put(text.encode(), {"If-Match": h0}, origin=False).status == 403   # 편집기 페이지가 보낸 것이 아님
+    stale = put(text.encode(), {"If-Match": "0" * 64})
+    assert stale.status == 409 and json.loads(stale.body)["hash"] == h0
+    assert e.deck.read_bytes() == first
+
+    ok = put(text.encode(), {"If-Match": h0})
+    assert ok.status == 200
+    saved = e.deck.read_bytes()
+    assert saved == text.replace("\n", "\r\n").encode("utf-8")      # 원래 파일의 CRLF 를 지킨다
+    j = json.loads(ok.body)
+    assert j["hash"] == hashlib.sha256(saved).hexdigest()
+    kept = Path(j["backup"])
+    assert kept.read_bytes() == first and kept.parent.parent == e.tmp / "backups"   # 저장 전 판
+    assert not list(e.folder.glob(".slides-*"))             # 임시 파일이 남지 않는다
+
+    same = put(text.encode(), {"If-Match": j["hash"]})       # 같은 내용 — 쓰지도, 판을 남기지도 않는다
+    assert same.status == 200 and json.loads(same.body)["backup"] == ""
+    assert len(list(kept.parent.iterdir())) == 1
+
+    e.deck.write_bytes(b"<html>changed elsewhere</html>")   # 다른 프로그램이 그사이 고침
+    assert put(text.encode(), {"If-Match": j["hash"]}).status == 409
+    forced = put(text.encode(), {"If-Match": j["hash"], "X-HSE-Force": "1"})
+    assert forced.status == 200
+    assert Path(json.loads(forced.body)["backup"]).read_bytes() == b"<html>changed elsewhere</html>"
+    assert e.deck.read_bytes() == text.encode("utf-8")       # 지금 파일이 LF 뿐이면 LF 그대로
+
+    now = hashlib.sha256(e.deck.read_bytes()).hexdigest()
+    assert put(bytes([0xFF, 0xFE, 0x41]), {"If-Match": now}).status == 400     # UTF-8 이 아님
+    assert put(b" \n ", {"If-Match": now}).status == 400                        # 빈 내용
+    monkeypatch.setattr(slides, "EDIT_MAX", 10)
+    assert put(text.encode(), {"If-Match": now}).status == 413
+    assert e.deck.read_bytes() == text.encode("utf-8")
+
+
+def test_edit_keeps_line_endings_and_bom():
+    lf = "<p>a</p>\n<p>b</p>\n"
+    bom = bytes.fromhex("efbbbf")
+    assert slides.like_original(lf, None) == lf.encode()
+    assert slides.like_original(lf, b"<p>x</p>\n") == lf.encode()
+    assert slides.like_original(lf, b"<p>x</p>\r\n<p>y</p>\r\n") == lf.replace("\n", "\r\n").encode()
+    assert slides.like_original(lf, b"<p>x</p>\r\n<p>y</p>\n") == lf.encode()   # 섞여 있으면 LF 로
+    assert slides.like_original(lf, bom + b"<p>x</p>\n") == bom + lf.encode()
+
+
+def backup_texts(session) -> list[str]:
+    return [p.read_text(encoding="utf-8") for p in sorted(session.backups.iterdir()) if slides.BACKUP_RE.match(p.name)]
+
+
+def test_edit_backups_keep_only_the_newest(tmp_path, monkeypatch):
+    monkeypatch.setattr(slides, "BACKUP_KEEP", 3)
+    deck = tmp_path / "d.html"
+    deck.write_text("v0", encoding="utf-8")
+    session = slides.EditSession(deck.resolve(), tmp_path / "b")
+    for i in range(1, 6):
+        session.save(f"v{i}", hashlib.sha256(deck.read_bytes()).hexdigest(), False)
+    # 최근 3개와, 이번 실행에서 고치기 시작하기 전의 판(v0)
+    assert backup_texts(session) == ["v0", "v2", "v3", "v4"]
+    (session.backups / "my-note.txt").write_text("keep", encoding="utf-8")   # 판이 아닌 파일은 지우지 않는다
+    session.save("v6", hashlib.sha256(deck.read_bytes()).hexdigest(), False)
+    assert (session.backups / "my-note.txt").exists() and deck.read_text(encoding="utf-8") == "v6"
+    assert backup_texts(session) == ["v0", "v3", "v4", "v5"]
+    later = slides.EditSession(deck.resolve(), tmp_path / "b")     # 다음 실행 — 지난 실행의 첫 판은 이제 수에 든다
+    later.save("v7", hashlib.sha256(deck.read_bytes()).hexdigest(), False)
+    assert backup_texts(later) == ["v4", "v5", "v6"]
+
+
+def test_edit_backup_names_follow_the_order_they_were_kept(tmp_path, monkeypatch):
+    """시계가 거칠거나 멈춰 있어도(옛 Windows 의 Python 은 약 16ms) 이름 순서가 남긴 순서와 같다 — 오래된 것부터 지운다."""
+    class Frozen(slides.dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 12, 9, 0, 0, 0)
+
+    monkeypatch.setattr(slides, "dt", SimpleNamespace(datetime=Frozen, timedelta=slides.dt.timedelta))
+    monkeypatch.setattr(slides, "BACKUP_KEEP", 3)
+    deck = tmp_path / "d.html"
+    deck.write_text("v0", encoding="utf-8")
+    session = slides.EditSession(deck.resolve(), tmp_path / "b")
+    for i in range(1, 8):
+        session.save(f"v{i}", hashlib.sha256(deck.read_bytes()).hexdigest(), False)
+    names = sorted(p.name for p in session.backups.iterdir())
+    assert names[0].startswith("20261012-090000-000000-") and names[-1].startswith("20261012-090000-000006-")
+    assert backup_texts(session) == ["v0", "v4", "v5", "v6"]
+
+
+def test_edit_deck_files_stay_inside_the_deck_folder(edit_env):
+    e = edit_env
+    k = f"/deck-files/{e.key}/"
+    pic = call(e.edit, "GET", k + "pic.jpg")
+    assert pic.status == 200 and pic.headers["Content-Type"] == "image/jpeg"
+    assert pic.headers["Content-Security-Policy"] == "sandbox"   # 편집 쪽 출처에서는 문서로 열려도 스크립트가 돌지 않는다
+    doc = call(e.edit, "GET", k + quote("발표 자료.html"))
+    assert doc.status == 200 and doc.headers["Content-Type"] == "text/html; charset=utf-8"
+    assert doc.headers["Content-Security-Policy"] == "sandbox"
+    for path in (f"/deck-files/{'x' * 43}/pic.jpg",                 # 틀린 열쇠
+                 f"/deck-files/{e.session.show_key}/pic.jpg",       # 발표 화면의 열쇠는 편집 쪽에서 쓰지 못한다
+                 k + "../outside.jpg", k + "%2e%2e/outside.jpg", k + "..%2Foutside.jpg", k + "sub/../../outside.jpg",
+                 k + ".env", k + ".notes.txt", k + ".private/pic.jpg", k + "memo.docx", k + "nope.jpg", k,
+                 k + "C:/Windows/win.ini", k + "pic.jpg::$DATA"):
+        assert call(e.edit, "GET", path).status == 404, path
+    if (e.folder / "linked").exists():                      # 연결을 따라가 덱 폴더 밖으로 나가는 것도 막는다
+        assert (e.folder / "linked" / "outside.jpg").is_file()
+        assert call(e.edit, "GET", k + "linked/outside.jpg").status == 404
+    for name in ("style.css", "data.json", "notes.txt", "other.html"):    # 편집 쪽(열쇠 필요·스크립트 없음)은 웹 형식이면 내준다
+        assert call(e.edit, "GET", k + name).status == 200, name
+    # 발표 화면: 덱 스크립트가 도는 보통 문서(CSP 없음) — 편집 열쇠·저장 API 는 없다
+    s = f"/deck-files/{e.session.show_key}/"
+    shown = call(e.show, "GET", s + quote("발표 자료.html"))
+    assert shown.status == 200 and "Content-Security-Policy" not in shown.headers
+    assert shown.body == e.deck.read_bytes()
+    assert shown.headers["Cross-Origin-Resource-Policy"] == "same-origin"
+    assert call(e.show, "GET", s + "pic.jpg").status == 200
+    assert call(e.show, "GET", s + "style.css").status == 200
+    for name in ("data.json", "notes.txt", "other.html", ".env"):       # 덱 스크립트가 이름을 맞혀도 자료는 읽지 못한다
+        assert call(e.show, "GET", s + name).status == 404, name
+    assert call(e.show, "GET", k + "pic.jpg").status == 404
+    assert call(e.show, "GET", "/api/deck", headers={"X-HSE-Key": e.key}).status == 404
+    assert call(e.show, "PUT", "/api/deck", body=b"x",
+                headers={"X-HSE-Key": e.key, "Origin": f"http://127.0.0.1:{e.show}"}).status == 404
+    assert call(e.show, "GET", s + "pic.jpg", host="rebind.example").status == 421
+
+
+def test_edit_serves_only_the_editor_files(edit_env):
+    e = edit_env
+    page = call(e.edit, "GET", "/editor/?local=1")
+    assert page.status == 200 and page.headers["Content-Type"] == "text/html; charset=utf-8"
+    assert b'id="frame"' in page.body and page.headers["X-Frame-Options"] == "SAMEORIGIN"
+    js = call(e.edit, "GET", "/editor/js/source.js")
+    assert js.status == 200 and js.headers["Content-Type"] == "text/javascript; charset=utf-8"
+    assert call(e.edit, "GET", "/assets/favicon.svg").status == 200
+    for path in ("/", "/editor/../tools/slides.py", "/editor/%2e%2e/tools/slides.py", "/editor/js/../../tools/slides.py",
+                 "/tools/slides.py", "/index.html", "/assets/gallery.js"):
+        assert call(e.edit, "GET", path).status == 404, path
+    assert call(e.show, "GET", "/editor/?local=1").status == 404     # 발표 화면 쪽에는 편집기가 없다
+
+
+def test_edit_has_no_present_server_for_decks_in_personal_folders(env, tmp_path, monkeypatch, capsys):
+    """바탕 화면·문서·다운로드처럼 개인 파일이 모이는 폴더에 바로 둔 덱에는 발표 화면(덱 스크립트가 도는 쪽)을 열지 않는다."""
+    home = tmp_path / "home"
+    monkeypatch.setattr(slides.Path, "home", classmethod(lambda cls: home))
+    yes = [home, home / "Downloads", home / "바탕 화면", home / "OneDrive", home / "OneDrive - 회사" / "Documents",
+           home.parent, Path(tmp_path.anchor)]
+    no = [home / "Downloads" / "talk", home / "Documents" / "발표", home / "projects", home / "OneDrive" / "slides"]
+    for p in yes + no:
+        if p != Path(p.anchor):
+            p.mkdir(parents=True, exist_ok=True)
+    assert [slides.personal_folder(p) for p in yes] == [True] * len(yes)
+    assert [slides.personal_folder(p) for p in no] == [False] * len(no)
+
+    deck = home / "Downloads" / "talk.html"
+    deck.write_text(EDIT_DECK, encoding="utf-8")
+    session = slides.EditSession(deck.resolve(), tmp_path / "bk")
+    edit, show, url = slides.edit_servers(session)
+    edit.server_close()
+    assert show is None and session.present_url == ""     # 편집기는 X-HSE-Present 가 비면 ‘발표로 보기’를 숨긴다
+
+    seen = []
+    monkeypatch.setattr(slides, "run_edit", lambda e, s: (seen.append(s), e.server_close()))
+    capsys.readouterr()
+    assert run(env, "edit", str(deck), "--no-open", "--backup-dir", str(tmp_path / "bk")) == 0
+    assert seen == [None] and "‘발표로 보기’는 켜지 않습니다" in capsys.readouterr().out
+
+
+def test_cmd_edit_opens_a_file_or_a_registered_deck(env, monkeypatch, capsys):
+    deck = env.src / "talk.html"
+    deck.write_text(EDIT_DECK, encoding="utf-8")
+    opened, ran = [], []
+    monkeypatch.setattr(slides.webbrowser, "open", opened.append)
+
+    def fake_run(edit, show):
+        ran.append(edit.server_address[1])
+        edit.server_close()
+        if show:
+            show.server_close()
+
+    monkeypatch.setattr(slides, "run_edit", fake_run)
+    assert run(env, "edit", str(deck), "--backup-dir", str(env.tmp / "bk")) == 0
+    out = capsys.readouterr().out
+    assert len(opened) == 1 and re.fullmatch(rf"http://127\.0\.0\.1:{ran[0]}/editor/\?local=1#key=[A-Za-z0-9_-]{{43}}",
+                                             opened[0])
+    assert opened[0] in out and str(deck.resolve()) in out and str(env.tmp / "bk") in out
+    # 등록한 덱 이름으로도 그 원본을 연다
+    assert run(env, "add", str(deck), "--name", "my-talk", "--yes", "--no-push") == 0
+    capsys.readouterr()
+    assert run(env, "edit", "my-talk", "--no-open") == 0
+    assert f"고칠 덱: {deck.resolve()}" in capsys.readouterr().out and len(opened) == 1
+
+
+def test_edit_refuses_what_it_should_not_touch(env, capsys, monkeypatch):
+    def must_not_serve(edit, show):                         # 거절이 풀리면 서버를 띄운 채 멈추지 말고 바로 실패하게
+        edit.server_close()
+        if show:
+            show.server_close()
+        raise AssertionError("열지 말아야 할 파일인데 편집기를 띄웠습니다")
+
+    monkeypatch.setattr(slides, "run_edit", must_not_serve)
+    deck = env.src / "talk.html"
+    deck.write_text(EDIT_DECK, encoding="utf-8")
+    assert run(env, "add", str(deck), "--yes", "--no-push") == 0
+    (env.work / "page.html").write_text(EDIT_DECK, encoding="utf-8")
+    pdf = env.src / "a.pdf"
+    pdf.write_bytes(samples.make_pdf(1))
+    euc = env.src / "euc.html"
+    euc.write_bytes("<p>한글</p>".encode("cp949"))
+    capsys.readouterr()
+    cases = {
+        str(env.work / "decks" / "talk.html"): f'원본을 고치세요: slides edit "{deck.resolve()}"',   # 거울 → 원본을 알려 준다
+        str(env.work / "page.html"): "갤러리에서 덱 카드의 ⋯",
+        str(pdf): "HTML 덱만",
+        str(euc): "UTF-8",
+        str(env.src): "파일이 아닙니다",
+        "no-such-deck": "등록한 덱도 없습니다",
+    }
+    for arg, want in cases.items():
+        assert run(env, "edit", arg, "--no-open") == 2, arg
+        err = capsys.readouterr().err
+        assert want in err, (arg, err)
 
 
 def test_pages_url(env):
