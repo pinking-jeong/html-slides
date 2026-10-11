@@ -1972,3 +1972,268 @@ def test_flow_picture_fits_inside_the_placeholder(browser, decks, tmp_path):
     assert sec.locator("[data-name=picture]").count() == 1 and sec.locator("img").count() == 0
     ctx.close()
     assert errors == []
+
+
+# ---------- 왼쪽 칸: 색인 · 찾기·바꾸기
+
+def side_tab(page, key: str) -> None:
+    page.click({"toc": "#tabToc", "idx": "#tabIdx", "find": "#tabFind"}[key])
+
+
+def index_rows(page) -> list:
+    """색인 칸의 [머리, [말, [장 번호…]]…] — 머리(h3)마다 묶는다."""
+    return page.locator("#idx").evaluate("""(box) => {
+        const out = [];
+        for (const el of box.children) {
+            if (el.matches('h3')) out.push([el.textContent, []]);
+            else if (el.matches('ul') && out.length) {
+                for (const li of el.children) out[out.length - 1][1].push([
+                    li.querySelector('.ix-t').firstChild.textContent,
+                    [...li.querySelectorAll('.ix-go')].map((b) => b.textContent)]);
+            }
+        }
+        return out;
+    }""")
+
+
+def hits_on(page, name: str = "hse-hit") -> int:
+    return frame(page).locator("body").evaluate(
+        "(b, n) => { const h = b.ownerDocument.defaultView.CSS.highlights.get(n); return h ? h.size : 0; }", name)
+
+
+def test_index_lists_sections_and_terms_and_keeps_added_terms_in_the_deck(browser, decks, tmp_path, serve):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    original = page.evaluate("window.__hse.serialize()")
+    side_tab(page, "idx")
+    assert page.locator("#panIdx").is_visible() and not page.locator("#toc").is_visible()
+    assert index_rows(page) == [["절", [["표지", ["1"]], ["1. 서론", ["2"]], ["2. 본론", ["3"]]]]]
+    # 사람이 더한 말 — 나오는 장을 달고, 덱 안 JSON 에 남는다(하나에 되돌리기 한 칸)
+    page.fill("#idxTerm", "문단")
+    page.press("#idxTerm", "Enter")
+    page.fill("#idxTerm", "없는 말")
+    page.press("#idxTerm", "Enter")
+    rows = dict(index_rows(page))
+    assert rows["ㅁ"] == [["문단", ["2"]]] and rows["ㅇ"] == [["없는 말", []]]
+    assert "덱에 없음" in page.inner_text("#idx")
+    saved = page.evaluate("window.__hse.serialize()")
+    assert '<script type="application/json" id="deck-index">{"terms":["문단","없는 말"]}</script>' in saved
+    assert state(page)["undo"] == 2
+    # 장 번호를 누르면 그 장으로 가서 그 말을 형광으로
+    page.locator("#idx li[data-term='문단'] .ix-go").click()
+    assert state(page)["cur"] == 1 and hits_on(page) == 2
+    page.locator("#idx li[data-term='없는 말'] .ix-del").click()
+    assert "없는 말" not in page.inner_text("#idx") and state(page)["undo"] == 3
+    for _ in range(3):
+        page.keyboard.press("Control+z")
+    assert page.evaluate("window.__hse.serialize()") == original
+    side_tab(page, "toc")
+    assert page.locator("#toc").is_visible() and hits_on(page) == 0
+    ctx.close()
+    assert errors == []
+    # 저장한 덱을 보통 창으로 열어도 색인 JSON 은 보이지 않고 덱은 그대로 돈다
+    got = run_saved(browser, tmp_path, serve, saved, "return [__deck.count, document.body.innerText.includes('없는 말')];")
+    assert got == [3, False]
+
+
+def test_index_of_a_flow_deck_uses_kickers_and_emphasis(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    side_tab(page, "idx")
+    rows = dict(index_rows(page))
+    assert rows["절"] == [["머리말", ["1"]], ["둘째 머리말", ["2", "3"]]]
+    assert rows["ㄱ"] == [["굵게", ["1"]]]                  # 문단 안에서 따로 굵게 한 말
+    page.fill("#idxFilter", "굵")
+    assert dict(index_rows(page)) == {"ㄱ": [["굵게", ["1"]]]}
+    ctx.close()
+    assert errors == []
+
+
+def test_find_steps_through_slides_and_replaces_in_one_undo_step(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    original = page.evaluate("window.__hse.serialize()")
+    page.keyboard.press("Control+f")
+    assert page.locator("#panFind").is_visible()
+    assert page.evaluate("document.activeElement.id") == "findQ"
+    page.keyboard.type("장")
+    assert page.inner_text("#findPos") == "1 / 2" and page.locator("#hits li").count() == 2
+    page.keyboard.press("Enter")                           # 다음 → 셋째 장으로
+    assert page.inner_text("#findPos") == "2 / 2" and state(page)["cur"] == 2
+    assert hits_on(page) == 1 and hits_on(page, "hse-cur") == 1
+    page.keyboard.press("Shift+Enter")                     # 앞 → 둘째 장
+    assert page.inner_text("#findPos") == "1 / 2" and state(page)["cur"] == 1
+    # 바꾸기 — 지금 것 하나
+    page.fill("#findTo", "슬라이드")
+    page.click("#findOne")
+    texts = frame(page).locator("section.slide h2").all_inner_texts()
+    assert texts == ["흐름 덱 표지", "둘째 슬라이드", "셋째 장"] and state(page)["undo"] == 1
+    # 모두 바꾸기 — 덱 전체, 되돌리기 한 칸
+    page.fill("#findQ", "째")
+    page.fill("#findTo", "번")
+    page.click("#findEvery")
+    assert "3곳을 바꿨습니다(2개 장" in page.inner_text("#status")
+    texts = frame(page).locator("section.slide h2").all_inner_texts()
+    assert texts == ["흐름 덱 표지", "둘번 슬라이드", "셋번 장"] and state(page)["undo"] == 2
+    assert page.inner_text("#findPos") == "없음"
+    page.click("#tabToc")
+    page.keyboard.press("Control+z")
+    page.keyboard.press("Control+z")
+    assert page.evaluate("window.__hse.serialize()") == original
+    ctx.close()
+    assert errors == []
+
+
+def test_find_takes_the_selected_words_and_keeps_formatting(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    select_text(page, "section.slide p", "굵게")
+    page.keyboard.press("Control+f")
+    assert page.input_value("#findQ") == "굵게" and page.inner_text("#findPos") == "1 / 1"
+    page.keyboard.press("Control+h")
+    assert page.evaluate("document.activeElement.id") == "findTo"
+    page.keyboard.type("진하게")
+    page.keyboard.press("Enter")
+    p = frame(page).locator("section.slide").nth(0).locator("p")
+    assert p.inner_html() == "부제 <b>진하게</b> 끝"           # 바꾼 글은 그 자리의 서식(굵게)을 따른다
+    ctx.close()
+    assert errors == []
+
+
+def test_replace_does_not_loop_on_text_that_contains_the_query(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    page.keyboard.press("Control+h")
+    page.fill("#findQ", "장")
+    page.fill("#findTo", "장면")
+    h2s = frame(page).locator("section.slide h2")
+    page.click("#findOne")                                 # 다른 장의 것은 먼저 그 장으로 가서 보인다
+    assert state(page)["cur"] == 1 and h2s.all_inner_texts()[1] == "둘째 장"
+    page.click("#findOne")                                 # ‘장’ → ‘장면’, 다음은 바꾼 글 뒤(셋째 장)로
+    assert h2s.all_inner_texts()[1:] == ["둘째 장면", "셋째 장"] and state(page)["cur"] == 2
+    page.click("#findOne")
+    assert h2s.all_inner_texts() == ["흐름 덱 표지", "둘째 장면", "셋째 장면"]
+    assert state(page)["undo"] == 2
+    ctx.close()
+    assert errors == []
+
+
+def test_keys_in_the_side_panels_stay_there(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    frame(page).locator("svg.el").click()                  # 상자를 고른 채
+    side_tab(page, "idx")
+    page.locator("#idx .ix-go").first.focus()
+    page.keyboard.press("Delete")                          # 색인 단추에서 누른 Delete 는 상자를 지우지 않는다
+    page.keyboard.press("ArrowRight")
+    assert frame(page).locator("svg.el").count() == 1 and state(page)["box"]["x"] == 64
+    page.locator("#tabIdx").focus()
+    page.keyboard.press("ArrowRight")                      # 탭 줄의 ←→ 는 옆 탭으로
+    assert page.locator("#panFind").is_visible() and page.evaluate("document.activeElement.id") == "tabFind"
+    ctx.close()
+    assert errors == []
+
+
+FLOW_CLASSY = (FLOW.replace(".foot{", ".txt{font-size:28px;line-height:40px;color:#334455}\n.foot{")
+               .replace("<p>부제", '<p class="txt">부제')
+               .replace("<ul>", '<ul class="txt">')
+               .replace("<p><a href", '<p class="txt"><a href'))
+
+
+def test_flow_layouts_take_the_deck_body_text_look(browser, tmp_path, serve):
+    assert FLOW_CLASSY.count('class="txt"') == 3
+    base, hub = deck_site(tmp_path, serve, "fc", FLOW_CLASSY)
+    ctx, page, errors = open_editor(browser, base, "fc", hub)
+    page.keyboard.press("PageDown")
+    choose_layout(page, "body")                            # 맨 <p>·<ul> 도 덱 본문 글(클래스로만 건 28px)의 모양으로
+    sec = frame(page).locator("section.slide").nth(2)
+    looks = sec.evaluate("""(s) => [...s.querySelectorAll(':scope > p, :scope > ul')].map((e) => {
+        const cs = getComputedStyle(e); return [e.localName, cs.fontSize, cs.lineHeight, cs.color]; })""")
+    assert looks == [["p", "28px", "40px", "rgb(51, 68, 85)"], ["ul", "28px", "40px", "rgb(51, 68, 85)"]], looks
+    ctx.close()
+    assert errors == []
+
+
+FIND_DECK = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>찾기 시험 덱</title>
+<style>.slide{display:none;width:1280px;height:720px}.slide.on{display:block}</style></head><body>
+<div class="deck">
+<section class="slide on"><h2>첫 장</h2><p>2025<br>2026 계획</p><p>AI 와 MAIN 의 차이</p></section>
+<section class="slide"><h2>둘째 장</h2><p>AI 는 둘째 장에도</p></section>
+</div>
+<div id="deck-index">덱이 쓰는 칸</div>
+</body></html>
+"""
+
+
+def test_find_stops_at_line_breaks_and_keeps_keys_in_the_panel(browser, tmp_path, serve):
+    base, hub = deck_site(tmp_path, serve, "fd", FIND_DECK)
+    ctx, page, errors = open_editor(browser, base, "fd", hub)
+    select_text(page, "section.slide p", "2025")           # 덱에서 고른 글로 찾는다
+    page.keyboard.press("Control+f")
+    assert page.input_value("#findQ") == "2025"
+    page.fill("#findQ", "52")                              # 줄바꿈(<br>)을 넘어 찾지 않는다
+    assert page.inner_text("#findPos") == "없음"
+    page.fill("#findQ", "AI")
+    assert page.inner_text("#findPos") == "1 / 3"          # 찾기는 글자 그대로(MAIN 속 AI 도)
+    page.keyboard.press("Control+h")                       # 찾기 칸에서 누른 Ctrl+H 는 덱의 옛 고름(2025)으로 덮어쓰지 않는다
+    assert page.input_value("#findQ") == "AI" and page.evaluate("document.activeElement.id") == "findTo"
+    page.locator("#findQ").dispatch_event("keydown", {"key": "Enter", "isComposing": True})   # 한글 조합을 끝내는 Enter
+    assert page.inner_text("#findPos") == "1 / 3"
+    page.fill("#findQ", "계획")
+    page.fill("#findTo", "목표")
+    page.click("#findOne")                                 # 하나뿐인 것을 바꾸면 단추가 꺼진다 — 초점은 찾기 칸으로
+    assert page.inner_text("#findPos") == "없음" and page.evaluate("document.activeElement.id") == "findQ"
+    assert frame(page).locator("section.slide p").first.inner_text() == "2025\n2026 목표"
+    page.keyboard.press("Control+s")                       # 찾기 칸에서도 Ctrl+S 는 편집기 저장(토큰 창)
+    pw.expect(page.locator("#tokenDlg")).to_be_visible()
+    page.click("#tokenCancel")
+    ctx.close()
+    assert errors == []
+
+
+def test_index_counts_whole_words_and_leaves_a_deck_element_with_the_index_id(browser, tmp_path, serve):
+    base, hub = deck_site(tmp_path, serve, "fd", FIND_DECK)
+    ctx, page, errors = open_editor(browser, base, "fd", hub)
+    original = page.evaluate("window.__hse.serialize()")
+    side_tab(page, "idx")
+    assert dict(index_rows(page)) == {"A": [["AI", ["1", "2"]]], "M": [["MAIN", ["1"]]]}
+    page.locator("#idx li[data-term='AI'] .ix-go").first.click()
+    assert hits_on(page) == 1                              # 'MAIN' 속 AI 는 칠하지 않는다
+    page.fill("#idxTerm", "새 말")
+    page.press("#idxTerm", "Enter")                        # 덱이 그 id 를 이미 쓰면 덱에 적지 않는다
+    assert "다른 요소" in page.inner_text("#status") and state(page)["undo"] == 0
+    assert page.evaluate("window.__hse.serialize()") == original
+    ctx.close()
+    assert errors == []
+
+
+TERMS_DECK = FIND_DECK.replace('<div id="deck-index">덱이 쓰는 칸</div>',
+                               '<script type="application/json" id="deck-index">{ "terms": [ "IAEA" ] }</script>')
+
+
+def test_added_terms_are_tidied_escaped_and_undo_restores_the_exact_index_text(browser, tmp_path, serve):
+    assert TERMS_DECK != FIND_DECK
+    base, hub = deck_site(tmp_path, serve, "td", TERMS_DECK)
+    ctx, page, errors = open_editor(browser, base, "td", hub)
+    original = page.evaluate("window.__hse.serialize()")
+    side_tab(page, "idx")
+    page.fill("#idxTerm", "(주)")
+    page.press("#idxTerm", "Enter")
+    assert '{"terms":["IAEA","주"]}' in page.evaluate("window.__hse.serialize()")
+    page.fill("#idxTerm", "주")
+    page.press("#idxTerm", "Enter")                        # 다듬으면 같은 말 — 되돌리기 칸이 늘지 않는다
+    assert state(page)["undo"] == 1
+    page.fill("#idxTerm", "</script>x")
+    page.press("#idxTerm", "Enter")                        # '<' 는 JSON 안에서 이스케이프 — 덱의 <script> 가 닫히지 않는다
+    saved = page.evaluate("window.__hse.serialize()")
+    assert '"' + chr(92) + 'u003c/script>x"' in saved and state(page)["undo"] == 2
+    page.locator("#tabIdx").focus()                        # 글 칸 밖에서 Ctrl+Z 는 덱의 되돌리기
+    page.keyboard.press("Control+z")
+    page.keyboard.press("Control+z")
+    assert page.evaluate("window.__hse.serialize()") == original   # 덱에 있던 JSON 글 그대로
+    ctx.close()
+    assert errors == []
+    got = run_saved(browser, tmp_path, serve, saved, "return document.querySelectorAll('section.slide').length;")
+    assert got == 2

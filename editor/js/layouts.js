@@ -197,6 +197,29 @@ function builderSlide(model, kind, src) {
 
 /* ---------- 흐름 덱 */
 
+// 흐름 덱의 본문 글 모양 — 장들의 글(제목·머리말·꼬리말·표·코드 밖) 가운데 글자 수로 가장 많이 쓴 크기·줄 간격·색.
+// 덱 CSS 가 클래스에만 크기를 걸면 새 장의 맨 <p>·<li> 는 브라우저 기본(16px)이라 장 안에서 아주 작게 보인다.
+const NOT_BODY = 'h1, h2, h3, h4, h5, h6, header, footer, .foot, .footer, .eyebrow, .kicker, .pageno, pre, code, table, figcaption, button, nav, svg';
+
+function flowBodyLook(model) {
+  const tally = new Map();
+  for (const s of model.slides) {
+    const w = model.doc.createTreeWalker(s, 4);
+    for (let t = w.nextNode(); t; t = w.nextNode()) {
+      const len = t.data.trim().length;
+      const el = t.parentElement;
+      if (!len || !el || el.closest(NOT_BODY)) continue;
+      const cs = model.win.getComputedStyle(el);
+      const key = `${cs.fontSize}|${cs.lineHeight}|${cs.color}`;
+      tally.set(key, (tally.get(key) || 0) + len);
+    }
+  }
+  const best = [...tally.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (!best) return null;
+  const [fontSize, lineHeight, color] = best[0].split('|');
+  return { fontSize, lineHeight, color };
+}
+
 function flowSlide(model, kind, src) {
   const doc = model.doc;
   // 구역 머리는 표지의 바탕(클래스·배경)을 본뜬다 — 빌더 덱이 표지의 배경을 쓰는 것과 같게. 번호표(A.pn)와 쪽 이름표
@@ -211,9 +234,16 @@ function flowSlide(model, kind, src) {
   const eyebrow = src.querySelector(':scope > .eyebrow, :scope > .kicker');
   const head = Array.from(src.children).find((c) => /^H[1-3]$/.test(c.tagName));
   const foot = src.querySelector(':scope > footer, :scope > .foot, :scope > .footer');
-  const p = (text) => mark(doc.createElement('p'), text);
+  // 새 문단·목록은 덱 본문 글의 모양으로(덱 CSS 가 맨 <p>·<li> 에도 크기를 걸었으면 같은 값이라 달라지는 것이 없다)
+  const look = kind === 'blank' ? null : flowBodyLook(model);
+  const body = (el) => {
+    if (look) Object.assign(el.style, { fontSize: look.fontSize, lineHeight: look.lineHeight, color: look.color });
+    el.style.marginTop = '0.5em';
+    return el;
+  };
+  const p = (text) => body(mark(doc.createElement('p'), text));
   const list = () => {
-    const ul = doc.createElement('ul');
+    const ul = body(doc.createElement('ul'));
     ul.append(...[PLACE.body, PLACE.body].map((t) => mark(doc.createElement('li'), t)));
     return ul;
   };

@@ -11,12 +11,14 @@ import { LAYOUTS, makeSlide } from './layouts.js';
 import { deckStyles } from './master.js';
 import { Master } from './masterui.js';
 import { Pick } from './pick.js';
+import { Side } from './side.js';
 import { openSource } from './source.js';
+import { writeTermsRaw } from './terms.js';
 import { Toc } from './toc.js';
 
 const NOTES_MS = 700;
 const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
-  + '크기를 바꿉니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
+  + '크기를 바꿉니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
 const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 
 const $ = (id) => document.getElementById(id);
@@ -47,6 +49,7 @@ let fmt = null;
 let toc = null;
 let hist = null;
 let master = null;
+let side = null;
 let notesPending = null;
 let saving = false;
 let msgTimer = 0;
@@ -128,6 +131,7 @@ function go(i, focusToc) {
   showNotes();
   fmt.update();
   refresh();
+  if (side) side.onSlide();                // 찾기·색인 탭이면 이 장의 그 말을 형광으로
 }
 
 /* ---------- 고른 상자의 자리·크기 칸 */
@@ -152,7 +156,24 @@ function showBox(force = false) {
 
 function rerender(i, focusToc) {
   toc.render();
+  if (side) side.changed();                // 덱이 바뀌었다 — 색인·찾기 결과를 다시
   go(i, focusToc);
+}
+
+// 여러 장을 한 번에 고친다(찾아 모두 바꾸기 등) — 바뀐 장마다 사본(edit)을 되돌리기 한 칸으로. 바뀐 장 수를 돌려준다.
+function commitSlides(fn) {
+  settle();
+  const before = new Map(model.slides.map((s) => [s.getAttribute(A.id), model.snap(s)]));
+  fn();
+  const ops = [];
+  for (const s of model.slides) {
+    const id = s.getAttribute(A.id);
+    const b = model.snap(s);
+    if (before.has(id) && before.get(id) !== b) ops.push({ t: 'edit', id, a: before.get(id), b });
+  }
+  if (ops.length) hist.push(ops);
+  rerender(model.cur);
+  return ops.length;
 }
 
 // 지금 장 뒤에 새 장 — kind 는 레이아웃(layouts.js 의 LAYOUTS)
@@ -319,7 +340,8 @@ function applyOp(op, dir) {
   else if (op.t === 'style') {
     const st = deckStyles(model)[op.i];
     if (st) st.textContent = fwd ? op.b : op.a;
-  } else if (op.t === 'notes') { if (slide()) model.setNotes(slide(), fwd ? op.b : op.a); }
+  } else if (op.t === 'terms') writeTermsRaw(model.doc, fwd ? op.b : op.a);
+  else if (op.t === 'notes') { if (slide()) model.setNotes(slide(), fwd ? op.b : op.a); }
   else if (op.t === 'title') { if (slide()) model.setTitle(slide(), fwd ? op.b : op.a); }
   else if (op.t === 'move') {
     const i = model.indexOfId(op.id);
@@ -504,6 +526,17 @@ function downloadNow() {
 
 // fromFrame: 캔버스(덱 iframe)에서 온 키 — 방향키로도 장을 넘긴다. inText: 글 칸·노트 칸에서 쓰는 중.
 // field: 덱에 원래 있던 입력 칸(input 등)에서 쓰는 중 — 글만 받는 칸이라 서식 단축키도 쓰지 않는다.
+// Ctrl+F 찾기 · Ctrl+H 바꾸기 — 왼쪽 칸의 찾기 탭으로(브라우저의 찾기 대신). fromDeck: 덱 화면에서 눌렀다(덱의 고른 글을
+// 찾을 말로). 상자를 끄는 동안에는 쓰지 않는다(끌기를 마저 하거나 Esc 로 거둔 뒤).
+function findKey(e, fromDeck) {
+  const k = (e.key || '').toLowerCase();
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || (k !== 'f' && k !== 'h')) return false;
+  e.preventDefault();
+  if (pick.drag) return true;
+  side.openFind(k === 'h', fromDeck);
+  return true;
+}
+
 function onKey(e, inText, fromFrame, field = false) {
   // 상자를 끄는 동안에는 키를 쓰지 않는다(Esc 는 끌기 취소) — 장을 넘기거나 되돌리면 끌던 상자의 장과 기록이 엇갈린다
   if (pick.drag) {
@@ -526,6 +559,7 @@ function onKey(e, inText, fromFrame, field = false) {
   // 대화창이 열린 동안 덱 키(Delete·방향키·장 넘기기·서식)는 쓰지 않는다 — 초점이 창 밖(body)으로 빠져도 창 뒤의 상자를
   // 지우거나 장을 넘기지 않게
   if (document.querySelector('dialog[open]')) return;
+  if (findKey(e, fromFrame)) return;
   // 서식 단축키 — 덱의 글(또는 고른 상자)에. 노트 칸에서는 쓰지 않는다(글만 받는 칸이다).
   const fmtKey = mod && !e.shiftKey && (SHORTCUTS[e.code] || e.code === 'BracketLeft' || e.code === 'BracketRight');
   if (fmtKey && !(inText && (!fromFrame || field))) {
@@ -595,19 +629,27 @@ function bind() {
     const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
     const k = (e.key || '').toLowerCase();
     if (mod && ['z', 'y', 's'].includes(k)) {
-      // 서식 막대의 칸(크기·자리 숫자, 글꼴)에서도 Ctrl+Z·Y·S 는 편집기의 것 — 칸은 Enter·떠날 때 바로 입히므로 칸 안의
-      // 되돌리기는 쓸 일이 없다. ‘모든 장에’ 창도 한 번 적용한 것이 되돌리기 한 칸이라 편집기의 것(크기 숫자 칸 안의
-      // Ctrl+Z·Y 만 그 칸의 것, Ctrl+S 는 늘 저장). 창이 열린 채 초점이 창 밖(body)으로 빠졌어도 같다.
+      // Ctrl+S 는 어느 칸에서든 저장(브라우저의 ‘페이지 저장’ 대신) — 토큰 등 다른 대화창이 열려 있을 때만 빼고.
+      // Ctrl+Z·Y 는 서식 막대의 칸(크기·자리 숫자, 글꼴 — 칸은 Enter·떠날 때 바로 입히므로 칸 안의 되돌리기는 쓸 일이 없다),
+      // ‘모든 장에’ 창(한 번 적용한 것이 되돌리기 한 칸 — 크기 숫자 칸 안만 그 칸의 것), 색인·찾기 칸의 글 칸이 아닌 것(체크
+      // 칸·단추)에서 편집기의 것. 찾기·색인의 글 칸 안에서는 그 칸의 되돌리기(쓰던 글)다. 창이 열린 채 초점이 창 밖(body)으로
+      // 빠졌어도 같다.
+      const typing = (t instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'color', 'range'].includes(t.type))
+        || t instanceof HTMLTextAreaElement;
       const num = t instanceof HTMLInputElement && t.type === 'number';
       const inFmt = t instanceof Element && t.closest('#fmt');
       const inMaster = $('masterDlg').open
         && (t === document.body || t === document.documentElement || (t instanceof Element && t.closest('#masterDlg')));
-      if (inFmt || (inMaster && (k === 's' || !num))) {
+      const inPanel = t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind');
+      const otherDialog = Array.from(document.querySelectorAll('dialog[open]')).some((d) => d.id !== 'masterDlg');
+      if (k === 's' ? !otherDialog : (inFmt || (inMaster && !num) || (inPanel && !typing))) {
         onKey(e, false, false);
         return;
       }
     }
     if (document.querySelector('dialog[open]')) return;                                 // 창이 열린 동안 덱 키는 쉰다
+    if (findKey(e, false)) return;                                                      // 찾기 칸 안에서도 Ctrl+F·H
+    if (t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind') && !mod) return;   // 색인·찾기 칸의 키는 그 칸의 것
     if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || (t instanceof Element && t.closest('dialog'))) return;
     if (t instanceof Element && t.closest('#toc') && !e.ctrlKey && !e.metaKey) return;   // 차례는 제 키를 쓴다
     if (t instanceof Element && t.closest('#layMenu') && !e.ctrlKey && !e.metaKey) return;   // 레이아웃 고르기 창도
@@ -662,9 +704,10 @@ async function boot() {
       if (i >= 0) toc.updateTitle(i);
       if (pick) pick.place();
       refresh();
+      if (side) side.changed();
     },
     onKey: (e, inText, field) => onKey(e, inText, true, field),
-    onInput: () => { if (pick) pick.place(); refresh(); },
+    onInput: () => { if (pick) pick.place(); refresh(); if (side) side.changed(); },
     onFit: () => { if (pick) pick.place(); },
   });
   pick = new Pick({
@@ -691,6 +734,12 @@ async function boot() {
   fillLayouts();
   toc = new Toc({ list: els.toc, model, onGo: go, onMove: moveSlide, onDelete: deleteSlide, onRename: renameSlide });
   toc.render();
+  // 왼쪽 칸의 색인·찾기 탭
+  side = new Side({
+    model, msg, settle, go: (i) => go(i), change: (fn) => canvas.change(fn), commitSlides,
+    pushOp: (op) => { hist.push([op]); refresh(); },
+  });
+  side.attach();
   bind();
   go(0);
   els.hint.textContent = HINT;

@@ -32,27 +32,56 @@
 </header>
 
 <main class="layout" id="app">
-  <aside class="side" aria-label="장 차례">
-    <div class="side-head">
-      <h2>차례</h2>
+  <aside class="side" aria-label="차례·색인·찾기">
+    <div class="side-tabs" id="sideTabs" role="tablist" aria-label="왼쪽 칸">
+      <button type="button" class="stab" role="tab" id="tabToc" aria-controls="panToc" aria-selected="true">차례</button>
+      <button type="button" class="stab" role="tab" id="tabIdx" aria-controls="panIdx" aria-selected="false" tabindex="-1">색인</button>
+      <button type="button" class="stab" role="tab" id="tabFind" aria-controls="panFind" aria-selected="false" tabindex="-1" title="찾기·바꾸기 (Ctrl+F · Ctrl+H)">찾기</button>
       <span class="count" id="count"></span>
     </div>
-    <div class="side-acts" role="toolbar" aria-label="장">
-      <span class="split">
-        <button class="btn small" type="button" id="add" title="지금 장 뒤에 제목만 있는 새 장을 넣습니다">＋ 새 장</button>
-        <button class="btn small" type="button" id="addMenu" title="레이아웃을 골라 새 장 넣기" aria-label="레이아웃을 골라 새 장 넣기"
-          aria-haspopup="menu" aria-expanded="false" aria-controls="layMenu">▾</button>
-      </span>
-      <button class="btn small" type="button" id="dup" title="지금 장을 바로 뒤에 복제합니다">복제</button>
-      <button class="btn small" type="button" id="del" title="지금 장을 지웁니다 (Delete) — 되돌리기로 살릴 수 있습니다">지우기</button>
-      <button class="btn small icon" type="button" id="up" title="지금 장을 앞으로 (Alt+↑)" aria-label="앞으로 옮기기">↑</button>
-      <button class="btn small icon" type="button" id="down" title="지금 장을 뒤로 (Alt+↓)" aria-label="뒤로 옮기기">↓</button>
+    <div class="pan" id="panToc" role="tabpanel" aria-labelledby="tabToc">
+      <div class="side-acts" role="toolbar" aria-label="장">
+        <span class="split">
+          <button class="btn small" type="button" id="add" title="지금 장 뒤에 제목만 있는 새 장을 넣습니다">＋ 새 장</button>
+          <button class="btn small" type="button" id="addMenu" title="레이아웃을 골라 새 장 넣기" aria-label="레이아웃을 골라 새 장 넣기"
+            aria-haspopup="menu" aria-expanded="false" aria-controls="layMenu">▾</button>
+        </span>
+        <button class="btn small" type="button" id="dup" title="지금 장을 바로 뒤에 복제합니다">복제</button>
+        <button class="btn small" type="button" id="del" title="지금 장을 지웁니다 (Delete) — 되돌리기로 살릴 수 있습니다">지우기</button>
+        <button class="btn small icon" type="button" id="up" title="지금 장을 앞으로 (Alt+↑)" aria-label="앞으로 옮기기">↑</button>
+        <button class="btn small icon" type="button" id="down" title="지금 장을 뒤로 (Alt+↓)" aria-label="뒤로 옮기기">↓</button>
+      </div>
+      <div class="lay" id="layMenu" role="menu" aria-labelledby="layH" hidden>
+        <p class="lay-h" id="layH" role="none">새 장 레이아웃 — 지금 장 뒤에 넣습니다</p>
+        <div class="lay-grid" id="layGrid" role="none"></div>
+      </div>
+      <ol class="toc" id="toc" role="listbox" aria-label="장 차례 — 끌어서 순서 바꾸기"></ol>
     </div>
-    <div class="lay" id="layMenu" role="menu" aria-labelledby="layH" hidden>
-      <p class="lay-h" id="layH" role="none">새 장 레이아웃 — 지금 장 뒤에 넣습니다</p>
-      <div class="lay-grid" id="layGrid" role="none"></div>
+    <div class="pan" id="panIdx" role="tabpanel" aria-labelledby="tabIdx" hidden>
+      <div class="pan-tools"><input id="idxFilter" type="search" placeholder="색인에서 찾기" aria-label="색인에서 찾기" autocomplete="off"></div>
+      <div class="idx" id="idx" tabindex="-1" aria-label="색인"></div>
+      <form class="idx-add" id="idxAdd">
+        <input id="idxTerm" placeholder="색인에 넣을 말" aria-label="색인에 넣을 말" maxlength="60" autocomplete="off">
+        <button class="btn small" type="submit">더하기</button>
+      </form>
     </div>
-    <ol class="toc" id="toc" role="listbox" aria-label="장 차례 — 끌어서 순서 바꾸기"></ol>
+    <div class="pan" id="panFind" role="tabpanel" aria-labelledby="tabFind" hidden>
+      <div class="pan-tools">
+        <input id="findQ" type="search" placeholder="찾을 글 (Enter 다음 · Shift+Enter 앞)" aria-label="찾을 글" autocomplete="off">
+        <input id="findTo" type="text" placeholder="바꿀 글 (Enter 바꾸기)" aria-label="바꿀 글" autocomplete="off">
+        <div class="find-row">
+          <label class="find-case"><input type="checkbox" id="findCase"> 대소문자 구분</label>
+          <span class="find-pos" id="findPos" aria-live="polite"></span>
+        </div>
+        <div class="find-row">
+          <button class="btn small icon" type="button" id="findPrev" title="앞 (Shift+Enter)" aria-label="앞에서 찾기" disabled>↑</button>
+          <button class="btn small icon" type="button" id="findNext" title="다음 (Enter)" aria-label="다음 찾기" disabled>↓</button>
+          <button class="btn small" type="button" id="findOne" disabled>바꾸기</button>
+          <button class="btn small" type="button" id="findEvery" disabled>모두 바꾸기</button>
+        </div>
+      </div>
+      <ol class="hits" id="hits" tabindex="-1" aria-label="찾은 곳"></ol>
+    </div>
   </aside>
 
   <section class="work" aria-label="편집 화면">

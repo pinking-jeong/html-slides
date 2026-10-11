@@ -38,6 +38,8 @@ html, body { overflow: hidden !important; }
 [${A.ce}] { cursor: text; -webkit-user-select: text !important; user-select: text !important; }
 [${A.ce}]:hover { outline: 1px dashed rgba(37, 99, 235, .55) !important; outline-offset: 2px !important; }
 [${A.ce}]:focus { outline: 2px solid #2563EB !important; outline-offset: 2px !important; }
+::highlight(hse-hit) { background-color: rgba(255, 214, 10, .45); }
+::highlight(hse-cur) { background-color: rgba(255, 149, 0, .85); color: #111; }
 `;
 
 const HEAD_RE = /<head\b[^>]{0,4096}>/i;
