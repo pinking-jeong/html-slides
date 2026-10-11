@@ -1223,3 +1223,41 @@ def test_without_remote_commits_only(tmp_path, monkeypatch, capsys):
     assert git(work, "log", "-1", "--format=%s").strip() == "docs: 덱 추가 — solo"
     assert "원격 저장소(origin)가 없어" in capsys.readouterr().out
     assert not slides.Repo(work).unpushed()
+
+
+def test_web_layout_edits_merge_and_shadow_cli_labels(env, capsys):
+    # 첫 화면 편집이 원격에 올린 배치 파일 위에 slides 가 자기 커밋을 얹되, 배치 파일은 고치지 않는다
+    other = env.tmp / "web"
+    git(env.tmp, "clone", "-q", str(env.remote), str(other))
+    git(other, "config", "user.name", "web")
+    git(other, "config", "user.email", "web@example.com")
+    layout = {"version": 1, "categories": [{"key": "conf", "label": "웹에서 정한 이름"}], "assign": {}, "order": []}
+    (other / "decks").mkdir(exist_ok=True)
+    (other / "decks" / "gallery.json").write_text(json.dumps(layout, ensure_ascii=False), encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "chore: 갤러리 배치 바꿈(첫 화면 편집)")
+    git(other, "push", "-q")
+    deck = env.src / "talk.html"
+    deck.write_text("<html><head><title>T</title></head><body></body></html>", encoding="utf-8")
+    capsys.readouterr()
+    assert run(env, "add", str(deck), "--folder", "conf", "--folder-label", "학회 발표", "--yes") == 0
+    out = capsys.readouterr().out
+    assert "웹에서 정한 이름" in out and "분류 관리" in out     # 웹에서 정한 이름이 앞선다고 알린다
+    files = remote_files(env)
+    assert "decks/conf/talk.html" in files and "decks/folders.json" in files
+    assert json.loads(remote_show(env, "decks/gallery.json")) == layout
+    assert subjects(env, 2) == ["docs: 덱 추가 — talk", "chore: 갤러리 배치 바꿈(첫 화면 편집)"]
+    # 같은 이름이면 알리지 않는다
+    capsys.readouterr()
+    assert run(env, "add", str(deck), "--name", "talk2", "--folder", "conf", "--folder-label", "웹에서 정한 이름",
+               "--yes") == 0
+    assert "분류 관리" not in capsys.readouterr().out
+
+
+def test_web_label_ignores_unreadable_layout(tmp_path):
+    path = tmp_path / "decks" / "gallery.json"
+    path.parent.mkdir()
+    path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")   # 아주 깊게 겹친 JSON 도 멈추지 않는다
+    assert slides.web_label(tmp_path, "conf") == ""
+    path.write_text(json.dumps({"categories": [{"key": "conf", "label": " 학회 "}]}), encoding="utf-8")
+    assert slides.web_label(tmp_path, "conf") == "학회"

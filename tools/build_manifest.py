@@ -16,6 +16,8 @@ decks/ 아래의 발표자료(HTML·PDF·PPTX)를 찾아 목록(decks.json)과 �
   뒤의 PDF·PPTX 는 그 덱에 붙는다(받기·다른 뷰어로 보기)
 - <이름>.meta.json(폴더 덱은 meta.json) → 제목·설명·발표일·학회·숨김 등을 덮어쓴다
 - decks/folders.json                    → 폴더 키의 표시 이름과 순서
+- decks/gallery.json                    → 갤러리 첫 화면에서 편집한 배치(분류 목록·이름·순서, 덱별 분류, 덱 순서).
+  웹 편집기가 저장하고 slides 는 쓰지 않는다. 파일은 옮기지 않으므로 분류를 바꿔도 덱 주소는 그대로다
 - _ 나 . 로 시작하는 파일·폴더와 바로가기(symlink)는 덱으로 보지 않고 사이트에도 싣지 않는다
 - hidden: true 인 덱은 목록에서 빼고 사이트에도 싣지 않는다(공개 저장소에는 그대로 있다)
 """
@@ -53,6 +55,11 @@ REV_LEN = 12                           # 뷰어 주소에 붙이는 판 표시(�
 ZIP_PART_MAX = 20 * 1024 * 1024        # PPTX 안에서 읽을 XML·그림 한 조각의 최대 크기(압축 폭탄 막기)
 PREVIEW_PREFIXES = (f"/{DECKS_DIR}/", "/viewer/", "/vendor/")
 FOLDERS_FILE = "folders.json"
+LAYOUT_FILE = "gallery.json"
+LAYOUT_MAX_BYTES = 1_000_000           # 배치 파일 크기 상한 — 손으로 고친 파일이 커도 빌드가 멈추지 않게
+LAYOUT_MAX_ITEMS = 5000                # 분류·덱 목록에서 읽는 항목 수 상한
+KEY_MAX = 200                          # 분류 키 길이(디렉터리 폴더 키는 decks/ 아래 경로라 길 수 있다)
+LABEL_MAX = 80
 SITE_MARKER = ".html-slides-site"
 HEAD_BYTES = 262144                    # <title>·<meta> 는 문서 앞부분에서만 찾는다
 THUMB_BOX = (960, 540)                 # 미리보기 그림 최대 크기(16:9)
@@ -80,6 +87,11 @@ CORE_TITLE_RE = re.compile(r"<(?:\w{1,32}:)?title\b[^<>]{0,1024}>([^<]{0,4000})<
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CACHE_NAME_RE = re.compile(r"^[0-9a-f]{16}\.(?:json|webp)$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+LAYOUT_REV_RE = re.compile(r"^[0-9A-Za-z:._+-]{1,64}$")
+# 웹 편집기가 만드는 커밋의 작성자 — 개인 메일이 공개 기록에 남지 않게 GitHub noreply 주소만 받는다
+NOREPLY_RE = re.compile(r"^[0-9]{1,12}\+[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})@users\.noreply\.github\.com$")
+# 분류 이름에서 띄어쓰기로 바꾸는 글자 — 제어 문자(C0·DEL·C1)와 BOM
+LABEL_SPACE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\N{ZERO WIDTH NO-BREAK SPACE}]")
 
 PROBE_JS = """() => {
   const q = s => document.querySelectorAll(s).length;
@@ -102,8 +114,22 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def well_formed(s: str) -> str:
+    """짝 없는 써로게이트(JSON 의 짝 없는 써로게이트 이스케이프 등)를 U+FFFD 로 — 그대로 두면 decks.json 을
+    UTF-8 로 쓰지 못해 빌드가 멈춘다. 브라우저의 String.prototype.toWellFormed 와 같다."""
+    return s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
 def clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", html.unescape(s or "")).strip()
+    return re.sub(r"\s+", " ", well_formed(html.unescape(s or ""))).strip()
+
+
+def clean_label(s: str) -> str:
+    """분류 이름 — HTML 로 풀지 않는다(웹 편집기에 친 ‘Lab&notes’ 가 ‘Lab¬es’ 가 되지 않게). 짝 없는 써로게이트는
+    U+FFFD, 제어 문자·BOM 은 띄어쓰기로, 띄어쓰기는 한 칸으로, 80글자(코드 포인트)까지.
+    assets/gallery.js 의 cleanLabel 과 같은 규칙이라 편집기에서 본 이름이 배포 뒤에도 그대로다."""
+    s = " ".join(LABEL_SPACE_RE.sub(" ", well_formed(s)).split())
+    return s[:LABEL_MAX].rstrip()
 
 
 def is_number(v) -> bool:
@@ -196,7 +222,7 @@ def load_json(path: Path) -> dict:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:   # 아주 깊게 겹친 JSON 은 ValueError 가 아니라 RecursionError
         log(f"  [경고] {path.name} 을 읽지 못해 무시합니다: {e}")
         return {}
     return data if isinstance(data, dict) else {}
@@ -210,7 +236,7 @@ def read_meta(path: Path, quiet: bool = False) -> dict | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         why = "JSON 객체가 아님"
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         data, why = None, str(e)
     if isinstance(data, dict):
         return data
@@ -237,6 +263,102 @@ def load_folders(base: Path) -> dict[str, dict]:
                 item["order"] = val["order"]
             out[key] = item
     return out
+
+
+def load_layout(base: Path) -> tuple[dict, bool]:
+    """gallery.json → (내용, 파일이 있는가). 바로가기이거나 너무 크거나 JSON 객체가 아니면 알리고 빈 배치로 본다."""
+    path = base / LAYOUT_FILE
+    if path.is_symlink():
+        log(f"  [경고] {DECKS_DIR}/{LAYOUT_FILE} 가 바로가기(symlink)라 무시합니다")
+        return {}, False
+    if not path.is_file():
+        return {}, False
+    if path.stat().st_size > LAYOUT_MAX_BYTES:
+        log(f"  [경고] {DECKS_DIR}/{LAYOUT_FILE} 가 너무 커서({path.stat().st_size} 바이트) 무시합니다")
+        return {}, True
+    return load_json(path), True
+
+
+def valid_key(key) -> bool:
+    """분류 키 — 빈 값(분류 없음)이 아니고 앞뒤 공백·제어 문자·BOM·짝 없는 써로게이트가 없는 문자열.
+    덱이 든 폴더(home)는 이 규칙과 상관없이 늘 키가 된다. assets/gallery.js 의 validKey 와 같다."""
+    return (isinstance(key, str) and 0 < len(key) <= KEY_MAX and key == key.strip()
+            and not LABEL_SPACE_RE.search(key) and well_formed(key) == key)
+
+
+def apply_layout(raw: dict, decks: list[dict], folders: dict[str, dict]) -> dict:
+    """웹 편집으로 정한 배치를 덱에 입힌다 — 덱마다 home(디렉터리 폴더)·folder(실제 분류)·folderLabel·rank.
+    돌려주는 값은 decks.json 의 layout 으로, 편집기가 처음 상태로 쓴다(assets/gallery.js 의 applyLayout 과 같은 규칙).
+    없는 덱·분류를 가리키는 항목은 조용히 뺀다(덱을 내린 뒤에도 배치 파일은 남으므로)."""
+    homes = {d["folder"] for d in decks if d["folder"]}
+    ids = {d["id"] for d in decks}
+
+    listed: list[str] = []
+    seen: set[str] = set()
+    overrides: dict[str, str] = {}
+    raw_cats = raw.get("categories")
+    for c in (raw_cats if isinstance(raw_cats, list) else [])[:LAYOUT_MAX_ITEMS]:
+        key = c.get("key") if isinstance(c, dict) else None
+        if not isinstance(key, str) or not (key in homes or valid_key(key)) or key in seen:
+            continue
+        seen.add(key)
+        listed.append(key)
+        label = clean_label(c["label"]) if isinstance(c.get("label"), str) else ""
+        if label:
+            overrides[key] = label
+    known = seen | homes
+
+    assign: dict[str, str] = {}
+    raw_assign = raw.get("assign")
+    for deck_id, key in (list(raw_assign.items()) if isinstance(raw_assign, dict) else [])[:LAYOUT_MAX_ITEMS]:
+        if deck_id in ids and isinstance(key, str) and (key == "" or key in known):
+            assign[deck_id] = key
+
+    order: list[str] = []
+    placed: set[str] = set()
+    raw_order = raw.get("order")
+    for deck_id in (raw_order if isinstance(raw_order, list) else [])[:LAYOUT_MAX_ITEMS]:
+        if isinstance(deck_id, str) and deck_id in ids and deck_id not in placed:
+            placed.add(deck_id)
+            order.append(deck_id)
+
+    def base_label(key: str) -> str:              # folders.json 의 이름(분류 이름 규칙으로 다듬은 것), 없으면 키
+        return clean_label(folders.get(key, {}).get("label", "")) or key
+
+    def rest_key(key: str) -> tuple:              # 배치에 없는 폴더 — folders.json 의 order, 그다음 이름
+        o = folders.get(key, {}).get("order")
+        return (o is None, o or 0, base_label(key))
+
+    rest = sorted(homes, key=rest_key)
+    categories = [{"key": k, "label": overrides.get(k) or base_label(k), "base": base_label(k)}
+                  for k in listed + [k for k in rest if k not in seen]]
+    labels = {c["key"]: c["label"] for c in categories}
+    rank = {deck_id: i for i, deck_id in enumerate(order)}
+    for d in decks:
+        d["home"] = d["folder"]
+        d["folder"] = assign.get(d["id"], d["home"])
+        d["folderLabel"] = labels.get(d["folder"], d["folder"]) if d["folder"] else ""
+        d["rank"] = rank.get(d["id"])
+    rev = raw.get("rev")
+    # homes — 덱이 든 폴더 전부를 위 차례로. 편집기가 다른 배치(저장 직후 아직 배포되지 않은 것)를 입힐 때
+    # 거기에 없는 폴더를 이 차례·이름으로 뒤에 붙인다.
+    return {"rev": rev if isinstance(rev, str) and LAYOUT_REV_RE.match(rev) else None,
+            "categories": categories, "assign": assign, "order": order,
+            "homes": [{"key": k, "base": base_label(k)} for k in rest]}
+
+
+def site_author(site: dict) -> dict | None:
+    """site.json 의 author — 웹 편집기가 커밋 작성자로 쓴다. noreply 주소가 아니면 쓰지 않는다."""
+    a = site.get("author")
+    if not isinstance(a, dict):
+        return None
+    name = text_field(a, "name")[:100]
+    email = a.get("email") if isinstance(a.get("email"), str) else ""
+    if name and NOREPLY_RE.match(email):
+        return {"name": name, "email": email}
+    log("  [경고] site.json 의 author 는 이름과 GitHub noreply 메일(숫자+아이디@users.noreply.github.com)이어야 해서 "
+        "쓰지 않습니다 — 웹 편집 커밋에 개인 메일이 남지 않게")
+    return None
 
 
 def discover(root: Path) -> list[dict]:
@@ -661,21 +783,25 @@ def build_manifest(root: Path, thumbs: bool, cache: Path | None, use_git: bool) 
         render_previews(root, decks, cache, thumbs)
         prune_cache(cache, decks)
     decks.sort(key=lambda d: (d["updated"] or "", d["title"]), reverse=True)
+    raw_layout, has_layout = load_layout(base)
+    layout = apply_layout(raw_layout, decks, folders)
+    layout["exists"] = has_layout
     site = load_json(root / "site.json")
     repo, branch = repo_info(root, site)
-    folder_list = []
-    for key in sorted({d["folder"] for d in decks if d["folder"]}):
-        meta = folders.get(key, {})
-        folder_list.append({"key": key, "label": meta.get("label", key),
-                            "order": meta.get("order"),
-                            "count": sum(1 for d in decks if d["folder"] == key)})
-    folder_list.sort(key=lambda f: (f["order"] is None, f["order"] or 0, f["label"]))
+    counts: dict[str, int] = {}
+    for d in decks:
+        if d["folder"]:
+            counts[d["folder"]] = counts.get(d["folder"], 0) + 1
+    # 칩(분류) 차례는 배치의 분류 목록을 따른다 — 덱이 없는 분류는 칩으로 내지 않는다.
+    folder_list = [{"key": c["key"], "label": c["label"], "order": folders.get(c["key"], {}).get("order"),
+                    "count": counts[c["key"]]} for c in layout["categories"] if counts.get(c["key"])]
     return {
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "site": {"title": text_field(site, "title") or "HTML 발표자료",
                  "subtitle": text_field(site, "subtitle"),
-                 "repo": repo, "branch": branch},
+                 "repo": repo, "branch": branch, "author": site_author(site)},
         "folders": folder_list,
+        "layout": layout,
         "count": len(decks),
         "decks": decks,
         "_hidden_files": hidden_files,
@@ -739,7 +865,8 @@ def build_site(root: Path, out: Path, manifest: dict, cache: Path | None) -> Non
             src = cur_p / name
             rel = src.relative_to(root).as_posix()
             if (name.startswith((".", "_")) or src.is_symlink() or name.endswith(META_SUFFIX)
-                    or rel == f"{DECKS_DIR}/{FOLDERS_FILE}" or rel in hidden_files or rel.startswith(hidden_dirs)
+                    or rel in (f"{DECKS_DIR}/{FOLDERS_FILE}", f"{DECKS_DIR}/{LAYOUT_FILE}")
+                    or rel in hidden_files or rel.startswith(hidden_dirs)
                     or (name == "meta.json" and (cur_p / "index.html").is_file())):
                 continue
             if name.lower().endswith(DECK_SUFFIXES):

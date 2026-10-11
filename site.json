@@ -2,5 +2,6 @@
  "title": "HTML 발표자료",
  "subtitle": "로컬에서 만든 HTML·PDF·PPTX 발표자료를 모아 보고, 바로 발표합니다.",
  "repo": "pinking-jeong/html-slides",
- "branch": "main"
+ "branch": "main",
+ "author": {"name": "pinking-jeong", "email": "218701100+pinking-jeong@users.noreply.github.com"}
 }

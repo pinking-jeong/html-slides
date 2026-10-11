@@ -47,6 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DECKS_DIR = "decks"
 META_SUFFIX = ".meta.json"
 FOLDERS_FILE = "folders.json"
+LAYOUT_FILE = "gallery.json"            # 갤러리 첫 화면에서 편집한 배치 — slides 는 읽기만 하고 쓰지 않는다
 REGISTRY_NAME = "slides-registry.json"
 LOCK_NAME = "slides.lock"
 SOURCE_KINDS ={".html": ".html", ".htm": ".html", ".pdf": ".pdf", ".pptx": ".pptx"}   # 원본 확장자 → 저장소 확장자
@@ -1165,6 +1166,24 @@ def set_folder_label(root: Path, folder: str, label: str) -> bool:
     return True
 
 
+def web_label(root: Path, folder: str) -> str:
+    """갤러리 첫 화면 편집(decks/gallery.json)에서 이 폴더에 붙인 분류 이름 — 없으면 ''. 이 이름이 folders.json 보다 앞선다."""
+    path = root / DECKS_DIR / LAYOUT_FILE
+    try:
+        if path.stat().st_size > 1_000_000:
+            return ""
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):   # 아주 깊게 겹친 JSON 도 읽지 못한 것으로 본다
+        return ""
+    cats = data.get("categories") if isinstance(data, dict) else None
+    for c in cats if isinstance(cats, list) else []:
+        if isinstance(c, dict) and c.get("key") == folder and isinstance(c.get("label"), str):
+            # 짝 없는 써로게이트는 U+FFFD 로(그대로 찍으면 콘솔 출력이 멈춘다), 띄어쓰기는 한 칸으로
+            label = c["label"].encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+            return " ".join(label.split())
+    return ""
+
+
 def case_conflict(root: Path, rel: str) -> str | None:
     """decks/ 아래 경로 가운데 대소문자만 다른 이름이 이미 있으면 그 경로(Windows 에서는 같은 파일이 된다)."""
     cur = root
@@ -1357,8 +1376,13 @@ def cmd_add(repo: Repo, args) -> int:
         if write_meta(repo.root / paths["meta"], meta):
             changed.append(paths["meta"])
         if args.folder_label and folder_parts:
-            if set_folder_label(repo.root, "/".join(folder_parts), args.folder_label):
+            folder_key = "/".join(folder_parts)
+            if set_folder_label(repo.root, folder_key, args.folder_label):
                 changed.append(f"{DECKS_DIR}/{FOLDERS_FILE}")
+            shown = web_label(repo.root, folder_key)
+            if shown and shown != args.folder_label:
+                print(f"  [안내] 갤러리 첫 화면에서 이 분류의 이름을 '{mask(shown, 40)}'(으)로 정해 두어 그 이름이 보입니다 "
+                      "— 바꾸려면 첫 화면의 편집 → 분류 관리에서 고치세요.")
         reg["decks"][rel] = {
             "source": str(src),
             "pptx_source": pptx_from,

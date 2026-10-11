@@ -505,3 +505,110 @@ def test_vendored_pdfjs_matches_its_sums():
     files = {p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()} - {"README.md", "SHA256SUMS"}
     assert set(listed) == files                             # 목록에 없는 파일이 끼어들지 않았다
     assert [rel for rel, digest in listed.items() if bm.sha256_file(base / rel) != digest] == []
+
+
+def test_layout_moves_decks_between_categories(tmp_path):
+    write(tmp_path / "decks/a.html", deck(title="가"))
+    write(tmp_path / "decks/conf/b.html", deck(title="나"))
+    write(tmp_path / "decks/conf/c.html", deck(title="다"))
+    write(tmp_path / "decks/seminar/d.html", deck(title="라"))
+    write(tmp_path / "decks/folders.json", json.dumps({"conf": {"label": "학회", "order": 1}, "seminar": "세미나"}))
+    write(tmp_path / "decks/gallery.json", json.dumps({
+        "version": 1, "rev": "2026-10-10T06:00:00.000Z-ab12",
+        "categories": [{"key": "c-new", "label": "  새   분류 "}, {"key": "seminar"}, {"key": "conf", "label": "학회 발표"},
+                       {"key": "c-new", "label": "겹친 키"}, {"key": " bad"}, {"key": ""}, "x", {"key": 3},
+                       {"key": "c-empty", "label": "빈 분류"}],
+        "assign": {"a": "c-new", "conf/b": "", "conf/c": "nowhere", "gone": "conf"},
+        "order": ["seminar/d", "gone", "a", "seminar/d", 3],
+    }))
+    m = bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)
+    by = {d["id"]: d for d in m["decks"]}
+    assert (by["a"]["home"], by["a"]["folder"], by["a"]["folderLabel"]) == ("", "c-new", "새 분류")
+    assert (by["conf/b"]["home"], by["conf/b"]["folder"], by["conf/b"]["folderLabel"]) == ("conf", "", "")
+    assert (by["conf/c"]["folder"], by["conf/c"]["folderLabel"]) == ("conf", "학회 발표")   # 없는 분류는 무시
+    assert [by[i]["rank"] for i in ("seminar/d", "a", "conf/b", "conf/c")] == [0, 1, None, None]
+    lay = m["layout"]
+    assert (lay["rev"], lay["exists"]) == ("2026-10-10T06:00:00.000Z-ab12", True)
+    assert lay["order"] == ["seminar/d", "a"] and lay["assign"] == {"a": "c-new", "conf/b": ""}
+    assert [(c["key"], c["label"], c["base"]) for c in lay["categories"]] == [
+        ("c-new", "새 분류", "c-new"), ("seminar", "세미나", "세미나"), ("conf", "학회 발표", "학회"), ("c-empty", "빈 분류", "c-empty")]
+    # 칩은 덱이 있는 분류만, 배치의 차례대로(빈 분류는 편집기에만 남는다)
+    assert [(f["key"], f["label"], f["count"]) for f in m["folders"]] == [
+        ("c-new", "새 분류", 1), ("seminar", "세미나", 1), ("conf", "학회 발표", 1)]
+
+
+def test_layout_without_file_keeps_folder_order(tmp_path):
+    write(tmp_path / "decks/z/a.html", deck())
+    write(tmp_path / "decks/conf/b.html", deck())
+    write(tmp_path / "decks/folders.json", json.dumps({"conf": {"label": "학회", "order": 2}, "z": {"order": 1}}))
+    m = bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)
+    assert [f["key"] for f in m["folders"]] == ["z", "conf"]          # 예전처럼 folders.json 의 order
+    assert m["layout"] == {"rev": None, "exists": False, "assign": {}, "order": [],
+                           "categories": [{"key": "z", "label": "z", "base": "z"},
+                                          {"key": "conf", "label": "학회", "base": "학회"}],
+                           "homes": [{"key": "z", "base": "z"}, {"key": "conf", "base": "학회"}]}
+    assert all(d["rank"] is None and d["home"] == d["folder"] for d in m["decks"])
+
+
+def test_layout_file_problems_are_reported(tmp_path, capsys):
+    write(tmp_path / "decks/conf/b.html", deck())
+    write(tmp_path / "decks/gallery.json", "{ 깨진")
+    m = bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)
+    assert m["layout"]["exists"] is True and m["layout"]["order"] == []
+    assert "gallery.json 을 읽지 못해" in capsys.readouterr().out
+    deep = "[" * 100_000 + "]" * 100_000                  # 크기 상한 아래지만 아주 깊게 겹친 JSON(RecursionError)
+    write(tmp_path / "decks/gallery.json", deep)
+    assert bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)["layout"]["order"] == []
+    assert "gallery.json 을 읽지 못해" in capsys.readouterr().out
+    write(tmp_path / "decks/gallery.json", json.dumps({"order": ["conf/b"], "pad": "x" * bm.LAYOUT_MAX_BYTES}))
+    assert bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)["layout"]["order"] == []
+    assert "너무 커서" in capsys.readouterr().out
+    # 꼴이 틀린 항목은 조용히 버린다
+    write(tmp_path / "decks/gallery.json", json.dumps({"categories": {"a": 1}, "assign": ["x"], "order": "conf/b",
+                                                       "rev": "띄어 쓴 값"}))
+    lay = bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)["layout"]
+    assert (lay["rev"], lay["assign"], lay["order"]) == (None, {}, [])
+    assert [c["key"] for c in lay["categories"]] == ["conf"]
+    # 덱 정보 파일이 그렇게 겹쳐도 빌드는 멈추지 않고 그 덱만 뺀다
+    write(tmp_path / "decks/conf/b.meta.json", deep)
+    capsys.readouterr()
+    assert bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)["decks"] == []
+    assert "b.meta.json 이 JSON 으로 읽히지 않아" in capsys.readouterr().out
+
+
+def test_layout_with_broken_unicode_still_builds(tmp_path):
+    # 짝 없는 써로게이트(JSON 의 이스케이프로 들어온 것)가 있어도 decks.json 을 쓴다 — 이름·제목은 U+FFFD, 키는 버린다
+    sur = chr(92) + "ud83d"                                           # JSON 안의 짝 없는 써로게이트 이스케이프
+    bad = chr(0xFFFD)
+    write(tmp_path / "decks/conf/b.html", deck(title="나"))
+    write(tmp_path / "decks/folders.json", '{"conf": {"label": "학' + sur + '회"}}')
+    write(tmp_path / "decks/conf/b.meta.json", '{"title": "제' + sur + '목", "tags": ["꼬' + sur + '"]}')
+    write(tmp_path / "decks/gallery.json",
+          '{"categories": [{"key": "c-1", "label": "a' + sur + '"}, {"key": "x' + sur + '", "label": "y"}],'
+          ' "assign": {"conf/b": "x' + sur + '"}}')
+    m = bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)
+    out = tmp_path / "_site"
+    bm.build_site(tmp_path, out, m, None)                             # 예전에는 여기서 UnicodeEncodeError
+    pub = json.loads((out / "decks.json").read_text(encoding="utf-8"))
+    assert [(c["key"], c["label"]) for c in pub["layout"]["categories"]] == [("c-1", "a" + bad), ("conf", "학" + bad + "회")]
+    d = pub["decks"][0]
+    assert (d["title"], d["tags"], d["folder"], d["folderLabel"]) == ("제" + bad + "목", ["꼬" + bad], "conf", "학" + bad + "회")
+
+
+def test_layout_file_stays_out_of_site_and_author_must_be_noreply(tmp_path, capsys):
+    write(tmp_path / "decks/a.html", deck())
+    write(tmp_path / "decks/gallery.json", json.dumps({"order": ["a"]}))
+    me = {"name": "someone", "email": "1234+someone@users.noreply.github.com"}
+    write(tmp_path / "site.json", json.dumps({"repo": "o/r", "author": me}))
+    m = bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)
+    out = tmp_path / "_site"
+    bm.build_site(tmp_path, out, m, None)
+    assert not (out / "decks/gallery.json").exists()               # 배치는 decks.json 으로만 싣는다
+    pub = json.loads((out / "decks.json").read_text(encoding="utf-8"))
+    assert pub["layout"]["order"] == ["a"] and pub["site"]["author"] == me
+    for bad in ({"name": "someone", "email": "someone@gmail.com"}, {"email": me["email"]}, "someone"):
+        write(tmp_path / "site.json", json.dumps({"author": bad}))
+        capsys.readouterr()
+        assert bm.build_manifest(tmp_path, thumbs=False, cache=None, use_git=False)["site"]["author"] is None
+        if isinstance(bad, dict):
+            assert "noreply" in capsys.readouterr().out
