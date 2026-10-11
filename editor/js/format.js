@@ -318,8 +318,9 @@ export class Formatter {
     const e = this.els;
     const { parts } = this.targets();
     const on = parts.length > 0;
+    // 상자 칸·막대 끝의 단추(그림 넣기·모든 장에)는 글 고르기와 상관없다
     for (const c of e.bar.querySelectorAll('button, select, input')) {
-      if (!c.closest('[data-fmt-box]')) c.disabled = !on;
+      if (!c.closest('[data-fmt-box], [data-fmt-free]')) c.disabled = !on;
     }
     if (!on) {
       e.size.value = '';

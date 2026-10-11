@@ -9,7 +9,7 @@
 import { textHosts } from './canvas.js';
 import { A } from './deck.js';
 
-const MEDIA = 'img, svg, video, canvas, picture';
+const MEDIA = 'img, svg, video, canvas, picture, [data-name="picture"]';   // 마지막은 새 장 레이아웃의 그림 자리
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const MIN = 8;
 const LIMIT = 10000;

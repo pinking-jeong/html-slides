@@ -38,11 +38,19 @@
       <span class="count" id="count"></span>
     </div>
     <div class="side-acts" role="toolbar" aria-label="장">
-      <button class="btn small" type="button" id="add" title="지금 장 뒤에 제목만 있는 새 장을 넣습니다">＋ 새 장</button>
+      <span class="split">
+        <button class="btn small" type="button" id="add" title="지금 장 뒤에 제목만 있는 새 장을 넣습니다">＋ 새 장</button>
+        <button class="btn small" type="button" id="addMenu" title="레이아웃을 골라 새 장 넣기" aria-label="레이아웃을 골라 새 장 넣기"
+          aria-haspopup="menu" aria-expanded="false" aria-controls="layMenu">▾</button>
+      </span>
       <button class="btn small" type="button" id="dup" title="지금 장을 바로 뒤에 복제합니다">복제</button>
       <button class="btn small" type="button" id="del" title="지금 장을 지웁니다 (Delete) — 되돌리기로 살릴 수 있습니다">지우기</button>
       <button class="btn small icon" type="button" id="up" title="지금 장을 앞으로 (Alt+↑)" aria-label="앞으로 옮기기">↑</button>
       <button class="btn small icon" type="button" id="down" title="지금 장을 뒤로 (Alt+↓)" aria-label="뒤로 옮기기">↓</button>
+    </div>
+    <div class="lay" id="layMenu" role="menu" aria-labelledby="layH" hidden>
+      <p class="lay-h" id="layH" role="none">새 장 레이아웃 — 지금 장 뒤에 넣습니다</p>
+      <div class="lay-grid" id="layGrid" role="none"></div>
     </div>
     <ol class="toc" id="toc" role="listbox" aria-label="장 차례 — 끌어서 순서 바꾸기"></ol>
   </aside>
@@ -77,6 +85,11 @@
         <label class="pos-field">왼쪽<input id="bX" type="number" min="-10000" max="10000" step="1"></label>
         <label class="pos-field">위<input id="bY" type="number" min="-10000" max="10000" step="1"></label>
         <span class="unit">px</span>
+      </span>
+      <span class="fend" data-fmt-free>
+        <button type="button" class="tb wide" id="picBtn" title="그림 파일을 넣습니다 — 그림 자리나 그림을 고른 채 누르면 그 자리에 바꿔 넣습니다">그림 넣기</button>
+        <input type="file" id="picFile" accept="image/png,image/jpeg,image/gif,image/webp,image/avif,image/svg+xml,image/bmp" hidden>
+        <button type="button" class="tb wide" id="masterBtn" title="모든 장에 한꺼번에(슬라이드 마스터처럼) — 덱 색·글꼴, 역할별 글자 모양, 공통 상자, 배경색">모든 장에</button>
       </span>
     </div>
     <div class="canvas" id="canvas">
@@ -133,6 +146,63 @@
     <button class="btn ghost" type="button" id="cfDownload">편집본 HTML 받기</button>
     <button class="btn danger" type="button" id="cfOverwrite">덮어쓰기</button>
   </div>
+</dialog>
+
+<dialog class="dlg wide" id="masterDlg" aria-labelledby="masterTitle" tabindex="-1">
+  <form method="dialog" class="master">
+    <h2 id="masterTitle">모든 장에 한꺼번에</h2>
+    <p class="small">슬라이드 마스터처럼, 여기서 고친 것은 모든 장에 들어갑니다. 한 번 적용한 것은 되돌리기(Ctrl+Z) 한 번으로 돌아갑니다.</p>
+
+    <section class="m-sec" aria-labelledby="mThemeH">
+      <h3 id="mThemeH">덱 색·글꼴</h3>
+      <p class="m-help">덱이 정해 둔 색·글꼴 변수입니다. 바꾸면 그 변수를 쓰는 모든 글·도형이 함께 바뀝니다.</p>
+      <div class="m-vars" id="mVars"></div>
+      <p class="m-help" id="mVarsNone" hidden>이 덱에는 고칠 수 있는 색·글꼴 변수(:root)가 없습니다 — 아래 ‘역할별 글자 모양’을 쓰세요.</p>
+    </section>
+
+    <section class="m-sec" aria-labelledby="mRoleH">
+      <h3 id="mRoleH">역할별 글자 모양</h3>
+      <p class="m-help">고른 역할의 글을 모든 장에서 같은 모양으로 맞춥니다. 체크한 것만 바꿉니다.</p>
+      <div class="m-row">
+        <label>역할 <select id="mRole"></select></label>
+        <span class="m-count" id="mRoleCount"></span>
+      </div>
+      <div class="m-grid">
+        <label><input type="checkbox" id="mUseFont"> 글꼴 <select id="mFont"></select></label>
+        <label><input type="checkbox" id="mUseSize"> 크기 <input id="mSize" type="number" min="1" max="400" step="0.5" inputmode="decimal"> pt</label>
+        <label><input type="checkbox" id="mUseColor"> 색 <input id="mColor" type="color" value="#16212a"></label>
+        <label>굵게 <select id="mBold"><option value="">그대로</option><option value="1">굵게</option><option value="0">보통</option></select></label>
+        <label>기울임 <select id="mItalic"><option value="">그대로</option><option value="1">기울임</option><option value="0">보통</option></select></label>
+        <label>정렬 <select id="mAlign"><option value="">그대로</option><option value="left">왼쪽</option><option value="center">가운데</option><option value="right">오른쪽</option><option value="justify">양쪽</option></select></label>
+      </div>
+      <div class="m-row"><button type="button" class="btn primary" id="mRoleApply">모든 장에 적용</button></div>
+    </section>
+
+    <section class="m-sec" aria-labelledby="mBoxH">
+      <h3 id="mBoxH">공통 상자</h3>
+      <p class="m-help" id="mBoxHelp">장에서 상자(꼬리말·로고·쪽 번호 등)를 누른 뒤 여세요.</p>
+      <div class="m-row">
+        <button type="button" class="btn" id="mCopy">이 상자를 모든 장에 넣기</button>
+        <button type="button" class="btn" id="mMatch">같은 이름 상자를 이 상자 자리·모양으로</button>
+        <label class="m-check"><input type="checkbox" id="mMatchText"> 글도 같게(쪽 번호 빼고)</label>
+        <button type="button" class="btn danger" id="mRemove">같은 이름 상자 모두 지우기</button>
+      </div>
+    </section>
+
+    <section class="m-sec" aria-labelledby="mBgH">
+      <h3 id="mBgH">배경색</h3>
+      <div class="m-row">
+        <input type="color" id="mBg" value="#ffffff" aria-label="배경색">
+        <label class="m-check"><input type="checkbox" id="mBgSkip" checked> 첫 장(표지) 빼기</label>
+        <label class="m-check"><input type="checkbox" id="mBgAll"> 바탕이 다른 장도</label>
+        <button type="button" class="btn" id="mBgApply">모든 장에 칠하기</button>
+        <button type="button" class="btn ghost" id="mBgClear">장마다 넣은 배경색 걷기</button>
+      </div>
+    </section>
+
+    <p class="m-status" id="mStatus" role="status" aria-live="polite"></p>
+    <div class="dlg-acts"><button type="button" class="btn" id="mClose">닫기</button></div>
+  </form>
 </dialog>
 </body>
 </html>

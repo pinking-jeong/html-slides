@@ -21,6 +21,7 @@ export const A = {
   force: `${P}force`,     // 덱 CSS 로는 보이지 않는 장을 억지로 보이게
   ce: `${P}ce`,           // 편집기가 contenteditable 을 붙인 글 칸
   st: `${P}st`,           // 글자 서식을 블록으로 올리기 전 그 블록의 style — 서식 지우기가 되돌릴 값
+  ph: `${P}ph`,           // 새 장의 안내 글을 넣은 요소 — 그 글 그대로면 누를 때 통째로 골라진다(canvas.js)
 };
 
 const UI_STYLE = (w, h) => `
@@ -53,7 +54,11 @@ const NON_VISUAL = new Set(['script', 'style', 'link', 'meta', 'template', 'base
 const ON_CLASSES = ['on', 'active', 'current', 'present'];
 const ID_LIST_ATTRS = new Set(['for', 'headers', 'list', 'form', 'aria-labelledby', 'aria-describedby', 'aria-controls',
   'aria-owns', 'aria-flowto', 'aria-activedescendant', 'aria-details', 'aria-errormessage']);
-export const PLACE = { title: '제목을 입력하세요', kicker: '소제목', slide: '새 장' };
+// 새 장의 안내 글 — 누르면 통째로 골라져 바로 덮어 쓴다(canvas.js)
+export const PLACE = {
+  title: '제목을 입력하세요', kicker: '소제목', slide: '새 장', body: '내용을 입력하세요', picture: '그림 자리 — 고른 뒤 ‘그림 넣기’',
+};
+export const PLACE_TEXTS = new Set([PLACE.title, PLACE.kicker, PLACE.body]);
 const NO_NOTES_JSON = Symbol('no-notes');
 
 // 저장할 때 원본과 같은 모양으로 되돌릴 것 — 손대지 않은 줄까지 바뀐 것으로 보이지 않게.
@@ -286,6 +291,13 @@ function renumberSlide(slide, from, to) {
 function parsePn(v) {
   const m = /^(\d{1,4})\/(\d{1,4})$/.exec(v || '');
   return m ? { k: Number(m[1]), n: Number(m[2]) } : null;
+}
+
+// 다른 장에서 가져온 요소(쪽 번호·꼬리말 등) 안의 'k / N' 을 from 장의 번호표에서 to 장의 번호표(A.pn)로 고친다.
+// 저장할 때는 장마다 제 번호표와 같은 글만 다시 매기므로, 옮겨 온 번호를 그 장의 표로 바꿔 두어야 제 번호가 된다.
+export function retagPages(el, from, to) {
+  const t = parsePn(to);
+  if (t) renumberSlide(el, parsePn(from), t);
 }
 
 export class DeckModel {
@@ -593,8 +605,8 @@ export class DeckModel {
     return k;
   }
 
-  // 새 장 — 지금 장의 바탕(태그·클래스·배경)과 제목 자리·쪽 번호만 가져온다.
-  blankFrom(src) {
+  // 새 장의 바탕 — 지금 장의 태그·클래스·배경 등 속성만 가져온 빈 장. 안은 레이아웃(layouts.js)이 채운다.
+  blankShell(src) {
     const el = src.cloneNode(false);
     this.stripState(el);
     el.setAttribute(A.id, this.newId());
@@ -602,36 +614,7 @@ export class DeckModel {
     if (this.family === 'builder') {
       el.setAttribute('data-title', PLACE.slide);
       if (el.hasAttribute('data-key')) el.setAttribute('data-key', this.uniqueKey('new'));
-      for (const part of src.children) {
-        const role = part.getAttribute('data-name');
-        if (role === 'kicker' || role === 'title') {
-          const c = part.cloneNode(true);
-          setPlainText(c, PLACE[role]);
-          el.append(c);
-        } else if (role === 'pageno') {
-          el.append(part.cloneNode(true));
-        }
-      }
-    } else {
-      let titled = false;
-      for (const part of src.children) {
-        if (!titled && /^H[1-3]$/.test(part.tagName)) {
-          const c = part.cloneNode(false);
-          c.textContent = PLACE.title;
-          el.append(c);
-          titled = true;
-        } else if (part.matches('.eyebrow, .kicker')) {
-          const c = part.cloneNode(false);
-          c.textContent = PLACE.kicker;
-          el.append(c);
-        } else if (part.matches('footer, .foot, .footer')) {
-          el.append(part.cloneNode(true));
-        }
-      }
-      if (!titled) el.prepend(Object.assign(this.doc.createElement('h2'), { textContent: PLACE.title }));
     }
-    this.stripState(el);
-    this.renameIds(el);                   // 바탕 장·꼬리말에서 가져온 id 가 겹치지 않게
     return el;
   }
 

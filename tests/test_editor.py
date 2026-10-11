@@ -1509,3 +1509,466 @@ def test_local_edit_saves_to_the_file_and_presents_apart(browser, local_edit):
     assert any(p.read_bytes() == other for p in e.session.backups.iterdir())
     ctx.close()
     assert errors == []
+
+
+# ---------- 새 장 레이아웃
+
+def choose_layout(page, key: str) -> None:
+    page.click("#addMenu")
+    page.click(f"#layMenu [data-layout={key}]")
+
+
+def kids(page, i: int, sel: str) -> list:
+    """i 번째 장의 자식 가운데 이름(data-name·class·태그)이 sel 에 맞는 것의 [이름, 글]."""
+    return frame(page).locator("section.slide").nth(i).evaluate(
+        "(s, sel) => [...s.children].map((c) => [c.getAttribute('data-name') || c.getAttribute('class') || c.localName, c])"
+        ".filter(([k]) => new RegExp(sel).test(k)).map(([k, c]) => [k, (c.innerText ?? c.textContent).trim()])", sel)
+
+
+BUILDER_LAYOUTS = {
+    "title": [["kicker", "소제목"], ["title", "제목을 입력하세요"], ["pageno", "2 / 3"]],
+    "body": [["kicker", "소제목"], ["title", "제목을 입력하세요"], ["body", "내용을 입력하세요\n\n내용을 입력하세요"],
+             ["pageno", "2 / 3"]],
+    "two": [["kicker", "소제목"], ["title", "제목을 입력하세요"], ["body", "내용을 입력하세요\n\n내용을 입력하세요"],
+            ["body", "내용을 입력하세요\n\n내용을 입력하세요"], ["pageno", "2 / 3"]],
+    "picture": [["kicker", "소제목"], ["title", "제목을 입력하세요"], ["body", "내용을 입력하세요\n\n내용을 입력하세요"],
+                ["picture", "그림 자리 — 고른 뒤 ‘그림 넣기’"], ["pageno", "2 / 3"]],
+    "section": [["title", "제목을 입력하세요"], ["kicker", "소제목"], ["pageno", "2 / 3"]],
+    "blank": [["pageno", "2 / 3"]],
+    "like": [["kicker", "소제목"], ["title", "제목을 입력하세요"], ["body", "내용을 입력하세요"], ["pageno", "2 / 3"]],
+}
+
+
+def test_builder_layouts_follow_the_deck_boxes(browser, decks, tmp_path, serve):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")                        # 둘째 장(소제목·제목·본문·쪽 번호가 있는 장)에서
+    for key, want in BUILDER_LAYOUTS.items():
+        page.click("#toc li >> nth=1")
+        choose_layout(page, key)
+        assert state(page)["cur"] == 2 and state(page)["titles"][2] == "새 장", key
+        got = kids(page, 2, "kicker|title|body|picture|pageno")
+        assert got == want, (key, got)
+        if key in ("body", "two"):                         # 본뜬 상자는 덱의 글자 모양을 그대로 따른다
+            p = frame(page).locator("section.slide").nth(2).locator("[data-name=body] .tin p").first
+            assert "font-size:24px" in p.get_attribute("style").replace(" ", "")
+        if key == "section":                               # 구역 머리는 표지의 바탕
+            bg = frame(page).locator("section.slide").nth(2).evaluate("(s) => s.style.backgroundColor")
+            assert bg == "rgb(16, 33, 63)"
+    assert state(page)["n"] == 3 + len(BUILDER_LAYOUTS)
+    text = page.evaluate("window.__hse.serialize()")
+    s = parse_saved(page, text)
+    n = s["n"]
+    assert s["pageno"][0] is None and s["pageno"][1:] == [f"{i} / {n}" for i in range(2, n + 1)]
+    assert s["hse"] is False and len(set(s["keys"])) == n
+    for _ in range(len(BUILDER_LAYOUTS)):
+        page.keyboard.press("Control+z")
+    assert same_dom(page, hub.saved("decks/builder.html"), page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+    got = run_saved(browser, tmp_path, serve, text, "__deck.go(9); return [__deck.count, document.getElementById('cnt').textContent];")
+    assert got == [n, f"10 / {n}"]
+
+
+FLOW_LAYOUTS = {
+    "title": ["eyebrow", "h2", "foot"],
+    "body": ["eyebrow", "h2", "p", "ul", "foot"],
+    "two": ["eyebrow", "h2", "div", "foot"],
+    "picture": ["eyebrow", "h2", "div", "foot"],
+    "section": ["div", "foot"],
+    "blank": ["foot"],
+    "like": ["eyebrow", "h2", "ul", "chart", "p", "foot"],
+}
+
+
+def test_flow_layouts_follow_the_current_slide(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    for key, want in FLOW_LAYOUTS.items():
+        page.click("#toc li >> nth=1")
+        choose_layout(page, key)
+        sec = frame(page).locator("section.slide").nth(2)
+        got = sec.evaluate("(s) => [...s.children].map((c) => c.classList[0] || c.localName)")
+        assert got == want, (key, got)
+        assert sec.get_attribute("data-notes") == "" and page.input_value("#notes") == ""
+        if key == "like":                                  # 글만 안내 글로 — 목록은 항목 하나, 꼬리말은 그대로
+            texts = sec.evaluate("(s) => [...s.querySelectorAll('.eyebrow, h2, li, p')].map((e) => e.textContent.trim())")
+            assert texts == ["소제목", "제목을 입력하세요", "내용을 입력하세요", "내용을 입력하세요"], texts
+            assert sec.locator(".foot span").all_text_contents() == ["시험", "2 / 3"]
+    assert frame(page).locator("[data-name=picture]").count() == 1
+    s = parse_saved(page, page.evaluate("window.__hse.serialize()"))
+    assert s["pageno"] == [f"{i} / {s['n']}" for i in range(1, s["n"] + 1)]
+    ctx.close()
+    assert errors == []
+
+
+def test_layout_menu_keyboard_and_placeholders(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.click("#addMenu")
+    assert page.locator("#layMenu").is_visible() and page.locator("#addMenu").get_attribute("aria-expanded") == "true"
+    page.keyboard.press("Escape")
+    assert not page.locator("#layMenu").is_visible() and state(page)["cur"] == 0
+    page.click("#addMenu")
+    page.mouse.click(5, 5)                                 # 바깥을 누르면 닫힌다
+    assert not page.locator("#layMenu").is_visible()
+    page.click("#addMenu")
+    focused = "document.activeElement.dataset.layout || document.activeElement.id"
+    page.keyboard.press("ArrowDown")                       # 메뉴의 화살표는 위아래도 한 칸씩
+    assert page.evaluate(focused) == "body"
+    page.keyboard.press("ArrowUp")
+    assert page.evaluate(focused) == "title"
+    page.keyboard.press("ArrowRight")                      # 둘째 칸(제목과 본문)
+    page.keyboard.press("Enter")
+    assert state(page)["n"] == 4 and not page.locator("#layMenu").is_visible()
+    assert page.evaluate(focused) == "addMenu"             # 고르면 ▾ 로 돌아온다(숨은 메뉴에 초점이 남지 않게)
+    body = frame(page).locator("section.slide").nth(1).locator("[data-name=body] .tin p").first
+    body.click()                                           # 안내 글은 누르면 통째로 골라진다
+    page.keyboard.type("첫 줄")
+    assert body.inner_text() == "첫 줄"
+    title = frame(page).locator("section.slide").nth(1).locator("[data-name=title] .tin p")
+    title.click()
+    page.keyboard.type("새 제목")
+    assert title.inner_text() == "새 제목"
+    title.click()                                          # 고친 글은 다시 눌러도 골라지지 않는다
+    page.keyboard.press("End")
+    page.keyboard.type("!")
+    assert title.inner_text() == "새 제목!"
+    page.click("#addMenu")
+    page.keyboard.press("Control+z")                       # 메뉴가 열린 채여도 Ctrl+Z·Y 는 편집기의 것
+    assert title.inner_text() != "새 제목!"
+    page.keyboard.press("Control+y")
+    assert title.inner_text() == "새 제목!"
+    ctx.close()
+    assert errors == []
+
+
+# ---------- 그림 넣기
+
+PNG_2x1 = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8DwHwQZGBgAKdIF+0lbKJQAAAAASUVORK5CYII=")
+
+
+def test_picture_fills_the_placeholder_keeping_its_shape(browser, decks, tmp_path):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    choose_layout(page, "picture")
+    sec = frame(page).locator("section.slide").nth(2)
+    ph = sec.locator("[data-name=picture]")
+    box = ph.evaluate("(e) => [parseFloat(e.style.left), parseFloat(e.style.top), parseFloat(e.style.width), parseFloat(e.style.height)]")
+    ph.click()                                             # 그림 자리를 고른 뒤 넣으면 그 자리에
+    png = tmp_path / "보고서_그림-1.png"
+    png.write_bytes(PNG_2x1)
+    page.set_input_files("#picFile", str(png))
+    img = sec.locator("img")
+    img.wait_for()
+    assert sec.locator("div[data-name=picture]").count() == 0
+    got = img.evaluate("(e) => [e.getAttribute('src').slice(0, 22), e.alt, e.style.objectFit, parseFloat(e.style.left),"
+                       " parseFloat(e.style.top), parseFloat(e.style.width), parseFloat(e.style.height)]")
+    assert got[:3] == ["data:image/png;base64,", "보고서 그림 1", "contain"]
+    x, y, w, h = got[3:]
+    assert abs(w / h - 2) < 0.02 and w <= box[2] + 1 and h <= box[3] + 1         # 자리 안에 비율대로
+    assert abs((x + w / 2) - (box[0] + box[2] / 2)) <= 1 and abs((y + h / 2) - (box[1] + box[3] / 2)) <= 1
+    assert state(page)["box"] is not None                  # 넣은 그림이 골라져 바로 크기를 바꿀 수 있다
+    page.keyboard.press("Control+z")
+    assert sec.locator("div[data-name=picture]").count() == 1 and sec.locator("img").count() == 0
+    # 고른 것 없이 넣으면 장 가운데에
+    page.click("#toc li >> nth=0")
+    page.set_input_files("#picFile", str(png))
+    first = frame(page).locator("section.slide").nth(0).locator("img")
+    first.wait_for()
+    assert first.evaluate("(e) => Math.round(parseFloat(e.style.left) + parseFloat(e.style.width) / 2)") == 640
+    bad = tmp_path / "글.txt"
+    bad.write_text("x", encoding="utf-8")
+    page.set_input_files("#picFile", str(bad))
+    assert "그림 파일" in page.inner_text("#status")
+    broken = tmp_path / "깨진.png"                         # 이름만 .png 인 망가진 파일
+    broken.write_bytes(b"not a picture")
+    page.set_input_files("#picFile", str(broken))
+    pw.expect(page.locator("#status")).to_contain_text("그림을 읽지 못했습니다")
+    assert frame(page).locator("section.slide").nth(0).locator("img").count() == 1
+    ctx.close()
+    assert errors == []
+
+
+# ---------- 모든 장에 한꺼번에(마스터)
+
+MASTER = BUILDER.replace(":root{--s:.5}", ':root{--s:.5;--ink:#111111;--f-ko:"Noto Sans KR",sans-serif}')
+
+
+def test_master_applies_to_every_slide_in_one_undo_step(browser, tmp_path, serve):
+    assert MASTER != BUILDER
+    site, root = make_site(tmp_path, {"m.html": MASTER})
+    hub = DeckHub({"decks/m.html": (root / "decks" / "m.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "m", hub)
+    original = page.evaluate("window.__hse.serialize()")
+    page.click("#masterBtn")
+    dlg = page.locator("#masterDlg")
+    assert dlg.is_visible()
+    assert dlg.locator(".m-var code").all_inner_texts() == ["--ink", "--f-ko"]
+    # 1) 덱 색 변수
+    dlg.locator(".m-var input[type=color]").fill("#ff0000")
+    assert "--ink:#FF0000" in page.evaluate("window.__hse.serialize()").replace(" ", "")
+    assert state(page)["undo"] == 1
+    # 2) 역할(제목) 글자 크기 — 세 장 모두
+    page.select_option("#mRole", label="제목(title) · 3곳")
+    page.fill("#mSize", "30")
+    page.click("#mRoleApply")
+    sizes = frame(page).locator("[data-name=title] .tin p").evaluate_all("(ps) => ps.map((p) => p.style.fontSize)")
+    assert sizes == ["40px", "40px", "40px"] and state(page)["undo"] == 2
+    # 3) 배경 — 표지 빼고
+    page.fill("#mBg", "#eeeeee")
+    page.click("#mBgApply")
+    bgs = frame(page).locator("section.slide").evaluate_all("(ss) => ss.map((s) => s.style.backgroundColor)")
+    assert bgs == ["rgb(16, 33, 63)", "rgb(238, 238, 238)", "rgb(238, 238, 238)"]
+    page.keyboard.press("Escape")
+    pw.expect(dlg).to_be_hidden()                          # 창이 닫히는 처리는 키 다음 차례에 끝난다
+    # 4) 공통 상자 — 둘째 장의 화살표를 모든 장에, 그리고 모두 지우기(두 번 눌러야)
+    page.keyboard.press("PageDown")
+    frame(page).locator("section.slide").nth(1).locator("svg.el").click()
+    page.click("#masterBtn")
+    page.click("#mCopy")
+    assert frame(page).locator("svg.el").count() == 3
+    page.click("#mRemove")
+    assert frame(page).locator("svg.el").count() == 3 and "한 번 더" in page.inner_text("#mRemove")
+    page.click("#mRemove")
+    assert frame(page).locator("svg.el").count() == 0
+    page.keyboard.press("Escape")
+    pw.expect(dlg).to_be_hidden()
+    assert state(page)["undo"] == 5
+    for _ in range(5):
+        page.keyboard.press("Control+z")
+    assert page.evaluate("window.__hse.serialize()") == original
+    ctx.close()
+    assert errors == []
+
+
+# ---------- 3단계 검토에서 나온 경우들
+
+COVER_TITLE = ('<div class="el tx" data-name="title" style="left:64px;top:200px;width:1100px;height:80px"><div class="tin">'
+               '<p class="pp" style="font-size:52px;color:#FFFFFF">시험 덱 표지</p></div></div>')
+BODY2 = ('<div class="el tx" data-name="body" style="left:64px;top:160px;width:1100px;height:200px"><div class="tin">'
+         '<p class="pp" style="font-size:24px;line-height:31.2px;color:#222">첫 문단</p>'
+         '<p class="pp" style="font-size:24px;line-height:31.2px;color:#222">둘째 문단</p></div></div>')
+PAGENO = ('<div class="el tx" data-name="pageno" style="left:1150px;top:680px;width:80px;height:20px"><div class="tin">'
+          '<p class="pp" style="font-size:12px">{k} / 3</p></div></div>')
+TABLE3 = '<table class="el" style="left:64px;top:160px;width:600px">'
+
+
+def text_box(name: str, x: int, y: int, w: int, h: int, fs: int, text: str, color: str = "") -> str:
+    c = f";color:{color}" if color else ""
+    return (f'<div class="el tx" data-name="{name}" style="left:{x}px;top:{y}px;width:{w}px;height:{h}px"><div class="tin">'
+            f'<p class="pp" style="font-size:{fs}px{c}">{text}</p></div></div>')
+
+
+def deck_site(tmp_path, serve, name: str, text: str):
+    site, root = make_site(tmp_path, {f"{name}.html": text})
+    return serve(site), DeckHub({f"decks/{name}.html": (root / "decks" / f"{name}.html").read_bytes()})
+
+
+def test_master_copies_page_numbers_with_their_own_number(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    frame(page).locator("section.slide").nth(1).locator("[data-name=pageno] .tin p").click()
+    page.click("#masterBtn")
+    page.click("#mCopy")                                   # 쪽 번호가 없는 표지에만 — 표지의 번호로
+    assert "1개 장에 넣었습니다" in page.inner_text("#mStatus")
+    page.keyboard.press("Escape")
+    pw.expect(page.locator("#masterDlg")).to_be_hidden()
+    s = parse_saved(page, page.evaluate("window.__hse.serialize()"))
+    assert s["pageno"] == ["1 / 3", "2 / 3", "3 / 3"] and s["hse"] is False and s["editable"] == 0
+    page.click("#add")                                     # 장을 더하면 넣은 쪽 번호도 새 수로 다시 매긴다
+    s = parse_saved(page, page.evaluate("window.__hse.serialize()"))
+    assert s["pageno"] == [f"{i} / 4" for i in range(1, 5)]
+    ctx.close()
+    assert errors == []
+
+
+NOTES_DECK = (BUILDER
+              .replace(COVER_TITLE, COVER_TITLE + text_box("note", 64, 600, 300, 30, 14, "표지 메모"))
+              .replace(PAGENO.format(k=2), text_box("note", 64, 600, 300, 30, 14, "둘째 메모 1")
+                       + text_box("note", 700, 640, 300, 30, 18, "둘째 메모 2") + PAGENO.format(k=2))
+              .replace(PAGENO.format(k=3), text_box("note", 64, 600, 300, 30, 14, "셋째 메모 1")
+                       + text_box("note", 300, 500, 300, 30, 14, "셋째 메모 2") + PAGENO.format(k=3)))
+
+
+def test_master_match_pairs_boxes_in_order_and_skips_uneven_slides(browser, tmp_path, serve):
+    assert NOTES_DECK.count('data-name="note"') == 5
+    base, hub = deck_site(tmp_path, serve, "n", NOTES_DECK)
+    ctx, page, errors = open_editor(browser, base, "n", hub)
+    f = frame(page)
+
+    def notes(i):
+        return f.locator("section.slide").nth(i).locator("[data-name=note]").evaluate_all(
+            "(bs) => bs.map((b) => [b.style.left, b.style.top, b.querySelector('p').style.fontSize, b.textContent])")
+
+    page.keyboard.press("PageDown")
+    f.locator("section.slide").nth(1).locator("[data-name=note] p").nth(1).click()   # 둘째 장의 둘째 메모
+    page.click("#masterBtn")
+    page.click("#mMatch")
+    status = page.inner_text("#mStatus")
+    assert "1개 장에서 맞췄습니다" in status and "1개 장은 건너뛰었습니다" in status, status
+    assert notes(2) == [["64px", "600px", "14px", "셋째 메모 1"], ["700px", "640px", "18px", "셋째 메모 2"]]
+    assert notes(0) == [["64px", "600px", "14px", "표지 메모"]]       # 메모 수가 달라 어느 것과 맞출지 모른다
+    assert state(page)["undo"] == 1
+    page.keyboard.press("Escape")
+    pw.expect(page.locator("#masterDlg")).to_be_hidden()
+    page.click("#toc li >> nth=0")
+    f.locator("section.slide").nth(0).locator("[data-name=note] p").click()
+    page.click("#masterBtn")
+    assert page.locator("#mMatch").is_enabled()           # 맞출 상대가 없어도 눌러서 까닭을 본다
+    page.click("#mMatch")
+    status = page.inner_text("#mStatus")
+    assert "맞출 장이 없습니다" in status and "2개 장은 건너뛰었습니다" in status, status
+    assert state(page)["undo"] == 1
+    ctx.close()
+    assert errors == []
+
+
+CHART = ('<svg class="el" data-x="chart" style="left:700px;top:400px;width:200px;height:100px" viewBox="0 0 200 100">'
+         '<style>.bar{fill:#c00}</style><rect class="bar" x="0" y="0" width="100" height="50"></rect></svg>')
+STYLED = (BUILDER.replace(PAGENO.format(k=2), CHART + PAGENO.format(k=2))
+          .replace('<script type="application/json" id="notes-data">',
+                   '<style id="theme">:root{--ink:#111111}</style>\n<script type="application/json" id="notes-data">'))
+
+
+def test_master_undo_is_exact_when_copied_boxes_carry_their_own_style(browser, tmp_path, serve):
+    assert STYLED.count(".bar{fill:#c00}") == 1 and 'id="theme"' in STYLED
+    base, hub = deck_site(tmp_path, serve, "st", STYLED)
+    ctx, page, errors = open_editor(browser, base, "st", hub)
+    original = page.evaluate("window.__hse.serialize()")
+    page.keyboard.press("PageDown")
+    frame(page).locator("svg[data-x=chart]").click()
+    page.click("#masterBtn")
+    dlg = page.locator("#masterDlg")
+    assert dlg.locator(".m-var code").all_inner_texts() == ["--ink"]    # 장 안 그림의 <style> 은 덱 색이 아니다
+    page.click("#mCopy")                                   # 장 안 <style> 이 둘 늘어도
+    assert frame(page).locator("svg[data-x=chart]").count() == 3
+    dlg.locator(".m-var input[type=color]").fill("#ff0000")  # 덱 색을 바꾼 기록은 같은 <style> 을 가리킨다
+    after = page.evaluate("window.__hse.serialize()")
+    assert "--ink:#FF0000" in after.replace(" ", "") and after.count(".bar{fill:#c00}") == 3
+    for _ in range(2):
+        page.keyboard.press("Control+z")
+    assert page.evaluate("window.__hse.serialize()") == original
+    for _ in range(2):
+        page.keyboard.press("Control+y")
+    assert page.evaluate("window.__hse.serialize()") == after
+    ctx.close()
+    assert errors == []
+
+
+def test_dialog_keeps_deck_keys_away_but_undo_still_works(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "builder", hub)
+    page.keyboard.press("PageDown")
+    f = frame(page)
+    f.locator("svg.el").click()
+    page.click("#masterBtn")
+    page.click("#mCopy")
+    assert f.locator("svg.el").count() == 3
+    page.evaluate("document.activeElement.blur()")         # 초점이 창 밖(body)으로 빠져도
+    page.keyboard.press("Delete")                          # 창 뒤의 고른 상자를 지우지 않고
+    page.keyboard.press("PageDown")                        # 장도 넘기지 않는다
+    assert f.locator("svg.el").count() == 3 and state(page)["cur"] == 1
+    page.keyboard.press("Control+z")                       # 되돌리기는 편집기의 것
+    assert f.locator("svg.el").count() == 1 and page.locator("#masterDlg").is_visible()
+    page.keyboard.press("Escape")
+    pw.expect(page.locator("#masterDlg")).to_be_hidden()
+    ctx.close()
+    assert errors == []
+
+
+def test_master_background_skips_slides_with_their_own_ground(browser, decks):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    original = page.evaluate("window.__hse.serialize()")
+
+    def grounds():
+        return frame(page).locator("section.slide").evaluate_all("(ss) => ss.map((s) => s.style.backgroundColor)")
+
+    page.click("#masterBtn")
+    page.uncheck("#mBgSkip")
+    page.fill("#mBg", "#eeeeee")
+    page.click("#mBgApply")                                # 어두운 표지는 글자색이 그 바탕에 맞춰져 있어 건너뛴다
+    assert grounds() == ["", "rgb(238, 238, 238)", "rgb(238, 238, 238)"]
+    assert "1개 장(어두운 장 등" in page.inner_text("#mStatus") and state(page)["undo"] == 1
+    page.check("#mBgAll")
+    page.click("#mBgApply")                                # 고르면 그 장까지
+    assert grounds() == ["rgb(238, 238, 238)"] * 3 and state(page)["undo"] == 2
+    page.keyboard.press("Escape")
+    pw.expect(page.locator("#masterDlg")).to_be_hidden()
+    for _ in range(2):
+        page.keyboard.press("Control+z")
+    assert page.evaluate("window.__hse.serialize()") == original
+    ctx.close()
+    assert errors == []
+
+
+COVER_NAMED = BUILDER.replace(COVER_TITLE, text_box("cover-mark", 900, 40, 300, 140, 120, "K", "#33476B")
+                              + COVER_TITLE.replace('data-name="title"', 'data-name="cover-title"')
+                              + text_box("cover-sub", 64, 300, 900, 40, 22, "부제", "#C8D3E6"))
+
+
+def test_section_layout_takes_the_named_cover_boxes(browser, tmp_path, serve):
+    assert 'data-name="cover-title"' in COVER_NAMED
+    base, hub = deck_site(tmp_path, serve, "c", COVER_NAMED)
+    ctx, page, errors = open_editor(browser, base, "c", hub)
+    page.keyboard.press("PageDown")
+    choose_layout(page, "section")                         # 표지의 가장 큰 글(K)이 아니라 이름 붙은 제목·부제를 본뜬다
+    sec = frame(page).locator("section.slide").nth(2)
+    got = sec.evaluate("""(s) => [...s.querySelectorAll(':scope > .el.tx')].map((b) => {
+        const p = b.querySelector('.tin p');
+        return [b.getAttribute('data-name'), p.textContent, p.style.fontSize, p.style.color]; })""")
+    assert got == [["title", "제목을 입력하세요", "52px", "rgb(255, 255, 255)"],
+                   ["kicker", "소제목", "22px", "rgb(200, 211, 230)"],
+                   ["pageno", "2 / 3", "12px", ""]], got
+    assert sec.evaluate("(s) => s.style.backgroundColor") == "rgb(16, 33, 63)"
+    ctx.close()
+    assert errors == []
+
+
+BODY_ELSEWHERE = (BUILDER
+                  .replace(COVER_TITLE, COVER_TITLE + text_box("lede", 64, 320, 1150, 300, 36, "표지 리드", "#DDE6F5"))
+                  .replace(BODY2, "")
+                  .replace(TABLE3, BODY2.replace("top:160px", "top:420px") + TABLE3))
+
+
+def test_body_layout_does_not_copy_the_cover_text(browser, tmp_path, serve):
+    assert BODY_ELSEWHERE.count('data-name="body"') == 1 and 'data-name="lede"' in BODY_ELSEWHERE
+    base, hub = deck_site(tmp_path, serve, "b", BODY_ELSEWHERE)
+    ctx, page, errors = open_editor(browser, base, "b", hub)
+    choose_layout(page, "body")                            # 표지에서 넣어도 본문은 본문 장(셋째 장)의 상자를 본뜬다
+    sec = frame(page).locator("section.slide").nth(1)
+    p = sec.locator("[data-name=body] .tin p").first
+    assert p.inner_text() == "내용을 입력하세요"
+    assert p.evaluate("(e) => [e.style.fontSize, e.style.color]") == ["24px", "rgb(34, 34, 34)"]
+    assert sec.locator("[data-name=title] .tin p").evaluate("(e) => e.style.fontSize") == "40px"
+    assert sec.locator("[data-name=lede]").count() == 0
+    ctx.close()
+    assert errors == []
+
+
+def test_flow_picture_fits_inside_the_placeholder(browser, decks, tmp_path):
+    base, hub = decks
+    ctx, page, errors = open_editor(browser, base, "flow", hub)
+    page.keyboard.press("PageDown")
+    choose_layout(page, "picture")
+    sec = frame(page).locator("section.slide").nth(2)
+    ph = sec.locator("[data-name=picture]")
+    pw_w, pw_h = ph.evaluate("(e) => [e.offsetWidth, e.offsetHeight]")
+    ph.click()
+    png = tmp_path / "가로.png"
+    png.write_bytes(PNG_2x1)
+    page.set_input_files("#picFile", str(png))
+    img = sec.locator("figure img")
+    img.wait_for()
+    assert sec.locator("[data-name=picture]").count() == 0
+    w, h = img.evaluate("(e) => [parseFloat(e.style.width), parseFloat(e.style.height)]")
+    assert abs(w / h - 2) < 0.02 and w <= pw_w + 1 and h <= pw_h + 1 and abs(w - pw_w) <= 1, (w, h, pw_w, pw_h)
+    shown = img.evaluate("(e) => [e.offsetWidth, e.offsetHeight]")
+    assert abs(shown[0] - w) <= 1 and abs(shown[1] - h) <= 1       # 칸을 넘지 않아 적힌 크기대로 보인다
+    page.keyboard.press("Control+z")
+    assert sec.locator("[data-name=picture]").count() == 1 and sec.locator("img").count() == 0
+    ctx.close()
+    assert errors == []

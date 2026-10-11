@@ -1,11 +1,15 @@
 /* 덱 편집기 — 덱을 불러와 차례·캔버스·노트·저장을 잇는다.
    갤러리에서는 editor/?deck=<덱 id>(GitHub 토큰으로 저장), 이 PC 에서는 slides edit 이 연 editor/?local=1#key=…(파일에 저장). */
 
-import { download, objParticle } from './util.js';
-import { A, DeckModel } from './deck.js';
+import { download, h, objParticle } from './util.js';
+import { A, DeckModel, PLACE } from './deck.js';
 import { Canvas } from './canvas.js';
 import { Formatter } from './format.js';
 import { History } from './history.js';
+import { altOf, checkPicture, naturalSize, PICTURE_WARN, placePicture, readPicture } from './insert.js';
+import { LAYOUTS, makeSlide } from './layouts.js';
+import { deckStyles } from './master.js';
+import { Master } from './masterui.js';
 import { Pick } from './pick.js';
 import { openSource } from './source.js';
 import { Toc } from './toc.js';
@@ -26,6 +30,8 @@ const els = {
   tokenCancel: $('tokenCancel'), cfDlg: $('cfDlg'), cfText: $('cfText'), cfCancel: $('cfCancel'),
   cfDownload: $('cfDownload'), cfOverwrite: $('cfOverwrite'),
   fBox: $('fBox'), bW: $('bW'), bH: $('bH'), bX: $('bX'), bY: $('bY'),
+  addMenu: $('addMenu'), layMenu: $('layMenu'), layGrid: $('layGrid'),
+  picBtn: $('picBtn'), picFile: $('picFile'), masterBtn: $('masterBtn'),
 };
 const fmtEls = {
   bar: $('fmt'), font: $('fFont'), size: $('fSize'), sizes: $('fSizes'), smaller: $('fSmaller'), bigger: $('fBigger'),
@@ -40,6 +46,7 @@ let pick = null;
 let fmt = null;
 let toc = null;
 let hist = null;
+let master = null;
 let notesPending = null;
 let saving = false;
 let msgTimer = 0;
@@ -148,15 +155,106 @@ function rerender(i, focusToc) {
   go(i, focusToc);
 }
 
-function addSlide() {
+// 지금 장 뒤에 새 장 — kind 는 레이아웃(layouts.js 의 LAYOUTS)
+function addSlide(kind = 'title') {
   settle();
-  const el = model.blankFrom(model.current);
+  const el = makeSlide(model, kind, model.current);
   const at = model.insert(el, model.cur + 1);
   const id = el.getAttribute(A.id);
   if (model.notesMode === 'json') model.notes.set(id, '');
   hist.push([{ t: 'ins', id, at, html: model.snap(el), notes: '', ws: model.sep }]);
   rerender(at);
-  msg('제목만 있는 새 장을 넣었습니다 — 글을 눌러 바로 고치세요.');
+  const label = (LAYOUTS.find((l) => l.key === kind) || LAYOUTS[0]).label;
+  msg(`‘${label}’ 새 장을 넣었습니다 — 안내 글을 누르면 통째로 골라져 바로 고쳐 씁니다.`);
+}
+
+/* ---------- 새 장 레이아웃 고르기(＋ 새 장 옆 ▾) */
+
+function fillLayouts() {
+  els.layGrid.replaceChildren(...LAYOUTS.map((l) => {
+    const b = h('button', { type: 'button', class: 'lay-item', role: 'menuitem', 'data-layout': l.key });
+    b.innerHTML = l.svg;                  // layouts.js 의 고정 그림(사용자 글이 아니다)
+    b.append(h('span', null, l.label));
+    b.addEventListener('click', () => { closeLayouts(true); addSlide(l.key); });
+    return b;
+  }));
+}
+
+function openLayouts() {
+  const acts = els.add.closest('.side-acts');
+  els.layMenu.style.top = `${acts.offsetTop + acts.offsetHeight + 4}px`;
+  els.layMenu.hidden = false;
+  els.addMenu.setAttribute('aria-expanded', 'true');
+  els.layMenu.querySelector('.lay-item').focus();
+}
+
+function closeLayouts(focusBack) {
+  if (els.layMenu.hidden) return;
+  els.layMenu.hidden = true;
+  els.addMenu.setAttribute('aria-expanded', 'false');
+  if (focusBack) els.addMenu.focus();
+}
+
+// 메뉴 — ←→↑↓ 한 칸씩(격자로 보여도 읽는 차례대로), Home·End, Esc 닫기(▾ 로 돌아감), Tab 은 닫고 다음으로
+function onLayKey(e) {
+  const items = Array.from(els.layMenu.querySelectorAll('.lay-item'));
+  const i = items.indexOf(document.activeElement);
+  const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: 1, ArrowUp: -1 }[e.key];
+  if (step !== undefined) {
+    e.preventDefault();
+    items[i < 0 ? 0 : Math.max(0, Math.min(items.length - 1, i + step))].focus();
+  } else if (e.key === 'Home' || e.key === 'End') {
+    e.preventDefault();
+    items[e.key === 'Home' ? 0 : items.length - 1].focus();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeLayouts(true);
+  } else if (e.key === 'Tab') {
+    closeLayouts(false);
+  }
+}
+
+/* ---------- 그림 넣기 */
+
+// 고른 그림 자리·그림이 있으면 그 자리에 바꿔 넣고, 아니면 지금 장 가운데에. 넣은 그림을 골라 바로 크기를 바꾸게 한다.
+async function insertPicture(file) {
+  const bad = checkPicture(file);
+  if (bad) {
+    msg(bad, 'warn');
+    return;
+  }
+  const chosen = pick.box;
+  let url = '';
+  try {
+    url = await readPicture(file);
+  } catch (e) {
+    msg(e.message, 'err');
+    return;
+  }
+  const size = await naturalSize(url);
+  if (!size) {
+    msg('그림을 읽지 못했습니다 — 그림 파일이 아니거나 망가진 파일입니다.', 'warn');
+    return;
+  }
+  if (pick.drag) pick.end();                // 읽는 사이 상자를 끌기 시작했으면 그 끌기를 마치고 넣는다
+  const slide = model.current;              // 읽는 사이 장을 넘겼으면 지금 장에(고른 자리는 그 장에 있을 때만)
+  let target = chosen && chosen.isConnected && slide.contains(chosen) && chosen.matches('[data-name="picture"], img, picture')
+    ? chosen : null;
+  // <picture> 안의 그림을 바꾸면 <source> 가 여전히 옛 그림을 보인다 — <picture> 째 바꾼다
+  if (target && target.parentElement && target.parentElement.localName === 'picture' && model.family !== 'builder') {
+    target = target.parentElement;
+  }
+  let img = null;
+  canvas.change(() => { img = placePicture(model, slide, url, size, altOf(file.name), target); });
+  pick.select(img);
+  if (!img.complete) img.addEventListener('load', () => pick.place(), { once: true });
+  if (file.size > PICTURE_WARN) {
+    msg(`그림을 넣었습니다 — 그림(${(file.size / 1048576).toFixed(1)} MB)이 덱 파일 안에 들어가 파일도 그만큼 커집니다. `
+      + '되도록 줄여서 넣으세요.', 'warn', 12000);
+  } else {
+    msg(model.family === 'builder' ? '그림을 넣었습니다 — 테두리를 끌어 옮기고 손잡이로 크기를 바꿉니다.'
+      : '그림을 넣었습니다 — 손잡이로 크기를 바꿉니다.');
+  }
 }
 
 function duplicateSlide() {
@@ -218,7 +316,10 @@ function applyOp(op, dir) {
   const fwd = dir === 'redo';
   const slide = () => model.byId(op.id);
   if (op.t === 'edit') model.restore(op.id, fwd ? op.b : op.a);
-  else if (op.t === 'notes') { if (slide()) model.setNotes(slide(), fwd ? op.b : op.a); }
+  else if (op.t === 'style') {
+    const st = deckStyles(model)[op.i];
+    if (st) st.textContent = fwd ? op.b : op.a;
+  } else if (op.t === 'notes') { if (slide()) model.setNotes(slide(), fwd ? op.b : op.a); }
   else if (op.t === 'title') { if (slide()) model.setTitle(slide(), fwd ? op.b : op.a); }
   else if (op.t === 'move') {
     const i = model.indexOfId(op.id);
@@ -239,6 +340,7 @@ function travel(dir) {
   let i = model.indexOfId(last.id);
   if (i < 0) i = Math.min(Number.isInteger(last.at) ? last.at : model.cur, model.slides.length - 1);
   rerender(i);
+  master.refresh();                       // 모든 장에 대화창이 열려 있으면 보이는 값을 덱의 지금 값으로
   msg(dir === 'undo' ? '되돌렸습니다.' : '다시 했습니다.', '', 2500);
 }
 
@@ -353,7 +455,8 @@ async function save(force) {
   try {
     const r = await source.save(text, { force: !!force });
     hist.savedSeq = mark;                 // 저장하는 사이에 고친 것은 여전히 '저장 안 함'
-    msg(r.message, 'ok', 12000, r.link ? { href: r.link, label: '커밋 보기' } : null);
+    const note = placeholderNote(placeholderSlides());
+    msg(`${r.message}${note}`, note ? 'warn' : 'ok', 12000, r.link ? { href: r.link, label: '커밋 보기' } : null);
   } catch (e) {
     if (e.code === 'token') {
       if (e.forget) source.forgetToken();
@@ -372,11 +475,26 @@ async function save(force) {
   else msg(`저장하지 않았습니다 — ${tokenError}`, 'err', 12000);
 }
 
+// 새 장의 안내 글(‘제목을 입력하세요’·그림 자리 등)을 그대로 둔 장의 번호
+function placeholderSlides() {
+  const texts = new Set([PLACE.title, PLACE.kicker, PLACE.body, PLACE.picture]);
+  const out = [];
+  model.slides.forEach((s, i) => {
+    if (Array.from(s.querySelectorAll(`[${A.ph}]`)).some((el) => texts.has(el.textContent.trim()))) out.push(i + 1);
+  });
+  return out;
+}
+
+const placeholderNote = (left) => (left.length
+  ? ` — ${left.length > 6 ? `${left.slice(0, 6).join('·')}장 등 ${left.length}개 장` : `${left.join('·')}장`}에 새 장의 안내 글이 그대로 남아 있습니다.`
+  : '');
+
 function downloadNow() {
   settle();
   try {
     download(model.serialize(), editedName());
-    msg('지금 편집한 덱을 HTML 파일로 받았습니다(저장소·원본 파일은 그대로입니다).');
+    const note = placeholderNote(placeholderSlides());
+    msg(`지금 편집한 덱을 HTML 파일로 받았습니다(저장소·원본 파일은 그대로입니다)${note}`, note ? 'warn' : '');
   } catch (e) {
     msg(`파일을 만들지 못했습니다 — ${e.message}`, 'err', 12000);
   }
@@ -405,6 +523,9 @@ function onKey(e, inText, fromFrame, field = false) {
     save(false);
     return;
   }
+  // 대화창이 열린 동안 덱 키(Delete·방향키·장 넘기기·서식)는 쓰지 않는다 — 초점이 창 밖(body)으로 빠져도 창 뒤의 상자를
+  // 지우거나 장을 넘기지 않게
+  if (document.querySelector('dialog[open]')) return;
   // 서식 단축키 — 덱의 글(또는 고른 상자)에. 노트 칸에서는 쓰지 않는다(글만 받는 칸이다).
   const fmtKey = mod && !e.shiftKey && (SHORTCUTS[e.code] || e.code === 'BracketLeft' || e.code === 'BracketRight');
   if (fmtKey && !(inText && (!fromFrame || field))) {
@@ -439,7 +560,22 @@ function onKey(e, inText, fromFrame, field = false) {
 }
 
 function bind() {
-  els.add.addEventListener('click', addSlide);
+  els.add.addEventListener('click', () => addSlide());
+  els.addMenu.addEventListener('click', () => (els.layMenu.hidden ? openLayouts() : closeLayouts(true)));
+  els.layMenu.addEventListener('keydown', onLayKey);
+  // 고르기 창 밖(편집기·덱 화면)을 누르면 닫는다
+  const outside = (e) => {
+    if (!(e.target instanceof Element) || !e.target.closest('#layMenu, #addMenu')) closeLayouts(false);
+  };
+  document.addEventListener('pointerdown', outside, true);
+  model.doc.addEventListener('pointerdown', () => closeLayouts(false), true);
+  els.picBtn.addEventListener('click', () => els.picFile.click());
+  els.picFile.addEventListener('change', () => {
+    const file = els.picFile.files && els.picFile.files[0];
+    els.picFile.value = '';               // 같은 파일을 다시 골라도 change 가 나게
+    if (file) insertPicture(file);
+  });
+  els.masterBtn.addEventListener('click', () => master.open());
   els.dup.addEventListener('click', duplicateSlide);
   els.del.addEventListener('click', () => deleteSlide());
   els.up.addEventListener('click', () => moveSlide(model.cur, model.cur - 1));
@@ -456,15 +592,25 @@ function bind() {
   }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
-    // 서식 막대의 칸(크기·자리 숫자, 글꼴)에서도 Ctrl+Z·Y·S 는 편집기의 것 — 칸은 Enter·떠날 때 바로 입히므로 칸 안의
-    // 되돌리기는 쓸 일이 없다
     const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
-    if (mod && t instanceof Element && t.closest('#fmt') && ['z', 'y', 's'].includes((e.key || '').toLowerCase())) {
-      onKey(e, false, false);
-      return;
+    const k = (e.key || '').toLowerCase();
+    if (mod && ['z', 'y', 's'].includes(k)) {
+      // 서식 막대의 칸(크기·자리 숫자, 글꼴)에서도 Ctrl+Z·Y·S 는 편집기의 것 — 칸은 Enter·떠날 때 바로 입히므로 칸 안의
+      // 되돌리기는 쓸 일이 없다. ‘모든 장에’ 창도 한 번 적용한 것이 되돌리기 한 칸이라 편집기의 것(크기 숫자 칸 안의
+      // Ctrl+Z·Y 만 그 칸의 것, Ctrl+S 는 늘 저장). 창이 열린 채 초점이 창 밖(body)으로 빠졌어도 같다.
+      const num = t instanceof HTMLInputElement && t.type === 'number';
+      const inFmt = t instanceof Element && t.closest('#fmt');
+      const inMaster = $('masterDlg').open
+        && (t === document.body || t === document.documentElement || (t instanceof Element && t.closest('#masterDlg')));
+      if (inFmt || (inMaster && (k === 's' || !num))) {
+        onKey(e, false, false);
+        return;
+      }
     }
+    if (document.querySelector('dialog[open]')) return;                                 // 창이 열린 동안 덱 키는 쉰다
     if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || (t instanceof Element && t.closest('dialog'))) return;
     if (t instanceof Element && t.closest('#toc') && !e.ctrlKey && !e.metaKey) return;   // 차례는 제 키를 쓴다
+    if (t instanceof Element && t.closest('#layMenu') && !e.ctrlKey && !e.metaKey) return;   // 레이아웃 고르기 창도
     onKey(e, t === els.notes, false);
   });
   window.addEventListener('beforeunload', (e) => {
@@ -532,6 +678,17 @@ async function boot() {
   pick.attach();
   fmt = new Formatter({ els: fmtEls, canvas, model, pick, msg });
   fmt.attach();
+  // 모든 장에 한꺼번에 — 적용할 때마다 차례·캔버스를 새로 그리되, 고른 상자가 남아 있으면 다시 고른다(이어서 ‘모두 지우기’ 등)
+  master = new Master({
+    model, hist, pick, msg, settle,
+    after: () => {
+      const box = pick.box;
+      rerender(model.cur);
+      if (box && box.isConnected && model.current.contains(box)) pick.select(box);
+    },
+  });
+  master.attach();
+  fillLayouts();
   toc = new Toc({ list: els.toc, model, onGo: go, onMove: moveSlide, onDelete: deleteSlide, onRename: renameSlide });
   toc.render();
   bind();

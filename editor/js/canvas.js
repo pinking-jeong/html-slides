@@ -4,16 +4,26 @@
    Enter 는 문단을 나눌 수 있는 칸(빌더 글상자·목록)에서만 문단을 나누고, 그 밖에서는 줄바꿈(<br>)으로 바꾼다 —
    <p> 안에 <div> 가 생기면 저장한 뒤 다시 읽을 때 모양이 바뀌기 때문이다. 한글 입력과 부딪히지 않게 beforeinput 에서 바꾼다. */
 
-import { A } from './deck.js';
+import { A, PLACE_TEXTS } from './deck.js';
 
 const COMMIT_MS = 700;
 const PAD = 28;
 const INLINE = new Set(['A', 'ABBR', 'B', 'BDI', 'BDO', 'BR', 'CITE', 'CODE', 'DATA', 'DEL', 'DFN', 'EM', 'FONT', 'I', 'IMG',
   'INS', 'KBD', 'MARK', 'Q', 'RP', 'RT', 'RUBY', 'S', 'SAMP', 'SMALL', 'SPAN', 'STRIKE', 'STRONG', 'SUB', 'SUP', 'TIME', 'U',
   'VAR', 'WBR']);
-const SKIP = 'svg, math, script, style, template, button, input, select, textarea, canvas, video, audio, iframe, object, embed, noscript';
+// 그림 자리(새 장 레이아웃의 data-name="picture")는 글 칸이 아니라 그림을 받을 상자다
+const SKIP = 'svg, math, script, style, template, button, input, select, textarea, canvas, video, audio, iframe, object, embed, noscript, '
+  + '[data-name="picture"]';
 
 const hasText = (el) => el.textContent.trim().length > 0;
+// 새 장의 안내 글만 든 칸 — 레이아웃이 안내 글을 넣으며 표(A.ph)를 단 칸이고, 문단·목록 항목이 모두 아직 그 안내 글.
+// 표가 없는 칸은 글이 우연히 ‘소제목’ 같아도 통째로 고르지 않는다.
+const isPlaceholder = (host) => {
+  if (!host.hasAttribute(A.ph) && !host.querySelector(`[${A.ph}]`)) return false;
+  const parts = host.querySelectorAll('p, li');
+  const texts = parts.length ? Array.from(parts, (p) => p.textContent.trim()) : [host.textContent.trim()];
+  return texts.every((t) => PLACE_TEXTS.has(t));
+};
 const inlineOnly = (el) => Array.from(el.children).every((c) => INLINE.has(c.tagName) && !c.matches(SKIP));
 const isList = (el) => (el.tagName === 'UL' || el.tagName === 'OL') && el.children.length > 0
   && Array.from(el.children).every((li) => li.tagName === 'LI' && inlineOnly(li));
@@ -67,6 +77,7 @@ export class Canvas {
     // 링크(HTML·SVG 의 a, 이미지 맵의 area)를 누르면 편집 화면이 다른 문서로 넘어가 편집을 잃는다 — 늘 막는다
     d.addEventListener('click', (e) => {
       if (e.composedPath().some((n) => n.localName === 'a' || n.localName === 'area')) e.preventDefault();
+      this.pickPlaceholder(e.target);
     });
     d.addEventListener('dragstart', (e) => e.preventDefault());
     d.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'none'; });
@@ -134,6 +145,24 @@ export class Canvas {
       while (host.parentElement && host.parentElement.isContentEditable) host = host.parentElement;
     }
     return host && this.armed && this.armed.contains(host) ? host : null;
+  }
+
+  // 새 장의 안내 글(‘제목을 입력하세요’ 등)을 누르면 그 칸의 글을 통째로 고른다 — 바로 쳐서 덮어 쓰게. 첫 글자부터 끝
+  // 글자까지(문단 안쪽)를 골라야 덮어 쓸 때 첫 문단의 모양(빌더 p.pp 의 크기·색)이 남는다. 글을 끌어 고른 때는 그대로.
+  pickPlaceholder(t) {
+    const host = this.hostOf(t);
+    const sel = this.doc.getSelection();
+    if (!host || !sel || !sel.isCollapsed || !isPlaceholder(host)) return;
+    const w = this.doc.createTreeWalker(host, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.data.trim() ? 1 : 3) });
+    const first = w.nextNode();
+    let last = first;
+    for (let n = first; n; n = w.nextNode()) last = n;
+    if (!first) return;
+    const r = this.doc.createRange();
+    r.setStart(first, 0);
+    r.setEnd(last, last.data.length);
+    sel.removeAllRanges();
+    sel.addRange(r);
   }
 
   allowsParagraph(host) {

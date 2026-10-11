@@ -5,7 +5,8 @@
    {t:'title', id, a, b}            장 이름(전·후, 빌더 덱의 data-title)
    {t:'ins',   id, at, html, notes} 장 더함(되돌리면 지움)
    {t:'del',   id, at, html, notes} 장 지움(되돌리면 되살림)
-   {t:'move',  id, from, to}        장 옮김 */
+   {t:'move',  id, from, to}        장 옮김
+   {t:'style', i, a, b}             덱 <style> 의 i 번째 글(전·후) — 모든 장에 한꺼번에(덱 색·글꼴 변수) */
 
 export class History {
   constructor(apply, limit = 200) {
