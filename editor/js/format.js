@@ -40,6 +40,8 @@ const END_TO_END = 2;
 const BLANK = new Set(['size', 'font', 'color', 'bold', 'italic', 'underline', 'strikeThrough']);
 // 서식마다 바꾸려는 글자 서식 — 고른 글의 다른 서식과 고르지 않은 글은 명령 뒤에도 보이는 것이 같아야 한다
 const INTENT = { size: 'font-size', font: 'font-family', color: 'color', bold: 'font-weight', italic: 'font-style' };
+// 켜고 끄는 서식 → styleState 의 이름
+const TOGGLE = { bold: 'bold', italic: 'italic', underline: 'underline', strikeThrough: 'strike' };
 
 export const toPt = (px) => Math.round(px * 0.75 * 2) / 2;
 export const toPx = (pt) => Math.round(pt * 4 / 3 * 100) / 100;
@@ -204,11 +206,53 @@ export class Formatter {
     // 서식은 글자를 바꾸지 않으므로, 입힌 뒤 같은 글자 자리로 선택을 되돌린다(크기를 연달아 바꾸는 등). 캐럿이 글 마디의
     // 끝에 있었으면 앞 글의 끝에, 아니면 다음 글의 처음에 — 문단 경계에서 옆 문단으로 넘어가지 않게.
     const off = from ? { host: from.host, ...offsetsOf(from.host, from.range), back: atEnd(from.range) } : null;
+    const key = TOGGLE[kind];
     this.canvas.change(() => {
-      for (const { host, range } of parts) this.pass(host, range, kind, value);
+      if (!key) {
+        for (const { host, range } of parts) this.pass(host, range, kind, value);
+        return;
+      }
+      // 켜고 끄는 서식은 입힐 곳 모두를 한쪽으로 — 모두 켜져 있으면 모두 끄고, 아니면 모두 켠다(PowerPoint 처럼). 칸마다 명령을
+      // 따로 부르면 칸마다 제 글을 보고 뒤집어, 여러 상자를 고르면 굵던 제목은 가늘어지고 가늘던 글은 굵어진다. 한 글자도 그쪽으로
+      // 가지 않았으면(덱 CSS 가 막는 글만 남은 등) 반대쪽으로 — 누를 때마다 무언가는 바뀌어, 막힌 글 하나에 묶이지 않게.
+      const at = parts.map(({ host, range }) => this.finder(host, range));
+      const want = !parts.every(({ host }, i) => this.states(host, at[i](), key).every(Boolean));
+      const moved = parts.map(({ host }, i) => this.toggleTo(host, at[i], kind, want)).some(Boolean);
+      if (!moved) parts.forEach(({ host }, i) => this.toggleTo(host, at[i], kind, !want));
     });
     this.reselect(off);
     this.update();
+  }
+
+  // 범위를 글자 자리로 다시 찾는 함수 — 명령마다 글이 나뉘고 합쳐지므로(글 칸 전체였으면 늘 전체 — 빈 문단까지)
+  finder(host, range) {
+    const all = !host.textContent.trim() || range.toString().length === host.textContent.length;
+    const { start, end } = offsetsOf(host, range);
+    return () => (all ? this.whole(host) : rangeAt(host, start, end));
+  }
+
+  // 켜고 끄는 서식(key)의 지금 상태들 — 글이 있으면 범위 안 글자들의 요소, 글이 없는 칸이면 blank() 가 적는 문단들
+  states(host, range, key) {
+    const els = host.textContent.trim() ? textElements(range, host) : blocksIn(host, this.whole(host));
+    return els.map((el) => styleState(el, host, this.win)[key]);
+  }
+
+  // 켜고 끄는 서식 하나를 글 칸 하나의 범위에서 want 쪽으로 — 범위 안에서 want 와 다른 글자만 이어진 덩어리로 골라 덩어리마다
+  // 한 번 누른다. 고른 글이 모두 한쪽이면 명령은 체제와 상관없이 반대쪽으로 간다(굵게·기울임은 ‘모두 켜졌나’를, 밑줄·취소선과
+  // Mac 의 굵게는 첫 글자를 보는데, 둘 다 같은 답). 섞인 채로 누르면 어느 쪽으로 모일지 체제·명령마다 달라 쓰지 않는다. 덱 CSS 가
+  // 막아 바뀌지 않는 글은 그대로 둔다. 글이 없는 칸은 문단에 want 를 바로 적는다(뒤집지 않고). 한 글자라도 want 로 갔으면 true.
+  toggleTo(host, at, kind, want) {
+    const key = TOGGLE[kind];
+    if (!host.textContent.trim()) {
+      const left = () => this.states(host, at(), key).filter((s) => s !== want).length;
+      const n = left();
+      if (n) this.pass(host, at(), kind, want);
+      return left() < n;
+    }
+    const chars = (runs) => runs.reduce((sum, r) => sum + r.end - r.start, 0);
+    const runs = offRuns(host, at(), key, want, this.win);
+    for (const { start, end } of runs) this.pass(host, rangeAt(host, start, end), kind);
+    return runs.length > 0 && chars(offRuns(host, at(), key, want, this.win)) < chars(runs);
   }
 
   // 글 칸 하나의 범위에 서식 하나 — 명령 뒤 정리까지
@@ -276,9 +320,7 @@ export class Formatter {
   // 자리로 다시 찾는다(글 칸 전체였으면 늘 전체 — 빈 문단까지).
   paintPart(host, range, look) {
     const win = this.win;
-    const all = !host.textContent.trim() || range.toString().length === host.textContent.length;
-    const { start, end } = offsetsOf(host, range);
-    const at = () => (all ? this.whole(host) : rangeAt(host, start, end));
+    const at = this.finder(host, range);
     const any = (differs) => textElements(at(), host).some(differs);
     const cs = (el) => win.getComputedStyle(el);
     this.pass(host, at(), 'clear');
@@ -286,10 +328,7 @@ export class Formatter {
     if (any((el) => firstFamily(cs(el).fontFamily).toLowerCase() !== family)) this.pass(host, at(), 'font', look.font);
     if (any((el) => Math.abs(parseFloat(cs(el).fontSize) - look.size) > 0.05)) this.pass(host, at(), 'size', look.size * 0.75);
     if (look.color && any((el) => hexOf(cs(el).color) !== look.color)) this.pass(host, at(), 'color', look.color);
-    // 굵게 등은 켜고 끄는 명령 — 섞여 있으면 한 번에 한쪽으로 모이므로 두 번까지
-    for (const [kind, key] of [['bold', 'bold'], ['italic', 'italic'], ['underline', 'underline'], ['strikeThrough', 'strike']]) {
-      for (let i = 0; i < 2 && any((el) => styleState(el, host, win)[key] !== look[key]); i += 1) this.pass(host, at(), kind);
-    }
+    for (const [kind, key] of Object.entries(TOGGLE)) this.toggleTo(host, at, kind, look[key]);
     const marks = textElements(at(), host).map((el) => hexOf(markOf(el, host, win)));
     if (look.mark && marks.some((m) => m !== look.mark)) this.pass(host, at(), 'mark', look.mark);
     else if (!look.mark && marks.some(Boolean)) this.pass(host, at(), 'unmark');
@@ -308,7 +347,7 @@ export class Formatter {
     else cmd(kind);
   }
 
-  // 글이 없는 칸 — 문단(없으면 칸)에 바로 적는다
+  // 글이 없는 칸 — 문단(없으면 칸)에 바로 적는다. 켜고 끄는 서식은 value 가 켤지(true)·끌지(false)다(toggleTo — 뒤집지 않는다)
   blank(kind, value, host) {
     const win = this.win;
     for (const b of blocksIn(host, this.whole(host))) {
@@ -318,13 +357,13 @@ export class Formatter {
         b.style.fontSize = `${toPx(value)}px`;
       } else if (kind === 'font') b.style.fontFamily = value;
       else if (kind === 'color') b.style.color = value;
-      else if (kind === 'bold') b.style.fontWeight = Number(cs.fontWeight) >= 600 ? '400' : '700';
-      else if (kind === 'italic') b.style.fontStyle = cs.fontStyle === 'normal' ? 'italic' : 'normal';
+      else if (kind === 'bold') b.style.fontWeight = value ? '700' : '400';
+      else if (kind === 'italic') b.style.fontStyle = value ? 'italic' : 'normal';
       else {
         const word = kind === 'underline' ? 'underline' : 'line-through';
         const lines = new Set(cs.textDecorationLine.split(' ').filter((l) => l && l !== 'none'));
-        if (lines.has(word)) lines.delete(word);
-        else lines.add(word);
+        if (value) lines.add(word);
+        else lines.delete(word);
         b.style.removeProperty('text-decoration-line');
         if (lines.size || win.getComputedStyle(b).textDecorationLine !== 'none') {
           b.style.textDecorationLine = lines.size ? [...lines].join(' ') : 'none';
@@ -557,6 +596,31 @@ function textElements(range, host) {
   }
   if (!out.size) out.add(elementAt(range, host));
   return [...out];
+}
+
+// 범위 안에서 켜고 끄는 서식(key)이 want 와 다른 글자들을 이은 덩어리 [{start, end}] — 글 칸 처음부터 센 글자 자리
+// (offsetsOf·rangeAt 과 같은 셈). 이미 want 인 글자는 빈칸이라도 덩어리를 끊고(섞인 채 누르면 어느 쪽으로 모일지 모른다),
+// 빈칸으로는 덩어리를 시작하지 않는다. 밑줄·취소선은 다른 장식이 바뀌는 곳에서도 끊는다 — 명령은 덩어리 첫 글자의 장식(밑줄과
+// 취소선 둘 다)을 덩어리 전체에 입힌다.
+function offRuns(host, range, key, want, win) {
+  const { start, end } = offsetsOf(host, range);
+  const other = { underline: 'strike', strike: 'underline' }[key];
+  const runs = [];
+  let last = null;
+  let pos = 0;
+  const w = host.ownerDocument.createTreeWalker(host, SHOW_TEXT);
+  for (let t = w.nextNode(); t; t = w.nextNode()) {
+    const s = Math.max(pos, start);
+    const e = Math.min(pos + t.data.length, end);
+    pos += t.data.length;
+    if (e <= s) continue;
+    const st = styleState(t.parentElement, host, win);
+    if (st[key] === want) last = null;
+    else if (last && (!other || st[other] === last.other)) last.end = e;
+    else if (t.data.trim()) runs.push(last = { start: s, end: e, other: other ? st[other] : null });
+    else last = null;
+  }
+  return runs;
 }
 
 function styleState(el, host, win) {
@@ -854,13 +918,17 @@ export function tidy(host, touched, win) {
     if (kids.length !== 1 || kids[0].nodeType !== 1 || !kids[0].isConnected || !own(kids[0])) continue;
     const sp = kids[0];
     const rest = [];
+    const lifted = [];
     for (let i = 0; i < sp.style.length; i += 1) {
       const p = sp.style[i];
-      if (!isChar(p)) { rest.push(p); continue; }
+      // 밑줄·취소선은 글 칸(편집 뿌리) 자신에게는 올리지 않는다 — 브라우저가 거기 적힌 장식은 다시 걷지 못해, 흐름 덱 문단에
+      // 넣은 밑줄이 Ctrl+U 를 다시 눌러도 남는다
+      if (!isChar(p) || (b === host && p.startsWith('text-decoration'))) { rest.push(p); continue; }
       b.style.setProperty(p, sp.style.getPropertyValue(p));
+      lifted.push(p);
     }
     if (rest.length) {
-      for (const p of HOIST) sp.style.removeProperty(p);
+      for (const p of lifted) sp.style.removeProperty(p);
     } else {
       unwrap(sp);
     }

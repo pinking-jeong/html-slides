@@ -427,6 +427,130 @@ def test_select_all_after_typing_formats_every_box(browser, arr):
     assert errors == []
 
 
+def test_bold_on_several_boxes_goes_one_way(browser, arr):
+    ctx, page, errors, hub = open_arr(browser, arr)
+    original = page.evaluate("window.__hse.serialize()")
+    slide2(page).locator("[data-name=title] .tin p").click()
+    page.keyboard.press("Control+b")                        # 제목만 먼저 굵게 — 고른 상자들의 글이 섞인다
+    assert weights(page) == ["400", "700", "400", "400", "400"]
+    page.keyboard.press("Escape")
+    page.keyboard.press("Control+a")
+    page.wait_for_timeout(60)
+    page.keyboard.press("Control+b")                        # 섞였으면 모두 굵게(칸마다 뒤집지 않는다 — 제목이 가늘어지면 안 됨)
+    assert set(weights(page)) == {"700"}
+    assert state(page)["sel"] == 8
+    page.keyboard.press("Control+b")                        # 모두 굵으면 모두 푼다
+    assert set(weights(page)) == {"400"}
+    for _ in range(3):
+        page.keyboard.press("Control+z")
+    assert state(page)["undo"] == 0
+    assert same_dom(page, original, page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+UNDERLINES = """(root) => { const out = []; const w = root.ownerDocument.createTreeWalker(root, 4);
+  for (let t = w.nextNode(); t; t = w.nextNode()) {
+    if (!t.data.trim()) continue;
+    const host = t.parentElement.closest('[contenteditable]');
+    let on = false;
+    for (let n = t.parentElement; n; n = n.parentElement) {
+      if ((getComputedStyle(n).textDecorationLine || '').includes('underline')) on = true;
+      if (n === host) break;
+    }
+    out.push([t.data.trim(), on]);
+  }
+  return out; }"""
+
+
+def test_underline_on_several_boxes_moves_past_a_link(browser, tmp_path, serve):
+    # 본문 첫 문단에 링크 — 링크의 밑줄은 끌 수 없다(덱 CSS). 명령은 첫 글자를 보고 켜고 끄므로, 링크로 시작하는 글을 통째로
+    # 누르면 꼬리에 밑줄이 생기지 않고, 여러 상자를 고른 채 두 번째 눌러도 다른 상자의 밑줄이 풀리지 않던 것
+    deck = ARR.replace("첫 문단</p>", '<a href="https://example.com/">링크</a> 꼬리</p>', 1)
+    site, root = make_site(tmp_path, {"arr.html": deck})
+    hub = DeckHub({"decks/arr.html": (root / "decks" / "arr.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "arr", hub)
+    page.keyboard.press("PageDown")
+    original = page.evaluate("window.__hse.serialize()")
+    page.locator("#frame").click(position={"x": 4, "y": 4})
+    page.keyboard.press("Control+a")
+    page.wait_for_timeout(60)
+    page.keyboard.press("Control+u")
+    got = slide2(page).evaluate(UNDERLINES)
+    assert all(on for _, on in got) and ["꼬리", True] in got and state(page)["undo"] == 1
+    page.keyboard.press("Control+u")                        # 모두 켜졌으니 모두 끈다 — 끌 수 없는 링크만 남는다
+    got = slide2(page).evaluate(UNDERLINES)
+    assert [t for t, on in got if on] == ["링크"] and state(page)["undo"] == 2
+    page.keyboard.press("Control+z")
+    page.keyboard.press("Control+z")
+    assert same_dom(page, original, page.evaluate("window.__hse.serialize()"))
+    ctx.close()
+    assert errors == []
+
+
+DECOR = """(p) => { const host = p; const out = []; const w = p.ownerDocument.createTreeWalker(p, 4);
+  for (let t = w.nextNode(); t; t = w.nextNode()) {
+    if (!t.data.trim()) continue;
+    let u = false; let s = false;
+    for (let n = t.parentElement; n; n = n.parentElement) {
+      const line = getComputedStyle(n).textDecorationLine || '';
+      if (line.includes('underline')) u = true;
+      if (line.includes('line-through')) s = true;
+      if (n === host) break;
+    }
+    out.push([t.data.trim(), getComputedStyle(t.parentElement).fontWeight, u, s]);
+  }
+  return out; }"""
+
+
+def test_flow_paragraph_underline_bold_and_strike_toggle_cleanly(browser, tmp_path, serve):
+    # 흐름 덱의 문단은 글 칸(편집 뿌리) 자신 — 그 style 에 올린 밑줄은 브라우저가 다시 걷지 못한다. 굵은 낱말 사이의 보통 빈칸,
+    # 취소선 옆 글도 한 번 누름에 바르게.
+    deck = FLOW.replace("<p>부제 <b>굵게</b> 끝</p>",
+                        '<p>부제 <b>굵게</b> 끝</p><p class="t2"><b>제목</b> <b>부제목</b></p><p class="t3"><s>가가</s> 나나</p>', 1)
+    site, root = make_site(tmp_path, {"flow.html": deck})
+    hub = DeckHub({"decks/flow.html": (root / "decks" / "flow.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "flow", hub)
+    s1 = frame(page).locator("section.slide").nth(0)
+    caret(page, "section.slide:nth-of-type(1) p", "부제")
+    page.keyboard.press("Control+u")
+    assert {u for _, _, u, _ in s1.locator("p").first.evaluate(DECOR)} == {True}
+    page.keyboard.press("Control+u")                        # 다시 누르면 풀린다
+    assert {u for _, _, u, _ in s1.locator("p").first.evaluate(DECOR)} == {False}
+    caret(page, "section.slide:nth-of-type(1) p.t2", "제목")
+    undo = state(page)["undo"]
+    page.keyboard.press("Control+b")                        # 굵은 낱말 둘 — 한 번에 모두 푼다(빈칸만 굵어지고 끝나지 않게)
+    assert [w for _, w, _, _ in s1.locator("p.t2").evaluate(DECOR)] == ["400", "400"] and state(page)["undo"] == undo + 1
+    caret(page, "section.slide:nth-of-type(1) p.t3", "나나")
+    page.keyboard.press("Control+u")                        # 밑줄만 — 앞 글의 취소선이 번지지 않는다
+    assert s1.locator("p.t3").evaluate(DECOR) == [["가가", "400", True, True], ["나나", "400", True, False]]
+    ctx.close()
+    assert errors == []
+
+
+def test_bold_in_an_emptied_indented_list_sticks(browser, tmp_path, serve):
+    # 들여 쓴 목록(li 사이에 줄바꿈·빈칸 글 마디)의 글을 모두 지우면 글이 없는 칸 — 굵게는 문단(li)에 바로 적고, 상태도 그 li 에서
+    # 읽는다. 다른 요소(ul)에서 읽으면 안 바뀐 줄 알고 한 번 더 눌러 도로 가늘게 만든다.
+    deck = FLOW.replace("<ul><li>하나</li><li>둘</li></ul>", "<ul>\n  <li>하나</li>\n  <li>둘</li>\n</ul>")
+    site, root = make_site(tmp_path, {"flow.html": deck})
+    hub = DeckHub({"decks/flow.html": (root / "decks" / "flow.html").read_bytes()})
+    ctx, page, errors = open_editor(browser, serve(site), "flow", hub)
+    page.keyboard.press("PageDown")
+    caret(page, "section.slide:nth-of-type(2) ul", "하나")
+    page.keyboard.press("Control+a")                        # 글을 고치는 중 — 이 글 칸(ul)의 글 모두
+    page.keyboard.press("Delete")
+    ul = frame(page).locator("section.slide").nth(1).locator("ul")
+    assert ul.evaluate("(u) => u.textContent.trim()") == ""
+    page.keyboard.press("Control+b")
+    page.keyboard.type("X")
+    page.wait_for_timeout(100)
+    assert ul.evaluate("""(u) => { const w = u.ownerDocument.createTreeWalker(u, 4);
+        for (let t = w.nextNode(); t; t = w.nextNode()) if (t.data.trim()) return [t.data, getComputedStyle(t.parentElement).fontWeight];
+        return null; }""") == ["X", "700"]
+    ctx.close()
+    assert errors == []
+
+
 def test_shift_click_inside_the_text_being_edited_extends_it(browser, arr):
     ctx, page, errors, hub = open_arr(browser, arr)
     p = slide2(page).locator("[data-name=body] .tin p").first
