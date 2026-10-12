@@ -25,6 +25,7 @@
   <div class="acts" role="toolbar" aria-label="편집">
     <button class="btn ghost" type="button" id="undo" title="되돌리기 (Ctrl+Z)" disabled>되돌리기</button>
     <button class="btn ghost" type="button" id="redo" title="다시 하기 (Ctrl+Y)" disabled>다시 하기</button>
+    <button class="btn ghost" type="button" id="versions" title="이 덱의 이전 판 — 임시 저장본·저장한 판을 골라 다시 엽니다">판 기록</button>
     <a class="btn ghost" id="present" href="#" target="_blank" rel="noopener" title="저장된 판을 새 탭에서 발표 화면으로 엽니다">발표로 보기</a>
     <a class="btn ghost" id="presenter" href="#" target="_blank" rel="noopener" hidden title="저장된 판을 발표자 보기로 엽니다 — 노트·다음 장·시간을 보며 청중 화면을 넘깁니다">발표자 보기</a>
     <button class="btn ghost" type="button" id="download" title="지금 편집한 덱을 HTML 파일로 받습니다(저장하지 않음)">HTML 받기</button>
@@ -354,6 +355,36 @@
     <p class="m-status" id="mStatus" role="status" aria-live="polite"></p>
     <div class="dlg-acts"><button type="button" class="btn" id="mClose">닫기</button></div>
   </form>
+</dialog>
+
+<dialog class="dlg wide" id="verDlg" aria-labelledby="verTitle" tabindex="-1">
+  <div class="master">
+    <h2 id="verTitle">판 기록 — 이전 판 다시 열기</h2>
+    <p class="small">고른 판은 ‘저장 안 함’으로 열립니다. 저장해야 그 판이 새 판이 되고, 저장하지 않으면 아무것도 바뀌지 않습니다.</p>
+
+    <section class="m-sec" aria-labelledby="verDraftsH">
+      <h3 id="verDraftsH">이 브라우저의 임시 저장본</h3>
+      <p class="m-help">저장하지 않은 고침을 이 브라우저에만 남긴 것입니다 — 편집 창마다 그 창의 마지막 고침 하나(덱마다 최근
+        5개 창까지), 그 창에서 저장하면 그 창의 것을 지웁니다.</p>
+      <ul class="v-list" id="verDrafts"></ul>
+    </section>
+
+    <section class="m-sec" aria-labelledby="verRepoH">
+      <h3 id="verRepoH">저장소의 판</h3>
+      <p class="m-help" id="verRepoHelp"></p>
+      <ul class="v-list" id="verRepo"></ul>
+    </section>
+
+    <div class="v-ask" id="verAsk" role="group" aria-labelledby="verAskText" hidden>
+      <p id="verAskText"></p>
+      <div class="m-row">
+        <button type="button" class="btn primary" id="verGo">불러오기</button>
+        <button type="button" class="btn ghost" id="verStay">그대로 두기</button>
+      </div>
+    </div>
+    <p class="vh" id="verLive" role="status" aria-live="polite"></p>
+    <div class="dlg-acts"><button type="button" class="btn" id="verClose">닫기</button></div>
+  </div>
 </dialog>
 </body>
 </html>

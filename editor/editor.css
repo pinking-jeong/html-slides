@@ -68,6 +68,11 @@ body {
 button, input, textarea { font: inherit; color: inherit; }
 a { color: var(--accent); }
 [hidden] { display: none !important; }
+/* 화면에는 안 보이고 화면 낭독기만 읽는 칸 */
+.vh {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 
 /* ---------- 버튼 */
 .btn {
@@ -336,6 +341,27 @@ a { color: var(--accent); }
 .dlg .m-status.ok { color: var(--ok); }
 .dlg .m-status.warn { color: var(--warn-ink); }
 .dlg .m-status.err { color: var(--err); }
+
+/* ---------- 판 기록 */
+.v-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.v-list li {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface2); font-size: 13px;
+}
+.v-list li.v-empty { border-style: dashed; background: transparent; color: var(--muted); }
+.v-list li.v-empty.err { border-color: var(--err); color: var(--err); }
+.v-time { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.v-what { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; color: var(--ink2); }
+.v-meta { font-size: 12px; color: var(--muted); }
+.v-meta.warn { color: var(--warn-ink); font-weight: 600; }
+.v-link { font-size: 12px; }
+.v-list li .btn, .v-now { margin-left: auto; }
+.v-now { font-size: 12px; font-weight: 700; color: var(--ok); }
+.v-ask {
+  margin-top: 12px; padding: 10px 12px; border: 1px solid var(--warn-line); border-radius: 10px;
+  background: var(--warn-bg); color: var(--warn-ink);
+}
+.dlg .v-ask p { margin: 0 0 8px; font-weight: 600; }
 
 /* ---------- 왼쪽 칸 탭: 차례 · 색인 · 찾기 */
 .side-tabs { display: flex; align-items: center; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); }

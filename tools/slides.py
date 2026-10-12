@@ -2031,6 +2031,31 @@ class EditSession:
                 pass
         return dst
 
+    def history(self) -> list[dict]:
+        """남긴 저장 전 판 — 새것부터. time: 남긴 때(밀리초 — 이름의 시각), first: 이번 실행에서 고치기 시작하기 전의 판."""
+        try:
+            files = sorted((p for p in self.backups.iterdir() if BACKUP_RE.fullmatch(p.name)), reverse=True)
+        except OSError:
+            return []
+        out = []
+        for p in files:
+            try:
+                when = dt.datetime.strptime(p.name[:22], "%Y%m%d-%H%M%S-%f")
+                size = p.stat().st_size
+            except (ValueError, OSError):
+                continue
+            out.append({"id": p.name, "time": int(when.timestamp() * 1000), "size": size, "first": p == self.first})
+        return out
+
+    def backup(self, name: str) -> bytes | None:
+        """저장 전 판 하나의 바이트 — 판 이름 꼴이 아니거나(경로가 섞인 이름 등) 없으면 None."""
+        if not BACKUP_RE.fullmatch(name):
+            return None
+        try:
+            return (self.backups / name).read_bytes()
+        except OSError:
+            return None
+
     def save(self, text: str, want: str, force: bool) -> tuple[str, Path | None]:
         """편집기를 연 판(want: 지문)이 지금 파일과 같을 때만 쓴다. force 면 그대로 덮되 지금 판은 남긴다.
         (새 지문, 남긴 판 — 바뀐 것이 없으면 None)"""
@@ -2050,6 +2075,7 @@ class EditSession:
 class EditServer(http.server.ThreadingHTTPServer):
     """Windows 의 SO_REUSEADDR 은 남이 쓰는 포트에도 붙으므로 끄고, 남이 이 포트를 가로채지 못하게 독점으로 연다."""
     allow_reuse_address = os.name != "nt"
+    missed_port = 0          # 덱마다 쓰는 포트(stable_port)를 못 써 빈 포트로 열었으면 그 포트
 
     def server_bind(self) -> None:
         if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -2115,6 +2141,10 @@ class EditHandler(http.server.BaseHTTPRequestHandler):
             return self._deck_file(path, self.session.show_key)
         if path == "/api/deck":
             return self._get_deck()
+        if path == "/api/history":
+            return self._get_history()
+        if path.startswith("/api/history/"):
+            return self._get_backup(path[len("/api/history/"):])
         if path.startswith("/deck-files/"):
             return self._deck_file(path, self.session.key)
         if path.startswith("/editor/"):
@@ -2190,6 +2220,26 @@ class EditHandler(http.server.BaseHTTPRequestHandler):
             "X-HSE-Present": s.present_url,
         })
 
+    # 판 기록 — 저장 전 판의 목록과 내용(편집기의 ‘판 기록’이 부른다. 덱 읽기와 같은 열쇠·출처 확인)
+    def _get_history(self) -> None:
+        if not self._api_ok(put=False):
+            return
+        self._json(200, items=self.session.history())
+
+    def _get_backup(self, name: str) -> None:
+        if not self._api_ok(put=False):
+            return
+        data = self.session.backup(name)
+        if data is None:
+            return self._json(404, error="그 판을 찾지 못했습니다 — 오래되어 지웠을 수 있습니다")
+        if len(data) > EDIT_MAX:
+            return self._json(413, error=f"판이 너무 큽니다 — 편집기는 {EDIT_MAX >> 20} MB 까지 엽니다")
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._json(415, error="UTF-8 로 저장된 HTML 이 아닙니다")
+        self._send(200, "application/octet-stream", data, {"X-HSE-Hash": hashlib.sha256(data).hexdigest()})
+
     def do_PUT(self) -> None:
         if self.role != "edit" or self._route() != "/api/deck":
             self.close_connection = True
@@ -2258,20 +2308,37 @@ def edit_target(repo: Repo, arg: str) -> Path:
     return p
 
 
+STABLE_PORT_BASE, STABLE_PORT_SPAN = 41000, 8000
+
+
+def stable_port(path: Path) -> int:
+    """덱 파일마다 늘 같은 편집기 포트(41000~48999). 편집기의 임시 저장본(브라우저 IndexedDB)은 주소(127.0.0.1:포트)마다
+    따로라, 실행마다 포트가 같아야 지난 실행에서 저장하지 않고 닫은 고침을 다음 실행의 ‘판 기록’에서 다시 찾는다."""
+    key = os.path.normcase(str(path.resolve())).encode("utf-8")
+    return STABLE_PORT_BASE + int.from_bytes(hashlib.sha256(key).digest()[:4], "big") % STABLE_PORT_SPAN
+
+
 def edit_servers(session: EditSession, port: int = 0) -> tuple[EditServer, EditServer | None, str]:
     """편집기 서버와 발표 화면 서버를 연다(아직 돌리지는 않는다). 덱이 개인 파일이 모이는 폴더에 있으면 발표 화면
-    서버는 열지 않는다(None). (편집기 서버, 발표 화면 서버, 편집기 주소)"""
+    서버는 열지 않는다(None). 편집기는 port 를 주지 않으면 덱마다 같은 포트(stable_port)를 먼저 쓰고, 그 포트를 못 쓰면
+    (다른 프로그램이나 같은 덱의 다른 실행이 쓰는 중 등) 빈 포트로 연다. (편집기 서버, 발표 화면 서버, 편집기 주소)"""
     made: list[EditServer] = []
     roles = [("edit", port)] + ([] if personal_folder(session.folder) else [("show", 0)])
     for role, want in roles:
         handler = type(f"Edit{role.title()}Handler", (EditHandler,), {"session": session, "role": role})
-        try:
-            srv = EditServer(("127.0.0.1", want), handler)
-        except OSError as e:
-            for s in made:
-                s.server_close()
-            raise SlidesError(f"127.0.0.1:{want} 에 서버를 열지 못했습니다 — {e.strerror or e}"
-                              + (" (다른 --port 로 해 보세요)" if want else ""))
+        tries = [stable_port(session.path), 0] if role == "edit" and not want else [want]
+        for i, w in enumerate(tries):
+            try:
+                srv = EditServer(("127.0.0.1", w), handler)
+                break
+            except OSError as e:
+                if i + 1 < len(tries):
+                    continue
+                for s in made:
+                    s.server_close()
+                raise SlidesError(f"127.0.0.1:{w} 에 서버를 열지 못했습니다 — {e.strerror or e}"
+                                  + (" (다른 --port 로 해 보세요)" if w else ""))
+        srv.missed_port = tries[0] if w != tries[0] else 0
         p = srv.server_address[1]
         handler.allowed_hosts = {f"127.0.0.1:{p}", f"localhost:{p}"}
         handler.origins = {f"http://{h}" for h in handler.allowed_hosts}
@@ -2303,6 +2370,10 @@ def cmd_edit(repo: Repo, args) -> int:
     edit, show, url = edit_servers(session, args.port)
     print(f"고칠 덱: {path}")
     print(f"편집기: {url}")
+    if edit.missed_port:
+        print(f"  이 덱이 늘 쓰는 포트 {edit.missed_port} 를 다른 실행이나 프로그램이 쓰는 중이라 빈 포트로 열었습니다 — 이번에는 "
+              "‘판 기록’에 지난 실행의 임시 저장본이 보이지 않습니다(지워지지는 않습니다). 그 포트를 쓰는 것을 닫고 다시 실행하면 "
+              "보입니다.")
     print(f"  저장하면 이 파일에 바로 씁니다. 저장 전 판은 {session.backups} 에 남깁니다"
           f"(최근 {BACKUP_KEEP}개와, 이번에 고치기 시작하기 전의 판).")
     if show is None:
@@ -2371,7 +2442,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("edit", help="덱을 편집기로 열어 고치고 그 파일에 저장한다")
     e.add_argument("file", help="고칠 HTML 덱(파일 경로, 또는 slides add 로 등록한 덱 이름 — 그 원본을 연다)")
-    e.add_argument("--port", type=int, default=0, help="편집기 포트(기본: 빈 포트를 고름)")
+    e.add_argument("--port", type=int, default=0, help="편집기 포트(기본: 덱마다 같은 포트, 쓰는 중이면 빈 포트)")
     e.add_argument("--no-open", action="store_true", help="브라우저를 열지 않는다")
     e.add_argument("--backup-dir", help=argparse.SUPPRESS)
     e.set_defaults(func=cmd_edit)

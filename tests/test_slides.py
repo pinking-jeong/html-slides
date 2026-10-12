@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -1367,6 +1368,37 @@ def test_edit_saves_only_over_the_version_it_opened(edit_env, monkeypatch):
     assert e.deck.read_bytes() == text.encode("utf-8")
 
 
+def test_edit_history_lists_and_reads_backups_only_with_the_key(edit_env):
+    e = edit_env
+    key = {"X-HSE-Key": e.key}
+
+    def get(path: str, headers: dict | None = None):
+        return call(e.edit, "GET", path, headers=headers)
+
+    def put(text: str, want: str):
+        return call(e.edit, "PUT", "/api/deck", body=text.encode("utf-8"), headers={
+            **key, "Origin": e.origin, "Content-Type": "text/html; charset=utf-8", "If-Match": want})
+
+    assert get("/api/history").status == 403                 # 열쇠 없이
+    assert get("/api/history", {**key, "Origin": "http://evil.example"}).status == 403
+    assert json.loads(get("/api/history", key).body) == {"items": []}
+    first = e.deck.read_bytes()
+    h1 = json.loads(put(EDIT_DECK.replace("둘", "둘째"), hashlib.sha256(first).hexdigest()).body)["hash"]
+    second = e.deck.read_bytes()
+    assert put(EDIT_DECK.replace("둘", "둘째 장"), h1).status == 200
+    items = json.loads(get("/api/history", key).body)["items"]
+    assert [i["first"] for i in items] == [False, True]      # 새것부터 — 맨 끝이 고치기 시작하기 전의 판
+    assert items[0]["time"] >= items[1]["time"] > 0 and items[1]["size"] == len(first)
+    got = get(f"/api/history/{items[1]['id']}", key)
+    assert got.status == 200 and got.body == first and got.headers["X-HSE-Hash"] == hashlib.sha256(first).hexdigest()
+    assert get(f"/api/history/{items[0]['id']}", key).body == second
+    assert get(f"/api/history/{items[1]['id']}").status == 403   # 열쇠 없이는 판도
+    for bad in ("..%2F..%2Fsecret.html", "x.html", quote(items[0]["id"] + "\n"), "20261013-000000-000000-deadbeef.html",
+                quote(str(e.deck))):
+        assert get(f"/api/history/{bad}", key).status == 404
+    assert call(e.show, "GET", "/api/history", headers=key).status == 404   # 발표 화면 쪽 서버에는 없다
+
+
 def test_edit_keeps_line_endings_and_bom():
     lf = "<p>a</p>\n<p>b</p>\n"
     bom = bytes.fromhex("efbbbf")
@@ -1416,6 +1448,43 @@ def test_edit_backup_names_follow_the_order_they_were_kept(tmp_path, monkeypatch
     names = sorted(p.name for p in session.backups.iterdir())
     assert names[0].startswith("20261012-090000-000000-") and names[-1].startswith("20261012-090000-000006-")
     assert backup_texts(session) == ["v0", "v4", "v5", "v6"]
+
+
+def test_edit_server_keeps_one_port_per_deck(tmp_path):
+    """편집기의 임시 저장본은 주소(포트)마다 따로라, 같은 덱은 실행마다 같은 포트를 쓴다 — 그 포트를 쓰는 중이면 빈 포트로."""
+    deck = tmp_path / "deck.html"
+    deck.write_text("<p>x</p>", encoding="utf-8")
+    want = slides.stable_port(deck.resolve())
+    assert slides.STABLE_PORT_BASE <= want < slides.STABLE_PORT_BASE + slides.STABLE_PORT_SPAN
+    assert slides.stable_port(deck.resolve()) == want
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", want))
+    except OSError:
+        pytest.skip(f"{want} 포트를 다른 프로그램이 쓰는 중")
+    finally:
+        probe.close()
+
+    def run():
+        return slides.edit_servers(slides.EditSession(deck.resolve(), tmp_path / "b"))
+
+    def close(*servers):
+        for s in servers:
+            if s:
+                s.server_close()
+
+    edit, show, url = run()
+    try:
+        assert edit.server_address[1] == want and url.startswith(f"http://127.0.0.1:{want}/editor/")
+        assert edit.missed_port == 0
+        edit2, show2, _ = run()                 # 같은 덱을 또 열면(앞 실행이 아직 쓰는 중) 빈 포트로 — 그렇다고 알릴 수 있게
+        close(edit2, show2)
+        assert edit2.server_address[1] != want and edit2.missed_port == want
+    finally:
+        close(edit, show)
+    edit3, show3, _ = run()                     # 다음 실행 — 다시 같은 포트
+    close(edit3, show3)
+    assert edit3.server_address[1] == want
 
 
 def test_edit_deck_files_stay_inside_the_deck_folder(edit_env):

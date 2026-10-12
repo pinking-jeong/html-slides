@@ -3,7 +3,9 @@
      사이트에 실린 사본(검색 제외 표시가 들어간 것, 배포가 늦는 것)이 아니라 저장소 원본을 고친다.
      읽은 바이트로 git blob SHA 를 직접 계산해 '이 판을 고쳤다'고 보낸다 — 그 사이 다른 커밋이 있으면 409 로 막힌다.
    - 이 PC: editor/?local=1#key=… — slides edit 이 띄운 127.0.0.1 서버. 열쇠는 주소의 # 뒤로만 받고 곧바로 주소 창에서 지운다
-     (새로 고침에 쓰도록 이 탭의 sessionStorage 에만 남긴다). */
+     (새로 고침에 쓰도록 이 탭의 sessionStorage 에만 남긴다).
+   - 판 기록: 갤러리는 이 덱 파일을 바꾼 커밋 목록과 옛 판(contents ?ref=)을, 이 PC 는 slides edit 이 남긴 저장 전 판
+     (/api/history)을 읽는다. 옛 판을 열어도 저장은 지금 판 위에 한다(저장해야 그 판이 새 판이 된다). */
 
 import { b64, enc, fileName, fromUtf8, gitBlobSha, utf8 } from './util.js';
 
@@ -16,6 +18,11 @@ const KEY_SLOT = 'hse-local-key';       // 새로 고쳐도 다시 열리게 —
 const PRESENT_RE = /^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/deck-files\/[A-Za-z0-9_-]{16,128}\/\S+$/;
 // 커밋 작성자 메일 — build_manifest.py·gallery.js 와 같은 식(개인 메일이 공개 기록에 남지 않게)
 const NOREPLY_RE = /^[0-9]{1,12}\+[A-Za-z0-9][A-Za-z0-9-]{0,38}@users\.noreply\.github\.com$/;
+
+// 판 기록 — 커밋 이름(SHA-1, SHA-256 저장소면 64자)·저장 전 판 이름(tools/slides.py 의 BACKUP_RE 와 같은 꼴)
+const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const BACKUP_ID_RE = /^[0-9]{8}-[0-9]{6}-[0-9]{6}-[0-9a-f]{8}[.]html?$/;
+const kb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 const hasBom = (b) => b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF;
 
@@ -93,6 +100,15 @@ class GithubSource {
   // 발표자 보기(presenter.html) — 편집기가 덱을 찾은 이름(id, 없으면 path)으로
   get presenterUrl() { return new URL(`presenter.html?deck=${encodeURIComponent(String(this.deck.id || this.deck.path))}`, location.href).href; }
   get historyUrl() { return `https://github.com/${this.repo}/commits/${enc(this.branch)}/${enc(this.path)}`; }
+  // 판 기록 — 임시 저장본을 덱마다 나누는 이름, 지금 판 표시(임시 저장본이 어느 판에서 고친 것인지 견준다)
+  get draftKey() { return `gh:${this.repo}:${this.branch}:${this.path}`; }
+  get version() { return this.sha || ''; }
+  // 다시 연 임시 저장본의 바탕 판(커밋한 파일의 sha) 위에 저장하게 — 그 뒤 바뀐 저장소의 판을 덮어쓰지 않고 충돌로 알린다
+  rebase(v) {
+    if (!SHA_RE.test(String(v))) return false;
+    this.sha = String(v);
+    return true;
+  }
   get tokenUrl() {
     const q = new URLSearchParams({
       name: 'html-slides 덱 편집', description: `${this.repo} 덱 고치기(contents 쓰기만)`,
@@ -134,6 +150,33 @@ class GithubSource {
     this.sha = got.sha;
     this.bom = hasBom(got.bytes);
     this.text = fromUtf8(got.bytes);
+  }
+
+  // 이 덱 파일을 바꾼 커밋(최근 30개, 새것부터) → [{id, time, what, meta, link}]
+  async versions() {
+    const q = new URLSearchParams({ path: this.path, sha: this.branch, per_page: '30' });
+    const r = await this.gh(`${API}/repos/${this.repo}/commits?${q}`);
+    if (!r.ok) throw await this.apiError(r, 'list');
+    let rows = null;
+    try { rows = await r.json(); } catch (e) { rows = null; }
+    if (!Array.isArray(rows)) throw fail('http', 'GitHub 이 보낸 커밋 목록을 읽지 못했습니다.');
+    return rows.filter((c) => c && typeof c.sha === 'string' && SHA_RE.test(c.sha)).map((c) => {
+      const m = c.commit || {};
+      const when = Date.parse((m.committer && m.committer.date) || (m.author && m.author.date) || '');
+      const link = typeof c.html_url === 'string' && c.html_url.startsWith('https://github.com/') ? c.html_url : null;
+      const what = String(m.message || '').split(String.fromCharCode(10))[0].slice(0, 160);
+      return { id: c.sha, time: Number.isFinite(when) ? when : 0, what, meta: c.sha.slice(0, 7), link };
+    });
+  }
+
+  // 옛 판(커밋)의 글 — 저장은 여전히 지금 판(this.sha) 위에 새 커밋으로
+  async readAt(ref) {
+    if (!SHA_RE.test(String(ref))) throw fail('ref', '판 표시가 이상해 열지 않습니다.');
+    const r = await this.gh(`${this.contentsUrl()}?ref=${encodeURIComponent(ref)}`,
+      { headers: { Accept: 'application/vnd.github.raw+json' } });
+    if (r.status === 404) throw fail('missing', '그 판에는 이 덱 파일이 없습니다.');
+    if (!r.ok) throw await this.apiError(r, 'read');
+    return fromUtf8(new Uint8Array(await r.arrayBuffer()));
   }
 
   // force: 그 사이 바뀐 저장소의 판을 덮어쓴다(바뀐 판은 GitHub 기록에 남는다)
@@ -223,11 +266,21 @@ class LocalSource {
   get presentUrl() { return this.present || null; }
   get presenterUrl() { return null; }        // 발표자 보기는 갤러리(decks.json)의 덱만
   get historyUrl() { return null; }
+  // 판 기록 — 임시 저장본은 주소(출처)마다 따로라, slides edit 은 덱마다 늘 같은 포트를 먼저 쓴다(그 포트를 못 쓴 실행의
+  // 임시 저장본은 그 실행 안에서만 보인다)
+  get draftKey() { return `local:${this.path}`; }
+  get version() { return this.hash; }
+  // 다시 연 임시 저장본의 바탕 판(파일의 sha256) 위에 저장하게 — 그 뒤 바뀐 파일을 덮어쓰지 않고 충돌로 알린다
+  rebase(v) {
+    if (!/^[0-9a-f]{64}$/.test(String(v))) return false;
+    this.hash = String(v);
+    return true;
+  }
   hasToken() { return true; }
 
-  async api(method, body, headers) {
+  async api(method, body, headers, path = '/api/deck') {
     try {
-      return await fetch('/api/deck', {
+      return await fetch(path, {
         method, body, cache: 'no-store', credentials: 'omit',
         headers: { 'X-HSE-Key': this.key, ...(headers || {}) },
       });
@@ -238,7 +291,7 @@ class LocalSource {
 
   async read() {
     const r = await this.api('GET');
-    if (!r.ok) throw await this.error(r);
+    if (!r.ok) throw await this.error(r, 'read');
     const head = (k) => { try { return decodeURIComponent(r.headers.get(k) || ''); } catch (e) { return ''; } };
     this.hash = r.headers.get('X-HSE-Hash') || '';
     this.name = head('X-HSE-Name');
@@ -260,11 +313,31 @@ class LocalSource {
     return { message: `저장했습니다 — ${this.name}${kept}`, link: null };
   }
 
-  async error(r) {
+  // 저장 전 판(저장할 때마다 그 앞의 파일을 남긴 것, 새것부터) → [{id, time, what, meta}]
+  async versions() {
+    const r = await this.api('GET', undefined, undefined, '/api/history');
+    if (!r.ok) throw await this.error(r, 'read');
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    const items = j && Array.isArray(j.items) ? j.items : [];
+    return items.filter((v) => v && typeof v.id === 'string' && BACKUP_ID_RE.test(v.id)).map((v) => ({
+      id: v.id, time: Number(v.time) || 0, what: kb(Number(v.size) || 0),
+      meta: v.first ? '이번에 고치기 시작하기 전의 판' : '', link: null,
+    }));
+  }
+
+  async readAt(id) {
+    if (!BACKUP_ID_RE.test(String(id))) throw fail('ref', '판 이름이 이상해 열지 않습니다.');
+    const r = await this.api('GET', undefined, undefined, `/api/history/${encodeURIComponent(id)}`);
+    if (!r.ok) throw await this.error(r, 'read');
+    return fromUtf8(new Uint8Array(await r.arrayBuffer()));
+  }
+
+  async error(r, phase = 'save') {
     let msg = '';
     try { const j = await r.json(); msg = j && typeof j.error === 'string' ? j.error : ''; } catch (e) { /* 본문 없음 */ }
     if (r.status === 409) return fail('conflict', '편집기를 연 뒤에 파일이 다른 곳에서 바뀌었습니다.');
     if (r.status === 403) return fail('key', '이 PC 편집 서버가 요청을 거절했습니다 — slides edit 이 알려 준 주소로 다시 여세요.');
-    return fail('http', `저장하지 못했습니다(HTTP ${r.status}${msg ? ` — ${msg}` : ''}).`);
+    return fail('http', `${phase === 'save' ? '저장하지' : '읽지'} 못했습니다(HTTP ${r.status}${msg ? ` — ${msg}` : ''}).`);
   }
 }

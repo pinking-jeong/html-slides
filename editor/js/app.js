@@ -6,6 +6,7 @@ import { A, DeckModel, PLACE } from './deck.js';
 import { Arrange } from './arrange.js';
 import { Boxes } from './boxes.js';
 import { Canvas } from './canvas.js';
+import { deleteDraft, getDraft, listDrafts, putDraft } from './drafts.js';
 import { Formatter } from './format.js';
 import { History } from './history.js';
 import { LAYOUTS, makeSlide } from './layouts.js';
@@ -19,8 +20,15 @@ import { openSource } from './source.js';
 import { Tables } from './tables.js';
 import { writeTermsRaw } from './terms.js';
 import { Toc } from './toc.js';
+import { Versions } from './verui.js';
 
 const NOTES_MS = 700;
+// 저장하지 않은 고침을 이 브라우저에 남기는 때(임시 저장본) — 손을 멈추고 QUIET 뒤, 계속 고쳐도 MAX 마다. 큰 덱은 더 드물게
+const DRAFT_QUIET = 4000;
+const DRAFT_MAX = 30000;
+const BOOT_WAIT = 1500;          // 시작할 때 임시 저장본을 알리려고 브라우저 저장소를 기다리는 한도(멈춘 저장소에서 빈 화면이 길지 않게)
+// 판 기록에서 고른 판 — 주소의 draft(임시 저장본)·ref(저장소의 커밋)·backup(이 PC 의 저장 전 판)
+const VERSION_KEYS = { draft: '임시 저장본', ref: '저장소의 판', backup: '저장 전 판' };
 const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
   + '크기를 바꿉니다(Shift+누르기·빈 곳에서 끌기로 여럿을 골라 ‘배치 ▾’로 맞추기) · Esc 로 글 고치기를 마치면 Ctrl+C·V 로 상자를 '
   + '다른 장에 붙여 넣습니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · '
@@ -39,7 +47,7 @@ const els = {
   cfDownload: $('cfDownload'), cfOverwrite: $('cfOverwrite'),
   fBox: $('fBox'), bW: $('bW'), bH: $('bH'), bX: $('bX'), bY: $('bY'),
   addMenu: $('addMenu'), layMenu: $('layMenu'), layGrid: $('layGrid'),
-  picBtn: $('picBtn'), picFile: $('picFile'), masterBtn: $('masterBtn'), layoutBtn: $('layoutBtn'),
+  picBtn: $('picBtn'), picFile: $('picFile'), masterBtn: $('masterBtn'), layoutBtn: $('layoutBtn'), versions: $('versions'),
 };
 const boxEls = { text: $('txtBtn'), dup: $('boxDup'), del: $('boxDel'), copy: $('boxCopy'), paste: $('boxPaste') };
 const fmtEls = {
@@ -64,6 +72,21 @@ let side = null;
 let notesPending = null;
 let saving = false;
 let msgTimer = 0;
+// 임시 저장본(drafts.js) — 이 창의 줄 하나를 고쳐 쓴다. 남기기·지우기는 draftChain 으로 차례대로(저장 뒤 지우기가 그 앞에
+// 남기던 것보다 먼저 끝나지 않게)
+let draftTimer = 0;
+let draftId = 0;                 // 이 창의 임시 저장본(줄) 번호 — 처음 남길 때 생긴다
+let drafted = '';                // 마지막으로 남긴 때의 고침 표시(editSig) — 같으면 다시 글로 만들지 않는다
+let armed = '';                  // 남기려고 기다리는 고침 표시
+let draftFirst = 0;              // 아직 남기지 않은 첫 고침의 시각 — 계속 고쳐도 DRAFT_MAX 안에 남기게
+let draftSize = 0;               // 마지막으로 만든 글의 길이 — 큰 덱은 더 드물게 남긴다
+let draftFail = 0;               // 잇따라 남기지 못한 수 — 못 쓰는 브라우저(사생활 보호 창 등)에서는 점점 드물게 해 본다
+let draftChain = Promise.resolve();
+let inputRev = 0;                // 글·메모를 칠 때마다 — 되돌리기 칸이 생기기 전의 고침도 알게
+let restoredDraft = null;        // 임시 저장본을 다시 연 창이면 그 줄 {id, time} — 이 창에서 저장하면 그대로일 때 함께 지운다
+let currentVersion = '';         // 이 창이 아는 지금 판(연 판·저장한 판) — 다시 연 임시 저장본의 바탕 판으로 바꿔 둔 것과 따로
+let staleBase = false;           // 다시 연 임시 저장본이 지금 판보다 앞선 판에서 고친 것 — 저장할 때 바뀐 판을 덮어쓸지 묻는다
+let leaving = false;             // 판 기록으로 다른 판을 여는 중 — 고침은 임시 저장본에 남겼으니 떠날 때 묻지 않는다
 
 /* ---------- 알림 */
 
@@ -106,6 +129,8 @@ function rescue() {
 }
 
 const isDirty = () => !!hist && (hist.dirty || !!canvas.pending || !!notesPending);
+// 임시 저장본으로 남길 고침이 있나 — 판 기록에서 다시 연 판은 고치기 전에는 남기지 않는다(그 판은 이미 기록에 있다)
+const draftable = () => !!hist && ((hist.dirty && hist.topSeq() !== 0) || !!canvas.pending || !!notesPending);
 
 function refresh() {
   if (!model) return;
@@ -122,7 +147,126 @@ function refresh() {
   els.dirty.hidden = !dirty;
   els.save.disabled = saving;
   els.save.textContent = saving ? '저장하는 중…' : '저장';
+  els.versions.disabled = saving;       // 저장하는 사이 다른 판으로 떠나면 저장이 끊긴다
   document.title = `${dirty ? '● ' : ''}${source.title} — 덱 편집`;
+  draftSoon();
+}
+
+/* ---------- 임시 저장본·판 기록 */
+
+// 고침 표시 — 되돌리기 칸이 생기거나(seq) 되돌리거나(topSeq) 글·메모를 칠 때(inputRev) 바뀐다. 장만 넘길 때는 그대로라
+// 덱을 다시 글로 만들지 않는다.
+const editSig = () => `${hist.seq}:${hist.topSeq()}:${inputRev}`;
+
+// 저장하지 않은 고침을 이 브라우저에 남긴다(drafts.js) — 손을 멈추고 몇 초 뒤, 계속 고쳐도 30초마다. 창이 닫히거나
+// 브라우저가 멈춰도 판 기록에서 다시 연다.
+function draftSoon() {
+  if (!model || !hist || !draftable()) return;
+  const sig = editSig();
+  if (sig === drafted || sig === armed) return;          // 이미 남겼거나 남기려고 기다리는 고침
+  armed = sig;
+  const now = Date.now();
+  if (!draftFirst) draftFirst = now;
+  const mb = draftSize / 1048576;
+  const slow = 1 + Math.min(draftFail, 4);
+  const quiet = slow * Math.min(15000, DRAFT_QUIET + Math.max(0, mb - 1) * 1000);
+  const max = slow * (mb > 5 ? 2 * DRAFT_MAX : DRAFT_MAX);
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    draftTimer = 0;
+    // 큰 덱은 글로 만드는 데 시간이 걸린다 — 손이 쉴 때
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => draftNow(), { timeout: 2000 });
+    else draftNow();
+  }, Math.max(0, Math.min(quiet, draftFirst + max - now)));
+}
+
+/* 지금 고침을 이 창의 줄에 쓴다(draftChain 안에서만) — 남겼으면 true, 남길 고침이 없거나 남기지 못했으면 false.
+   force: 마지막으로 남긴 뒤 고친 것이 없어도 다시 쓴다(떠나기 전 — 그 사이 다른 창이 오래된 줄을 정리했을 수도 있다).
+   판 기록 창이 열린 동안에는 오래된 줄을 정리하지 않는다 — 창에 보이는 줄을 고르는 사이 그 줄이 지워지지 않게. */
+async function writeDraft(force) {
+  if (!model || !hist || !draftable()) return false;
+  const sig = editSig();
+  if (!force && draftId && sig === drafted) return true;
+  let text = '';
+  try {
+    text = model.serialize();
+  } catch (e) {
+    return false;
+  }
+  draftSize = text.length;
+  const id = await putDraft(source.draftKey, text, { slides: model.slides.length, base: source.version }, draftId,
+    !$('verDlg').open);
+  if (!id) {
+    draftFail += 1;
+    return false;
+  }
+  draftFail = 0;
+  draftId = id;
+  drafted = sig;
+  return true;
+}
+
+// 지금 고침을 임시 저장본으로 — 앞서 맡긴 남기기·지우기가 끝난 뒤에(draftChain)
+function draftNow(force = false) {
+  clearTimeout(draftTimer);
+  draftTimer = 0;
+  armed = '';
+  draftFirst = 0;
+  const job = draftChain.then(() => writeDraft(force));
+  draftChain = job.catch(() => false);
+  return job;
+}
+
+// 저장했으니 이 창의 임시 저장본과 이 창이 다시 연 임시 저장본을 지운다 — 다른 창·다른 때의 것은 그대로 두고, 다시 연
+// 줄도 그 뒤 다른 창이 고쳐 썼으면 둔다. 저장하는 사이에 더 고친 것이 있으면 이 창의 줄은 지우지 않고 지금 고침으로
+// 고쳐 쓴다(바탕 판은 방금 저장한 판) — 그 고침의 임시 저장본이 끊기지 않게. 고쳐 쓰지 못해도 지우지 않고 다시 해 본다.
+function dropDrafts() {
+  clearTimeout(draftTimer);
+  draftTimer = 0;
+  armed = '';
+  draftFirst = 0;
+  const gone = restoredDraft;
+  restoredDraft = null;
+  const job = draftChain.then(async () => {
+    if (gone) await deleteDraft(gone.id, gone.time);
+    if (draftable()) {
+      if (!(await writeDraft(true))) draftSoon();
+      return;
+    }
+    const id = draftId;
+    draftId = 0;
+    drafted = '';
+    if (id) await deleteDraft(id);
+  });
+  draftChain = job.catch(() => {});
+  return job;
+}
+
+// 주소의 판 표시(판 기록이 적는다)로 고른 판의 글 — {text, label, draftId?, base?}, 고른 판이 없으면 null.
+// 임시 저장본이면 그 줄 번호와 그 고침의 바탕 판(base)도 — 바탕 판이 지금 판과 다르면 저장할 때 묻게 한다.
+async function restoreFrom(params) {
+  for (const [k, label] of Object.entries(VERSION_KEYS)) {
+    const id = params.get(k);
+    if (!id) continue;
+    if (k === 'draft') {
+      const d = await getDraft(id);
+      if (!d || d.deck !== source.draftKey) {
+        throw new Error('그 임시 저장본을 찾지 못했습니다 — 저장해서 지웠거나 다른 브라우저의 것일 수 있습니다.');
+      }
+      return { text: d.text, label, draftId: d.id, time: d.time, base: typeof d.base === 'string' ? d.base : '' };
+    }
+    if ((k === 'ref') !== (source.kind === 'github')) continue;   // 저장소의 판은 갤러리에서, 저장 전 판은 이 PC 에서만
+    return { text: await source.readAt(id), label };
+  }
+  return null;
+}
+
+// 주소에서 판 표시를 지운다(저장한 뒤·고른 판을 열지 못했을 때) — 새로 고치면 지금 판이 열리게
+function dropVersionParams() {
+  const u = new URL(location.href);
+  if (!Object.keys(VERSION_KEYS).some((k) => u.searchParams.has(k))) return;
+  for (const k of Object.keys(VERSION_KEYS)) u.searchParams.delete(k);
+  try { history.replaceState(history.state, '', u.href); } catch (e) { /* 주소는 못 바꿔도 편집은 된다 */ }
 }
 
 /* ---------- 장 보기·바꾸기 */
@@ -358,6 +502,7 @@ function onNotesInput() {
   if (notesPending && notesPending.id !== id) flushNotes();
   if (!notesPending) notesPending = { id, before: model.notesOf(s), t: 0 };
   model.setNotes(s, els.notes.value);
+  inputRev += 1;
   clearTimeout(notesPending.t);
   notesPending.t = setTimeout(flushNotes, NOTES_MS);
   refresh();
@@ -454,6 +599,11 @@ async function save(force) {
   try {
     const r = await source.save(text, { force: !!force });
     hist.savedSeq = mark;                 // 저장하는 사이에 고친 것은 여전히 '저장 안 함'
+    // 저장했으니 이 창의 임시 저장본은 지우고 주소의 판 표시도 지운다(새로 고치면 지금 판)
+    staleBase = false;
+    currentVersion = source.version;
+    dropDrafts();
+    dropVersionParams();
     const note = placeholderNote(placeholderSlides());
     msg(`${r.message}${note}`, note ? 'warn' : 'ok', 12000, r.link ? { href: r.link, label: '커밋 보기' } : null);
   } catch (e) {
@@ -461,7 +611,7 @@ async function save(force) {
       if (e.forget) source.forgetToken();
       tokenError = e.message;
     } else if (e.code === 'conflict') {
-      conflict(text, e.message);
+      conflict(text, staleBase ? '이 임시 저장본을 고친 뒤에 저장된 덱이 바뀌었습니다.' : e.message);
     } else {
       msg(e.message, 'err', 15000);
     }
@@ -674,10 +824,15 @@ function bind() {
     onKey(e, t === els.notes, false);
   });
   window.addEventListener('beforeunload', (e) => {
-    if (!isDirty()) return;
+    if (leaving || !isDirty()) return;
     e.preventDefault();
     e.returnValue = '';
   });
+  // 뒤로 가기로 이 창이 되살아나면(bfcache) 떠날 때 다시 묻는다
+  window.addEventListener('pageshow', () => { leaving = false; });
+  // 창을 숨기거나 닫을 때 임시 저장본을 바로 남긴다(닫히는 중이면 다 쓰지 못할 수도 있다)
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') draftNow(); });
+  window.addEventListener('pagehide', () => { draftNow(); });
   // 덱 문서가 다른 주소로 바뀌면(자동 이동 설정 등) 편집을 멈춘다 — 그 문서는 이 덱이 아니다
   els.frame.addEventListener('load', () => fail('덱 문서가 다른 주소로 바뀌어 편집을 멈췄습니다(자동으로 넘어가는 설정이 있는 덱일 수 있습니다).', true));
   $('failDownload').addEventListener('click', rescue);
@@ -699,6 +854,16 @@ async function boot() {
     fail(e.message);
     return;
   }
+  // 판 기록에서 고른 판이면 그 판의 글로 연다 — 저장은 여전히 지금 판 위에(저장해야 그 판이 새 판이 된다)
+  let restored = null;
+  let restoreErr = '';
+  try {
+    restored = await restoreFrom(new URLSearchParams(location.search));
+  } catch (e) {
+    restoreErr = e.message;
+    dropVersionParams();
+  }
+  if (restored) source.text = restored.text;
   els.title.textContent = source.title;
   els.where.textContent = source.label;
   els.back.hidden = source.kind !== 'github';
@@ -711,11 +876,20 @@ async function boot() {
   try {
     await model.load(source.text, source.base);
   } catch (e) {
-    fail(e.message);
+    if (restored) dropVersionParams();      // 새로 고치면 지금 판이 열리게
+    fail(restored ? `고른 판을 열지 못했습니다 — ${e.message} 새로 고치면 지금 판을 엽니다.` : e.message);
     return;
   }
   source.text = '';
   hist = new History(applyOp);
+  currentVersion = source.version;
+  if (restored) {
+    hist.savedSeq = -1;                 // 다시 연 판은 ‘저장 안 함’ — 저장해야 그 판이 새 판이 된다
+    restoredDraft = restored.draftId ? { id: restored.draftId, time: restored.time } : null;
+    // 임시 저장본을 고친 뒤 저장된 덱이 바뀌었으면, 그 고침의 바탕 판 위에 저장하려 한다 — 저장할 때 바뀐 판을 모르고
+    // 덮어쓰지 않고 충돌로 알려 어떻게 할지 묻는다
+    staleBase = !!restored.base && restored.base !== source.version && source.rebase(restored.base);
+  }
   canvas = new Canvas({
     box: els.canvas, sheet: els.sheet, frame: els.frame, model,
     onCommit: (op) => {
@@ -727,7 +901,7 @@ async function boot() {
       if (side) side.changed();
     },
     onKey: (e, inText, field) => onKey(e, inText, true, field),
-    onInput: () => { if (pick) pick.place(); refresh(); if (side) side.changed(); },
+    onInput: () => { inputRev += 1; if (pick) pick.place(); refresh(); if (side) side.changed(); },
     onFit: () => { if (pick) pick.place(); },
   });
   pick = new Pick({
@@ -781,9 +955,40 @@ async function boot() {
     pushOp: (op) => { hist.push([op]); refresh(); },
   });
   side.attach();
+  // 판 기록 — 임시 저장본·저장소의 판·이 PC 의 저장 전 판을 골라 다시 연다
+  // 떠나기 전에 지금 고침을 임시 저장본으로 꼭 다시 쓴다 — 떠나도 되면(남겼거나 남길 고침이 없거나, 버리기로 했으면) true.
+  // 남기지 못했으면 false — 판 기록 창이 고침이 사라진다고 알리고 다시 묻는다. 버리기로 했으면 남기기를 기다리지 않는다.
+  const versions = new Versions({
+    source, msg, isDirty: draftable, current: () => currentVersion,
+    beforeLeave: async (discard) => {
+      settle();
+      const kept = draftNow(true);
+      leaving = !!discard || !draftable() || (await kept);
+      if (leaving) setTimeout(() => { leaving = false; }, 5000);   // 떠나지 못했으면 다시 묻게
+      return leaving;
+    },
+  });
+  versions.attach({ button: els.versions, dialog: $('verDlg') });
   bind();
   go(0);
   els.hint.textContent = HINT;
+  // 다시 연 판·임시 저장본 알림 — 편집기가 준비됐다고 알리기(ready) 전에. 다시 연 임시 저장본보다 나중에 남긴 것(이 창이
+  // 멈추기 전에 더 고친 것 등)이 있으면 함께 알린다. 브라우저 저장소가 멈추면 알림만 건너뛴다(BOOT_WAIT).
+  const drafts = () => Promise.race([listDrafts(source.draftKey), new Promise((r) => { setTimeout(() => r([]), BOOT_WAIT); })]);
+  const rd = restoredDraft;              // 기다리는 사이 저장하면 비워진다
+  if (restored) {
+    const newer = !!rd && (await drafts()).some((d) => d.id !== rd.id && d.time > rd.time);
+    const more = newer ? ' 이보다 나중에 남긴 임시 저장본도 있습니다 — 위쪽 ‘판 기록’에서 고를 수 있습니다.' : '';
+    msg(staleBase
+      ? `${objParticle(restored.label)} 열었습니다 — 이 고침을 한 뒤에 저장된 덱이 바뀌었습니다. 저장할 때 그 바뀐 판을 `
+        + `덮어쓸지 묻습니다(저장하지 않으면 아무것도 바뀌지 않습니다).${more}`
+      : `${objParticle(restored.label)} 열었습니다 — 저장해야 이 판이 새 판이 됩니다(저장하지 않으면 아무것도 바뀌지 않습니다).${more}`,
+    'warn', 15000);
+  } else if (restoreErr) {
+    msg(`고른 판을 열지 못해 지금 판을 열었습니다 — ${restoreErr}`, 'err', 15000);
+  } else if ((await drafts()).length) {
+    msg('이 덱의 임시 저장본이 있습니다 — 위쪽 ‘판 기록’에서 다시 열 수 있습니다.', 'warn', 12000);
+  }
   els.loading.hidden = true;
   els.app.classList.add('ready');
   // 시험용 손잡이 — 토큰 등 저장소 정보는 내놓지 않는다
@@ -796,6 +1001,7 @@ async function boot() {
     }),
     serialize: () => { settle(); return model.serialize(); },
     notes: () => model.slides.map((s) => model.notesOf(s)),
+    draft: () => draftNow(),
   });
 }
 

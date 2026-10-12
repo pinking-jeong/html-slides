@@ -64,6 +64,13 @@ export function subjParticle(word) {
   return word + (c >= 0 && c < 11172 && c % 28 ? '이' : '가');
 }
 
+// 시각(밀리초) → ‘2026-10-12 19:05’(이 컴퓨터의 시각)
+export function stamp(ms) {
+  const d = new Date(Number(ms) || 0);
+  const p = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // 받는 파일은 octet-stream 으로 — 브라우저가 text/html 덩어리를 이 출처의 문서로 열어 덱 스크립트를 돌리는 일이 없게
 export function download(text, name) {
   const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }));
