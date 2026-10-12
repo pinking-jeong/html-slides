@@ -6,7 +6,9 @@
    {t:'ins',   id, at, html, notes} 장 더함(되돌리면 지움)
    {t:'del',   id, at, html, notes} 장 지움(되돌리면 되살림)
    {t:'move',  id, from, to}        장 옮김
-   {t:'style', i, a, b}             덱 <style> 의 i 번째 글(전·후) — 모든 장에 한꺼번에(덱 색·글꼴 변수) */
+   {t:'style', i, a, b}             덱 <style> 의 i 번째 글(전·후) — 모든 장에 한꺼번에(덱 색·글꼴 변수)
+   {t:'terms', a, b}                색인에 더한 말(#deck-index 의 글, 전·후)
+   {t:'layout', a, b}               쪽 레이아웃의 설정·모양 글({json, css} 또는 null, 전·후) */
 
 export class History {
   constructor(apply, limit = 200) {

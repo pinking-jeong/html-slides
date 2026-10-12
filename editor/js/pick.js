@@ -2,12 +2,13 @@
    고른 상자 둘레의 틀·손잡이 8개는 편집기 문서(덱 화면 위)에 그린다 — 덱 문서에는 아무것도 넣지 않는다.
    - 빌더 상자: 틀(테두리)을 끌어 옮기고, 손잡이로 크기를 바꾼다(left·top·width·height px). 글이 없는 상자는 상자를 끌어도 옮긴다.
    - 흐름 덱의 그림: 손잡이로 크기만(자리는 흐름이 정한다). 그림의 모서리 손잡이는 가로세로 비율을 지킨다(Shift 로 풀기).
+   - 흐름 덱에 편집기가 넣은 글상자(data-hs-box — 장 위에 절대 배치): 빌더 상자처럼 옮기고 크기를 바꾼다.
    - 글을 고치는 중이 아니면 방향키로 1px(Shift 10px) 옮기고 Delete 로 지운다. 한 번 끈 것·잇달아 누른 방향키가 되돌리기 한 칸.
    끄는 동안은 화면 전체를 덮는 막을 깔아, 포인터가 덱 화면 밖으로 나가도 끌기가 이어진다. 끄는 동안 키는 쓰지 않는다(Esc 는
    끌기 취소) — 장을 넘기거나 되돌리면 끌던 상자와 되돌리기 기록이 엇갈린다. */
 
 import { textHosts } from './canvas.js';
-import { A } from './deck.js';
+import { A, FREE_BOX } from './deck.js';
 
 const MEDIA = 'img, svg, video, canvas, picture, [data-name="picture"]';   // 마지막은 새 장 레이아웃의 그림 자리
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -67,6 +68,8 @@ export class Pick {
       while (el && el.parentElement !== slide) el = el.parentElement ? el.parentElement.closest('.el') : null;
       if (el) return el;
     }
+    const free = t.closest(`[${FREE_BOX}]`);
+    if (free && free.parentElement === slide) return free;
     const m = t.closest(MEDIA);
     if (!m || !slide.contains(m)) return null;
     if (m.localName === 'svg') return outerSvg(m);
@@ -75,7 +78,10 @@ export class Pick {
     return m;
   }
 
-  movable(box) { return !!box && this.family === 'builder' && box.classList.contains('el') && box.parentElement === this.model.current; }
+  movable(box) {
+    if (!box || box.parentElement !== this.model.current) return false;
+    return (this.family === 'builder' && box.classList.contains('el')) || box.hasAttribute(FREE_BOX);
+  }
   isMedia(box) { return !!box && box.matches(MEDIA); }
   hasText(box) { return textHosts(this.model.current, this.family).some((h) => box.contains(h)); }
 

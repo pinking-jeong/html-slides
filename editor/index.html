@@ -115,9 +115,18 @@
         <label class="pos-field">위<input id="bY" type="number" min="-10000" max="10000" step="1"></label>
         <span class="unit">px</span>
       </span>
-      <span class="fend" data-fmt-free>
-        <button type="button" class="tb wide" id="picBtn" title="그림 파일을 넣습니다 — 그림 자리나 그림을 고른 채 누르면 그 자리에 바꿔 넣습니다">그림 넣기</button>
-        <input type="file" id="picFile" accept="image/png,image/jpeg,image/gif,image/webp,image/avif,image/svg+xml,image/bmp" hidden>
+    </div>
+    <div class="obar" id="obar" role="toolbar" aria-label="넣기·상자">
+      <button type="button" class="tb wide" id="txtBtn" title="지금 장에 새 글상자를 넣습니다 — 상자를 고른 채 누르면 그 아래에">＋ 글상자</button>
+      <button type="button" class="tb wide" id="picBtn" title="그림 파일을 넣습니다 — 그림 자리나 그림을 고른 채 누르면 그 자리에 바꿔 넣습니다">＋ 그림</button>
+      <input type="file" id="picFile" accept="image/png,image/jpeg,image/gif,image/webp,image/avif,image/svg+xml,image/bmp" hidden>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="tb wide" id="boxDup" title="고른 상자를 복제합니다 (Ctrl+D)" disabled>복제</button>
+      <button type="button" class="tb wide" id="boxCopy" title="고른 상자를 복사합니다 (Ctrl+C) — 다른 장에서 붙여 넣으면 같은 자리에" disabled>복사</button>
+      <button type="button" class="tb wide" id="boxPaste" title="복사한 상자를 이 장에 붙여 넣습니다 (Ctrl+V)" disabled>붙여 넣기</button>
+      <button type="button" class="tb wide danger" id="boxDel" title="고른 상자를 지웁니다 (Delete)" disabled>지우기</button>
+      <span class="fend">
+        <button type="button" class="tb wide" id="layoutBtn" title="쪽 레이아웃 — 쪽 번호·꼬리말·기관·학회 로고를 모든 장의 같은 자리에">쪽 레이아웃</button>
         <button type="button" class="tb wide" id="masterBtn" title="모든 장에 한꺼번에(슬라이드 마스터처럼) — 덱 색·글꼴, 역할별 글자 모양, 공통 상자, 배경색">모든 장에</button>
       </span>
     </div>
@@ -175,6 +184,69 @@
     <button class="btn ghost" type="button" id="cfDownload">편집본 HTML 받기</button>
     <button class="btn danger" type="button" id="cfOverwrite">덮어쓰기</button>
   </div>
+</dialog>
+
+<dialog class="dlg wide" id="pageDlg" aria-labelledby="pageTitle" tabindex="-1">
+  <form method="dialog" class="master pagel">
+    <h2 id="pageTitle">쪽 레이아웃 — 모든 장에 공통으로</h2>
+    <p class="small">쪽 번호·꼬리말·로고를 모든 장의 같은 자리에 둡니다. 새로 넣는 장에도 붙고, 저장할 때 쪽 번호를 새 차례로 다시 매깁니다.
+      로고 그림은 덱에 한 번만 들어갑니다. ‘모든 장에 적용’ 한 번이 되돌리기(Ctrl+Z) 한 칸입니다.</p>
+
+    <section class="m-sec" aria-labelledby="pPageH">
+      <h3 id="pPageH">쪽 번호</h3>
+      <div class="m-grid">
+        <label class="m-check"><input type="checkbox" id="pPageOn"> 쪽 번호 넣기</label>
+        <label>모양 <select id="pPageFmt"></select></label>
+        <label>자리 <select id="pPagePos"></select></label>
+        <label>크기 <input id="pPagePt" type="number" min="4" max="96" step="0.5" inputmode="decimal"> pt</label>
+        <label>색 <input id="pPageColor" type="color" value="#5f6b76"></label>
+        <label>시작 번호 <input id="pPageStart" type="number" min="0" max="999" step="1"></label>
+        <label class="m-check"><input type="checkbox" id="pPageCover"> 표지에도 넣기</label>
+      </div>
+      <p class="m-help" id="pPageSample"></p>
+      <div class="m-row"><span class="m-help" id="pOldPage"></span><button type="button" class="btn danger small" id="pOldPageDel" hidden>원래 쪽 번호 지우기</button></div>
+    </section>
+
+    <section class="m-sec" aria-labelledby="pFootH">
+      <h3 id="pFootH">꼬리말</h3>
+      <div class="m-grid">
+        <label class="m-check"><input type="checkbox" id="pFootOn"> 꼬리말 넣기</label>
+        <label class="p-wide">글 <input id="pFootText" type="text" maxlength="200" placeholder="예: 2026 추계학술대회 · 기관 이름" autocomplete="off"></label>
+        <label>자리 <select id="pFootPos"></select></label>
+        <label>크기 <input id="pFootPt" type="number" min="4" max="96" step="0.5" inputmode="decimal"> pt</label>
+        <label>색 <input id="pFootColor" type="color" value="#5f6b76"></label>
+        <label class="m-check"><input type="checkbox" id="pFootCover"> 표지에도 넣기</label>
+      </div>
+      <div class="m-row"><span class="m-help" id="pOldFoot"></span><button type="button" class="btn danger small" id="pOldFootDel" hidden>원래 꼬리말 지우기</button></div>
+    </section>
+
+    <section class="m-sec" aria-labelledby="pLogoH">
+      <h3 id="pLogoH">로고·그림</h3>
+      <p class="m-help">기관·학회 로고 등. 그림은 덱에 한 번만 들어가고 모든 장의 같은 자리에 보입니다(높이는 장의 px).</p>
+      <div class="p-logos" id="pLogos"></div>
+      <p class="m-help" id="pLogoNone">아직 넣은 그림이 없습니다.</p>
+      <div class="m-row">
+        <button type="button" class="btn" id="pLogoAdd">그림 더하기…</button>
+        <input type="file" id="pLogoFile" accept="image/png,image/jpeg,image/gif,image/webp,image/avif,image/svg+xml,image/bmp" hidden>
+      </div>
+    </section>
+
+    <section class="m-sec" aria-labelledby="pBoxH">
+      <h3 id="pBoxH">자리·글꼴</h3>
+      <div class="m-grid">
+        <label>가장자리 여백 가로 <input id="pMx" type="number" min="0" max="400" step="1"> px</label>
+        <label>세로 <input id="pMy" type="number" min="0" max="400" step="1"> px</label>
+        <label class="p-wide">글꼴 <select id="pFont"></select></label>
+      </div>
+    </section>
+
+    <p class="m-status" id="pStatus" role="status" aria-live="polite"></p>
+    <div class="dlg-acts">
+      <button type="button" class="btn ghost" id="pClear">모두 걷기</button>
+      <button type="button" class="btn primary" id="pApply">모든 장에 적용</button>
+      <button type="button" class="btn" id="pClose">닫기</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog class="dlg wide" id="masterDlg" aria-labelledby="masterTitle" tabindex="-1">

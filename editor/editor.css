@@ -151,11 +151,14 @@ a { color: var(--accent); }
 }
 .notes textarea:disabled { opacity: .6; }
 
-/* ---------- 서식 막대 */
-.fmt {
+/* ---------- 서식 막대 · 넣기·상자 막대 */
+.fmt, .obar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 12px;
   background: var(--surface); border-bottom: 1px solid var(--line);
 }
+.obar { padding-top: 4px; padding-bottom: 4px; }
+.tb.danger:not(:disabled) { color: var(--err); }
+.tb.danger:hover:not(:disabled) { background: var(--err-bg); border-color: var(--err); }
 .fmt select, .fmt input[type="number"] {
   height: 30px; border: 1px solid var(--line2); border-radius: 7px; background: var(--surface);
   color: var(--ink); font: inherit; font-size: 13px;
@@ -280,8 +283,27 @@ a { color: var(--accent); }
 .lt-b { fill: var(--muted); }
 .lt-p { fill: none; stroke: var(--muted); stroke-dasharray: 2 1.5; }
 
-/* ---------- 서식 막대 끝: 그림 넣기 · 모든 장에 */
+/* ---------- 넣기·상자 막대 끝: 쪽 레이아웃 · 모든 장에 */
 .fend { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+
+/* ---------- 쪽 레이아웃 */
+.pagel .p-wide { grid-column: span 2; }
+.pagel .p-wide input[type="text"], .pagel .p-wide select { flex: 1; min-width: 0; }
+.pagel input[type="text"] {
+  height: 28px; padding: 0 8px; border: 1px solid var(--line2); border-radius: 7px; background: var(--surface);
+  color: var(--ink); font: inherit; font-size: 13px;
+}
+.p-logos { display: grid; gap: 6px; }
+.p-logo {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface2);
+}
+.p-logo label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.p-logo input[type="text"] { flex: 1 1 160px; min-width: 120px; }
+.p-thumb {
+  width: 72px; height: 32px; object-fit: contain; flex: none; padding: 2px;
+  border: 1px solid var(--line2); border-radius: 6px; background: #FFFFFF;
+}
 
 /* ---------- 모든 장에 한꺼번에(마스터) */
 .dlg.wide { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
@@ -373,8 +395,9 @@ a { color: var(--accent); }
   .layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .side { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }
   .acts .btn { min-height: 30px; padding: 0 9px; font-size: 13px; }
-  .fmt { flex-wrap: nowrap; overflow-x: auto; }       /* 서식 막대는 한 줄로 두고 옆으로 밀어 본다 */
-  .fmt > * { flex: none; }
+  .fmt, .obar { flex-wrap: nowrap; overflow-x: auto; }       /* 막대는 한 줄로 두고 옆으로 밀어 본다 */
+  .fmt > *, .obar > * { flex: none; }
+  .pagel .p-wide { grid-column: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .status { transition: none; }

@@ -4,16 +4,17 @@
    Enter 는 문단을 나눌 수 있는 칸(빌더 글상자·목록)에서만 문단을 나누고, 그 밖에서는 줄바꿈(<br>)으로 바꾼다 —
    <p> 안에 <div> 가 생기면 저장한 뒤 다시 읽을 때 모양이 바뀌기 때문이다. 한글 입력과 부딪히지 않게 beforeinput 에서 바꾼다. */
 
-import { A, PLACE_TEXTS } from './deck.js';
+import { A, FREE_BOX, PLACE_TEXTS } from './deck.js';
 
 const COMMIT_MS = 700;
 const PAD = 28;
 const INLINE = new Set(['A', 'ABBR', 'B', 'BDI', 'BDO', 'BR', 'CITE', 'CODE', 'DATA', 'DEL', 'DFN', 'EM', 'FONT', 'I', 'IMG',
   'INS', 'KBD', 'MARK', 'Q', 'RP', 'RT', 'RUBY', 'S', 'SAMP', 'SMALL', 'SPAN', 'STRIKE', 'STRONG', 'SUB', 'SUP', 'TIME', 'U',
   'VAR', 'WBR']);
-// 그림 자리(새 장 레이아웃의 data-name="picture")는 글 칸이 아니라 그림을 받을 상자다
+// 그림 자리(새 장 레이아웃의 data-name="picture")는 글 칸이 아니라 그림을 받을 상자다. 쪽 레이아웃의 자리 상자(쪽 번호·꼬리말)는
+// 설정에서 다시 그리는 것이라 장에서 고치지 않는다(‘쪽 레이아웃’ 창에서 고친다).
 const SKIP = 'svg, math, script, style, template, button, input, select, textarea, canvas, video, audio, iframe, object, embed, noscript, '
-  + '[data-name="picture"]';
+  + '[data-name="picture"], [data-deck-layout]';
 
 const hasText = (el) => el.textContent.trim().length > 0;
 // 새 장의 안내 글만 든 칸 — 레이아웃이 안내 글을 넣으며 표(A.ph)를 단 칸이고, 문단·목록 항목이 모두 아직 그 안내 글.
@@ -43,6 +44,8 @@ export function textHosts(slide, family) {
   const visit = (el) => {
     for (const c of el.children) {
       if (c.matches(SKIP)) continue;
+      // 편집기가 넣은 글상자는 상자째 한 칸(그 안의 문단을 Enter 로 나눈다)
+      if (c.hasAttribute(FREE_BOX) && c.parentElement === slide) { out.push(c); continue; }
       if (isList(c) || (hasText(c) && inlineOnly(c))) { out.push(c); continue; }
       visit(c);
     }
@@ -166,7 +169,26 @@ export class Canvas {
   }
 
   allowsParagraph(host) {
-    return this.model.family === 'builder' ? host.classList.contains('tin') : host.tagName === 'UL' || host.tagName === 'OL';
+    if (this.model.family === 'builder') return host.classList.contains('tin');
+    return host.tagName === 'UL' || host.tagName === 'OL' || host.hasAttribute(FREE_BOX);
+  }
+
+  // 글 칸에 초점을 주고 글을 통째로 고른다(새 글상자의 안내 글을 바로 덮어 쓰게)
+  focusAll(host) {
+    if (!host || !host.isConnected) return;
+    try { this.doc.defaultView.focus(); } catch (e) { /* 초점을 못 옮겨도 고르기는 한다 */ }
+    host.focus({ preventScroll: true });
+    const sel = this.doc.getSelection();
+    const w = this.doc.createTreeWalker(host, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.data.trim() ? 1 : 3) });
+    const first = w.nextNode();
+    let last = first;
+    for (let n = first; n; n = w.nextNode()) last = n;
+    if (!sel || !first) return;
+    const r = this.doc.createRange();
+    r.setStart(first, 0);
+    r.setEnd(last, last.data.length);
+    sel.removeAllRanges();
+    sel.addRange(r);
   }
 
   onFocusIn(e) {
@@ -195,7 +217,8 @@ export class Canvas {
   onInputEv(e) {
     const host = this.hostOf(e.target);
     if (!host) return;
-    if (this.model.family === 'builder' && host.classList.contains('tin')) normalizeTin(host);
+    if (this.model.family === 'builder' && host.classList.contains('tin')) normalizeTin(host, 'pp');
+    else if (host.hasAttribute(FREE_BOX)) normalizeTin(host, '');
     if (!this.muted) this.touch();
   }
 
@@ -281,13 +304,14 @@ export class Canvas {
   }
 }
 
-// 빌더 글상자: 줄을 나누다 문단(.pp) 밖으로 떨어진 글·div 를 앞 문단의 모양을 따른 p.pp 로 감싼다.
-function normalizeTin(host) {
-  const proto = host.querySelector('p.pp');
+// 빌더 글상자(cls 'pp')·편집기가 넣은 흐름 덱 글상자(cls ''): 줄을 나누다 문단 밖으로 떨어진 글·div 를 앞 문단의 모양을 따른
+// 문단(p — 빌더는 p.pp)으로 감싼다.
+function normalizeTin(host, cls) {
+  const proto = host.querySelector(cls ? `p.${cls}` : 'p');
   const style = proto ? proto.getAttribute('style') : null;
   const make = () => {
     const p = host.ownerDocument.createElement('p');
-    p.className = 'pp';
+    if (cls) p.className = cls;
     if (style) p.setAttribute('style', style);
     return p;
   };
@@ -298,7 +322,7 @@ function normalizeTin(host) {
   let moved = false;
   for (const n of Array.from(host.childNodes)) {
     if (n.nodeType === 1 && n.tagName === 'P') {
-      if (!n.classList.contains('pp')) n.classList.add('pp');
+      if (cls && !n.classList.contains(cls)) n.classList.add(cls);
       if (style && !n.getAttribute('style')) n.setAttribute('style', style);
       wrap = null;
       continue;

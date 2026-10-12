@@ -58,6 +58,12 @@ export function objParticle(word) {
   return word + (c >= 0 && c < 11172 && c % 28 ? '을' : '를');
 }
 
+// 한국어 주격 조사 — 받침이 있으면 '이', 없으면 '가'
+export function subjParticle(word) {
+  const c = String(word).charCodeAt(String(word).length - 1) - 0xAC00;
+  return word + (c >= 0 && c < 11172 && c % 28 ? '이' : '가');
+}
+
 // 받는 파일은 octet-stream 으로 — 브라우저가 text/html 덩어리를 이 출처의 문서로 열어 덱 스크립트를 돌리는 일이 없게
 export function download(text, name) {
   const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }));

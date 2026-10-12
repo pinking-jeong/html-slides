@@ -7,7 +7,8 @@ import { plainText } from './deck.js';
 
 export const INDEX_ID = 'deck-index';
 const MAX = 400;                            // 너무 많으면 자주 나오는 것만
-const SKIP_ROLES = '[data-name="pageno"], [data-name="source"], [data-name="footer"], footer, .foot, .footer, .pageno';
+const SKIP_ROLES = '[data-name="pageno"], [data-name="source"], [data-name="footer"], footer, .foot, .footer, .pageno, '
+  + '[data-deck-layout]';
 const SKIP = `${SKIP_ROLES}, script, style, template`;
 const ACRONYM = /(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]+)?(?![A-Za-z0-9])/g;
 const EMPH = 'b, strong, mark, span[style]';

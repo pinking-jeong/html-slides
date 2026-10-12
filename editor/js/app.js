@@ -3,13 +3,14 @@
 
 import { download, h, objParticle } from './util.js';
 import { A, DeckModel, PLACE } from './deck.js';
+import { Boxes } from './boxes.js';
 import { Canvas } from './canvas.js';
 import { Formatter } from './format.js';
 import { History } from './history.js';
-import { altOf, checkPicture, naturalSize, PICTURE_WARN, placePicture, readPicture } from './insert.js';
 import { LAYOUTS, makeSlide } from './layouts.js';
 import { deckStyles } from './master.js';
 import { Master } from './masterui.js';
+import { PageLayout } from './pageui.js';
 import { Pick } from './pick.js';
 import { Side } from './side.js';
 import { openSource } from './source.js';
@@ -18,7 +19,8 @@ import { Toc } from './toc.js';
 
 const NOTES_MS = 700;
 const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
-  + '크기를 바꿉니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
+  + '크기를 바꿉니다 · Esc 로 글 고치기를 마치면 Ctrl+C·V 로 상자를 다른 장에 붙여 넣습니다 · 차례에서 장을 끌어 순서를 바꿉니다 · '
+  + 'PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
 const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 
 const $ = (id) => document.getElementById(id);
@@ -33,8 +35,9 @@ const els = {
   cfDownload: $('cfDownload'), cfOverwrite: $('cfOverwrite'),
   fBox: $('fBox'), bW: $('bW'), bH: $('bH'), bX: $('bX'), bY: $('bY'),
   addMenu: $('addMenu'), layMenu: $('layMenu'), layGrid: $('layGrid'),
-  picBtn: $('picBtn'), picFile: $('picFile'), masterBtn: $('masterBtn'),
+  picBtn: $('picBtn'), picFile: $('picFile'), masterBtn: $('masterBtn'), layoutBtn: $('layoutBtn'),
 };
+const boxEls = { text: $('txtBtn'), dup: $('boxDup'), del: $('boxDel'), copy: $('boxCopy'), paste: $('boxPaste') };
 const fmtEls = {
   bar: $('fmt'), font: $('fFont'), size: $('fSize'), sizes: $('fSizes'), smaller: $('fSmaller'), bigger: $('fBigger'),
   bold: $('fBold'), italic: $('fItalic'), under: $('fUnder'), strike: $('fStrike'), color: $('fColor'), mark: $('fMark'),
@@ -49,6 +52,8 @@ let fmt = null;
 let toc = null;
 let hist = null;
 let master = null;
+let layout = null;
+let boxes = null;
 let side = null;
 let notesPending = null;
 let saving = false;
@@ -130,6 +135,7 @@ function go(i, focusToc) {
   toc.select(model.cur, focusToc);
   showNotes();
   fmt.update();
+  if (boxes) boxes.update();
   refresh();
   if (side) side.onSlide();                // 찾기·색인 탭이면 이 장의 그 말을 형광으로
 }
@@ -155,6 +161,8 @@ function showBox(force = false) {
 }
 
 function rerender(i, focusToc) {
+  settle();
+  if (layout) layout.sync();               // 장마다의 쪽 레이아웃(쪽 번호 등)을 지금 차례로 — 설정에서 다시 그리는 것이라 기록하지 않는다
   toc.render();
   if (side) side.changed();                // 덱이 바뀌었다 — 색인·찾기 결과를 다시
   go(i, focusToc);
@@ -235,49 +243,6 @@ function onLayKey(e) {
   }
 }
 
-/* ---------- 그림 넣기 */
-
-// 고른 그림 자리·그림이 있으면 그 자리에 바꿔 넣고, 아니면 지금 장 가운데에. 넣은 그림을 골라 바로 크기를 바꾸게 한다.
-async function insertPicture(file) {
-  const bad = checkPicture(file);
-  if (bad) {
-    msg(bad, 'warn');
-    return;
-  }
-  const chosen = pick.box;
-  let url = '';
-  try {
-    url = await readPicture(file);
-  } catch (e) {
-    msg(e.message, 'err');
-    return;
-  }
-  const size = await naturalSize(url);
-  if (!size) {
-    msg('그림을 읽지 못했습니다 — 그림 파일이 아니거나 망가진 파일입니다.', 'warn');
-    return;
-  }
-  if (pick.drag) pick.end();                // 읽는 사이 상자를 끌기 시작했으면 그 끌기를 마치고 넣는다
-  const slide = model.current;              // 읽는 사이 장을 넘겼으면 지금 장에(고른 자리는 그 장에 있을 때만)
-  let target = chosen && chosen.isConnected && slide.contains(chosen) && chosen.matches('[data-name="picture"], img, picture')
-    ? chosen : null;
-  // <picture> 안의 그림을 바꾸면 <source> 가 여전히 옛 그림을 보인다 — <picture> 째 바꾼다
-  if (target && target.parentElement && target.parentElement.localName === 'picture' && model.family !== 'builder') {
-    target = target.parentElement;
-  }
-  let img = null;
-  canvas.change(() => { img = placePicture(model, slide, url, size, altOf(file.name), target); });
-  pick.select(img);
-  if (!img.complete) img.addEventListener('load', () => pick.place(), { once: true });
-  if (file.size > PICTURE_WARN) {
-    msg(`그림을 넣었습니다 — 그림(${(file.size / 1048576).toFixed(1)} MB)이 덱 파일 안에 들어가 파일도 그만큼 커집니다. `
-      + '되도록 줄여서 넣으세요.', 'warn', 12000);
-  } else {
-    msg(model.family === 'builder' ? '그림을 넣었습니다 — 테두리를 끌어 옮기고 손잡이로 크기를 바꿉니다.'
-      : '그림을 넣었습니다 — 손잡이로 크기를 바꿉니다.');
-  }
-}
-
 function duplicateSlide() {
   settle();
   const src = model.current;
@@ -341,6 +306,7 @@ function applyOp(op, dir) {
     const st = deckStyles(model)[op.i];
     if (st) st.textContent = fwd ? op.b : op.a;
   } else if (op.t === 'terms') writeTermsRaw(model.doc, fwd ? op.b : op.a);
+  else if (op.t === 'layout') layout.undoOp(op, fwd);
   else if (op.t === 'notes') { if (slide()) model.setNotes(slide(), fwd ? op.b : op.a); }
   else if (op.t === 'title') { if (slide()) model.setTitle(slide(), fwd ? op.b : op.a); }
   else if (op.t === 'move') {
@@ -362,7 +328,8 @@ function travel(dir) {
   let i = model.indexOfId(last.id);
   if (i < 0) i = Math.min(Number.isInteger(last.at) ? last.at : model.cur, model.slides.length - 1);
   rerender(i);
-  master.refresh();                       // 모든 장에 대화창이 열려 있으면 보이는 값을 덱의 지금 값으로
+  master.refresh();                       // 모든 장에·쪽 레이아웃 창이 열려 있으면 보이는 값을 덱의 지금 값으로
+  layout.refresh();
   msg(dir === 'undo' ? '되돌렸습니다.' : '다시 했습니다.', '', 2500);
 }
 
@@ -568,12 +535,23 @@ function onKey(e, inText, fromFrame, field = false) {
     else fmt.step(e.code === 'BracketRight' ? 1 : -1);
     return;
   }
+  // Ctrl+D 복제 — 글을 고치는 중에도(글에서는 쓸 일이 없는 키다). 노트·덱의 입력 칸에서는 쓰지 않는다.
+  if (mod && !e.shiftKey && k === 'd' && !(inText && (!fromFrame || field))) {
+    e.preventDefault();
+    boxes.duplicate();
+    return;
+  }
   if (inText) {
     if (e.key === 'Escape') {
       e.preventDefault();
       if (fromFrame && !field) canvas.stop();
       else e.target.blur();
     }
+    return;
+  }
+  // 고른 상자 복사·잘라내기·붙여 넣기(Ctrl+C·X·V) — 글을 고치는 중이 아닐 때
+  if (boxes.key(e)) {
+    e.preventDefault();
     return;
   }
   // 고른 상자가 있으면 방향키는 상자를 옮기고 Delete 는 상자를 지운다
@@ -603,13 +581,17 @@ function bind() {
   };
   document.addEventListener('pointerdown', outside, true);
   model.doc.addEventListener('pointerdown', () => closeLayouts(false), true);
+  // 막대 단추는 누를 때 초점을 옮기지 않는다(덱의 선택을 지키려고) — 노트 칸에 치던 글이 기록을 기다리는 채면 이어지는 상자·
+  // 서식 고치기의 ‘고치기 전’ 사본에 섞여 되돌리기가 어긋난다. 막대를 누르는 순간 노트를 먼저 기록한다.
+  for (const bar of [fmtEls.bar, $('obar')]) bar.addEventListener('pointerdown', flushNotes, true);
   els.picBtn.addEventListener('click', () => els.picFile.click());
   els.picFile.addEventListener('change', () => {
     const file = els.picFile.files && els.picFile.files[0];
     els.picFile.value = '';               // 같은 파일을 다시 골라도 change 가 나게
-    if (file) insertPicture(file);
+    if (file) boxes.picture(file);
   });
   els.masterBtn.addEventListener('click', () => master.open());
+  els.layoutBtn.addEventListener('click', () => layout.open());
   els.dup.addEventListener('click', duplicateSlide);
   els.del.addEventListener('click', () => deleteSlide());
   els.up.addEventListener('click', () => moveSlide(model.cur, model.cur - 1));
@@ -637,12 +619,14 @@ function bind() {
       const typing = (t instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'color', 'range'].includes(t.type))
         || t instanceof HTMLTextAreaElement;
       const num = t instanceof HTMLInputElement && t.type === 'number';
-      const inFmt = t instanceof Element && t.closest('#fmt');
-      const inMaster = $('masterDlg').open
-        && (t === document.body || t === document.documentElement || (t instanceof Element && t.closest('#masterDlg')));
+      const inFmt = t instanceof Element && t.closest('#fmt, #obar');
+      const loose = t === document.body || t === document.documentElement;
+      const inMaster = $('masterDlg').open && (loose || (t instanceof Element && t.closest('#masterDlg')));
+      // 쪽 레이아웃 창은 글 칸(꼬리말 글·그림 설명)·숫자 칸 안이 아니면 편집기의 되돌리기
+      const inPage = $('pageDlg').open && (loose || (t instanceof Element && t.closest('#pageDlg')));
       const inPanel = t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind');
-      const otherDialog = Array.from(document.querySelectorAll('dialog[open]')).some((d) => d.id !== 'masterDlg');
-      if (k === 's' ? !otherDialog : (inFmt || (inMaster && !num) || (inPanel && !typing))) {
+      const otherDialog = Array.from(document.querySelectorAll('dialog[open]')).some((d) => d.id !== 'masterDlg' && d.id !== 'pageDlg');
+      if (k === 's' ? !otherDialog : (inFmt || (inMaster && !num) || (inPage && !typing) || (inPanel && !typing))) {
         onKey(e, false, false);
         return;
       }
@@ -712,15 +696,29 @@ async function boot() {
   });
   pick = new Pick({
     layer: $('pickLayer'), bar: fmtEls.bar, canvas, model,
-    onSelect: () => { showBox(); if (fmt) fmt.update(); },
+    onSelect: () => { showBox(); if (fmt) fmt.update(); if (boxes) boxes.update(); },
     onPlace: () => showBox(),
   });
-  // 자리 칸(왼쪽·위)은 상자를 옮길 수 있는 빌더 덱에만 — 덱마다 한 번 정해 서식 막대의 폭이 바뀌지 않게
-  for (const label of els.fBox.querySelectorAll('.pos-field')) label.hidden = model.family !== 'builder';
+  // 자리 칸(왼쪽·위)은 옮길 수 있는 상자(빌더 상자·흐름 덱에 넣은 글상자)를 골랐을 때만 보인다(showBox) — 칸은 늘 자리를
+  // 차지해 서식 막대의 폭이 바뀌지 않는다
   canvas.attach();
   pick.attach();
   fmt = new Formatter({ els: fmtEls, canvas, model, pick, msg });
   fmt.attach();
+  boxes = new Boxes({ model, canvas, pick, fmt, msg, els: boxEls });
+  boxes.attach();
+  // 쪽 레이아웃(쪽 번호·꼬리말·로고) — 장마다의 자리 상자는 설정에서 그리고, 저장할 사본에는 새 차례로 다시 그린다
+  layout = new PageLayout({
+    model, hist, msg, settle, commitSlides, fonts: () => fmt.deckFonts,
+    after: () => {
+      const box = pick.box;
+      rerender(model.cur);
+      if (box && box.isConnected && model.current.contains(box)) pick.select(box);
+    },
+  });
+  layout.attach();
+  model.onSerialize = (root, slides) => layout.renderInto(slides);
+  layout.sync();
   // 모든 장에 한꺼번에 — 적용할 때마다 차례·캔버스를 새로 그리되, 고른 상자가 남아 있으면 다시 고른다(이어서 ‘모두 지우기’ 등)
   master = new Master({
     model, hist, pick, msg, settle,
@@ -751,6 +749,7 @@ async function boot() {
       cur: model.cur, n: model.slides.length, family: model.family, notesMode: model.notesMode, size: { ...model.size },
       titles: model.slides.map((s) => model.titleOf(s)), dirty: isDirty(), undo: hist.undoStack.length,
       redo: hist.redoStack.length, saving, scale: canvas.scale, box: pick.box ? pick.geom(pick.box) : null,
+      clip: !!boxes.clip,
     }),
     serialize: () => { settle(); return model.serialize(); },
     notes: () => model.slides.map((s) => model.notesOf(s)),

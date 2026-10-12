@@ -6,7 +6,8 @@
    4) 배경색: 모든 장(첫 장 빼기 선택)의 배경을 한 색으로, 또는 장마다 넣은 배경색을 걷는다.
    어느 것이든 되돌리기 한 칸 — 바뀐 장마다 사본(edit)과 바뀐 스타일 글(style)을 한 묶음으로 넣는다(masterui.js). */
 
-import { A, retagPages } from './deck.js';
+import { A, FREE_BOX, retagPages } from './deck.js';
+import { anchorSlide } from './pagelayout.js';
 import { toPx, toPt, hexOf, firstFamily, FONTS } from './format.js';
 
 // 빌더 덱 상자 이름 → 보일 이름
@@ -33,8 +34,10 @@ const DECL_RE = /(--[A-Za-z0-9_-]+)\s*:\s*([^;}]*)/g;
 
 // 덱의 <style> 가운데 편집기가 넣지 않았고 장 안에 들지 않은 것 — 그 차례가 되돌리기 기록(style)의 번호. 장 안의
 // <style>(SVG 그림 등)은 장 사본(edit)이 되살리고, 상자를 복사·삭제해 그런 <style> 이 늘거나 줄어도 번호가 밀리지 않게 뺀다.
+// 쪽 레이아웃의 모양(#deck-layout-css)도 뺀다 — 그것은 쪽 레이아웃이 통째로 다시 쓰고, 생기거나 없어져도 번호가 밀리지 않게.
 export function deckStyles(model) {
-  return Array.from(model.doc.querySelectorAll(`style:not([${A.ui}])`)).filter((el) => !model.slides.some((s) => s.contains(el)));
+  return Array.from(model.doc.querySelectorAll(`style:not([${A.ui}]):not(#deck-layout-css)`))
+    .filter((el) => !model.slides.some((s) => s.contains(el)));
 }
 
 // 주석을 같은 길이의 빈칸으로 — 주석 안의 선언은 세지 않고, 찾은 자리(번호)는 원래 글과 같게
@@ -287,6 +290,8 @@ export function copyToAll(model, box, skipFirst) {
     unmark(c);
     model.renameIds(c);
     retagPages(c, home.getAttribute(A.pn), s.getAttribute(A.pn));
+    // 흐름 덱의 글상자(장 위에 절대 배치)는 그 장을 자리의 기준으로 — 아니면 바깥 요소를 기준으로 엉뚱한 곳에 놓인다
+    if (c.hasAttribute(FREE_BOX)) anchorSlide(model, s);
     s.append(c);
     changed.push(s);
   });

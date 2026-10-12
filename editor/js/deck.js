@@ -61,6 +61,8 @@ export const PLACE = {
   title: '제목을 입력하세요', kicker: '소제목', slide: '새 장', body: '내용을 입력하세요', picture: '그림 자리 — 고른 뒤 ‘그림 넣기’',
 };
 export const PLACE_TEXTS = new Set([PLACE.title, PLACE.kicker, PLACE.body]);
+// 편집기가 흐름 덱에 넣은 글상자(장 위에 절대 배치) — 저장해도 남는 표라 다시 열어도 옮기고 크기를 바꿀 수 있다
+export const FREE_BOX = 'data-hs-box';
 const NO_NOTES_JSON = Symbol('no-notes');
 
 // 저장할 때 원본과 같은 모양으로 되돌릴 것 — 손대지 않은 줄까지 바뀐 것으로 보이지 않게.
@@ -273,16 +275,25 @@ function rewritePage(el, k, n) {
   }
 }
 
-// 장 안에서 글 전체가 정확히 'k / N'(처음 번호·처음 장 수)인 가장 작은 요소만 다시 매긴다 — 문장 속 숫자는 두지 않는다.
-function renumberSlide(slide, from, to) {
-  if (!from || (from.k === to.k && from.n === to.n)) return;
+// 장 안에서 글 전체가 정확히 'k / N'(from — 처음 번호·처음 장 수)인 가장 작은 요소들. 문장 속 숫자는 들지 않는다.
+function pageEls(slide, from) {
+  if (!from) return [];
   const hit = (e) => {
     if (e.childElementCount > 4) return false;
     const m = PAGE_RE.exec(e.textContent);
     return !!m && Number(m[1]) === from.k && Number(m[2]) === from.n;
   };
   const cands = Array.from(slide.querySelectorAll('*')).filter(hit);
-  for (const e of cands) if (!cands.some((o) => o !== e && e.contains(o))) rewritePage(e, to.k, to.n);
+  return cands.filter((e) => !cands.some((o) => o !== e && e.contains(o)));
+}
+
+// 장 안의 쪽 번호 요소(덱에 원래 있던 'k / N') — 그 장의 번호표(A.pn)와 같은 글만
+export const pageNumberEls = (slide) => pageEls(slide, parsePn(slide.getAttribute(A.pn)));
+
+// 장 안에서 글 전체가 정확히 'k / N'(처음 번호·처음 장 수)인 가장 작은 요소만 다시 매긴다 — 문장 속 숫자는 두지 않는다.
+function renumberSlide(slide, from, to) {
+  if (!from || (from.k === to.k && from.n === to.n)) return;
+  for (const e of pageEls(slide, from)) rewritePage(e, to.k, to.n);
   const label = slide.getAttribute('aria-label');
   const m = label ? PAGE_RE.exec(label) : null;
   if (m && Number(m[1]) === from.k && Number(m[2]) === from.n) {
@@ -325,6 +336,7 @@ export class DeckModel {
     this.sep = '';
     this.seq = 0;
     this.keySeq = 0;
+    this.onSerialize = null;      // (사본 문서, 새 차례의 장들) — 저장할 사본에서 장 차례에 매인 것을 더 고칠 때(쪽 레이아웃)
   }
 
   /* ---------- 불러오기 */
@@ -693,6 +705,8 @@ export class DeckModel {
       if (this.family === 'builder') this.syncBuilderSlide(s, i);
     });
     if (this.family === 'builder') this.syncBuilderDeck(root, slides);
+    // 장 차례에 매인 것을 더 고칠 곳(쪽 레이아웃의 쪽 번호 등) — 저장할 사본의 장들을 새 차례로 받는다
+    if (this.onSerialize) this.onSerialize(root, slides);
     for (const el of [root, ...root.querySelectorAll('*')]) {
       for (const a of Array.from(el.attributes)) if (a.name.startsWith(P)) el.removeAttribute(a.name);
     }

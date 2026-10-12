@@ -53,7 +53,7 @@ function place(el, r) {
 
 // 글상자의 글자 크기(첫 문단의 계산된 값)
 function fontOf(model, box) {
-  const p = box.querySelector('.tin p, .tin') || box;
+  const p = box.querySelector('.tin p') || box.querySelector('.tin') || box;    // 문단이 먼저(선택자 목록은 문서 차례로 바깥 .tin 을 돌려준다)
   return parseFloat(model.win.getComputedStyle(p).fontSize) || 0;
 }
 
@@ -197,13 +197,15 @@ function builderSlide(model, kind, src) {
 
 /* ---------- 흐름 덱 */
 
-// 흐름 덱의 본문 글 모양 — 장들의 글(제목·머리말·꼬리말·표·코드 밖) 가운데 글자 수로 가장 많이 쓴 크기·줄 간격·색.
+// 흐름 덱의 본문 글 모양 — 장들(slides — 기본은 모든 장)의 글(제목·머리말·꼬리말·표·코드 밖) 가운데 글자 수로 가장 많이 쓴
+// 크기·줄 간격·색.
 // 덱 CSS 가 클래스에만 크기를 걸면 새 장의 맨 <p>·<li> 는 브라우저 기본(16px)이라 장 안에서 아주 작게 보인다.
-const NOT_BODY = 'h1, h2, h3, h4, h5, h6, header, footer, .foot, .footer, .eyebrow, .kicker, .pageno, pre, code, table, figcaption, button, nav, svg';
+const NOT_BODY = 'h1, h2, h3, h4, h5, h6, header, footer, .foot, .footer, .eyebrow, .kicker, .pageno, pre, code, table, figcaption, button, nav, svg, '
+  + '[data-deck-layout]';
 
-function flowBodyLook(model) {
+export function flowBodyLook(model, slides = model.slides) {
   const tally = new Map();
-  for (const s of model.slides) {
+  for (const s of slides) {
     const w = model.doc.createTreeWalker(s, 4);
     for (let t = w.nextNode(); t; t = w.nextNode()) {
       const len = t.data.trim().length;
