@@ -10,6 +10,7 @@
 import { textHosts } from './canvas.js';
 import { A, FREE_BOX, GROUP, newGroupId, PLACE, retagPages } from './deck.js';
 import { altOf, checkPicture, naturalSize, PICTURE_WARN, placePicture, readPicture } from './insert.js';
+import { bigPicture, fmtBytes, shrinkFile } from './pictures.js';
 import { flowBodyLook } from './layouts.js';
 import { anchorSlide } from './pagelayout.js';
 
@@ -436,10 +437,19 @@ export class Boxes {
       this.msg(e.message, 'err');
       return;
     }
-    const size = await naturalSize(url);
+    let size = await naturalSize(url);
     if (!size) {
       this.msg('그림을 읽지 못했습니다 — 그림 파일이 아니거나 망가진 파일입니다.', 'warn');
       return;
+    }
+    // 장 크기의 두 배(2560×1440)보다 큰 사진·그림은 그 안으로 줄이고, 크기는 맞아도 파일이 무거우면(1.5 MB 넘게)
+    // 같은 크기로 더 작게 다시 담는다 — 덱 파일이 쓸데없이 커지지 않게. 큰 사진은 몇 초 걸리므로 먼저 알린다.
+    if (bigPicture(file, size)) this.msg('그림이 커서 줄이는 중…', '', 30000);
+    const small = await shrinkFile(file, size);
+    const resized = !!small && (small.w !== size.w || small.h !== size.h);
+    if (small) {
+      url = small.url;
+      size = { w: small.w, h: small.h };
     }
     if (this.pick.drag) this.pick.end();      // 읽는 사이 상자를 끌기 시작했으면 그 끌기를 마치고 넣는다
     const slide = this.model.current;         // 읽는 사이 장을 넘겼으면 지금 장에(고른 자리는 그 장에 있을 때만)
@@ -458,12 +468,16 @@ export class Boxes {
     if (!img.complete) img.addEventListener('load', () => this.pick.place(), { once: true });
     this.update();
     const note = kept ? ' 고른 그림은 잠겨 있어 바꾸지 않고 따로 넣었습니다.' : '';
-    if (file.size > PICTURE_WARN) {
-      this.msg(`그림을 넣었습니다 — 그림(${(file.size / 1048576).toFixed(1)} MB)이 덱 파일 안에 들어가 파일도 그만큼 커집니다. `
-        + `되도록 줄여서 넣으세요.${note}`, 'warn', 12000);
+    const shrunk = !small ? '' : resized
+      ? ` 그림이 커서 ${small.w}×${small.h} 크기로 줄여 넣었습니다(${fmtBytes(file.size)} → ${fmtBytes(small.size)}).`
+      : ` 그림 파일이 커서 더 작게 다시 담아 넣었습니다(${fmtBytes(file.size)} → ${fmtBytes(small.size)}).`;
+    const bytes = small ? small.size : file.size;
+    if (bytes > PICTURE_WARN) {
+      this.msg(`그림을 넣었습니다 — 그림(${(bytes / 1048576).toFixed(1)} MB)이 덱 파일 안에 들어가 파일도 그만큼 커집니다. `
+        + `되도록 줄여서 넣으세요.${shrunk}${note}`, 'warn', 12000);
     } else {
       this.msg(`${this.model.family === 'builder' ? '그림을 넣었습니다 — 테두리를 끌어 옮기고 손잡이로 크기를 바꿉니다.'
-        : '그림을 넣었습니다 — 손잡이로 크기를 바꿉니다.'}${note}`, note ? 'warn' : '');
+        : '그림을 넣었습니다 — 손잡이로 크기를 바꿉니다.'}${shrunk}${note}`, note ? 'warn' : '', shrunk ? 9000 : 6000);
     }
   }
 }

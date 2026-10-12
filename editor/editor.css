@@ -362,6 +362,7 @@ a { color: var(--accent); }
   background: var(--warn-bg); color: var(--warn-ink);
 }
 .dlg .v-ask p { margin: 0 0 8px; font-weight: 600; }
+#picList .p-thumb { width: 64px; height: 36px; }
 
 /* ---------- 왼쪽 칸 탭: 차례 · 색인 · 찾기 */
 .side-tabs { display: flex; align-items: center; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); }

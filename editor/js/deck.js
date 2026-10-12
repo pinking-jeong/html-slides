@@ -202,8 +202,10 @@ class Assets {
     this.list = [];
     this.re = new RegExp(`hse-asset:(\\d+):${this.salt}`, 'g');
   }
+  // 길이는 찾은 뒤에 본다 — '{512,}' 꼴로 찾으면 몇 MB 넘는 그림에서 V8 정규식이 스택을 넘쳐(RangeError) 되돌리기가 멈춘다
   pack(html) {
-    return html.replace(/data:[\w.+-]{1,40}\/[\w.+-]{1,80}(?:;[\w.+-]{1,40}=[\w.+-]{1,80}){0,4};base64,[A-Za-z0-9+/=]{512,}/g, (m) => {
+    return html.replace(/data:[\w.+-]{1,40}\/[\w.+-]{1,80}(?:;[\w.+-]{1,40}=[\w.+-]{1,80}){0,4};base64,[A-Za-z0-9+/=]+/g, (m) => {
+      if (m.length - m.indexOf(',') - 1 < 512) return m;
       let n = this.byData.get(m);
       if (n === undefined) {
         n = this.list.length;

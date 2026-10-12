@@ -179,6 +179,7 @@
       <span class="fend">
         <button type="button" class="tb wide" id="layoutBtn" title="쪽 레이아웃 — 쪽 번호·꼬리말·기관·학회 로고를 모든 장의 같은 자리에">쪽 레이아웃</button>
         <button type="button" class="tb wide" id="masterBtn" title="모든 장에 한꺼번에(슬라이드 마스터처럼) — 덱 색·글꼴, 역할별 글자 모양, 공통 상자, 배경색">모든 장에</button>
+        <button type="button" class="tb wide" id="picShrinkBtn" title="그림 줄이기 — 장 안의 그림을 장에 보이는 크기에 맞게 줄여 덱 파일을 가볍게">그림 줄이기</button>
       </span>
     </div>
     <div class="canvas" id="canvas">
@@ -355,6 +356,21 @@
     <p class="m-status" id="mStatus" role="status" aria-live="polite"></p>
     <div class="dlg-acts"><button type="button" class="btn" id="mClose">닫기</button></div>
   </form>
+</dialog>
+
+<dialog class="dlg wide" id="picDlg" aria-labelledby="picTitle" tabindex="-1">
+  <div class="master">
+    <h2 id="picTitle">그림 줄이기 — 덱 파일 가볍게</h2>
+    <p class="small">장 안의 그림을 장에 보이는 크기의 두 배(고해상도 화면·프로젝터에서도 선명하게)로 줄입니다. 그림은 덱 파일 안에
+      그대로 두므로 ‘HTML 받기’로 받은 파일에도 함께 들어 있습니다. 한 번 줄인 것이 되돌리기(Ctrl+Z) 한 칸입니다.</p>
+    <p class="m-help" id="picSum"></p>
+    <ul class="v-list" id="picList"></ul>
+    <p class="m-status" id="picStatus" role="status" aria-live="polite"></p>
+    <div class="dlg-acts">
+      <button type="button" class="btn primary" id="picAll">줄일 수 있는 것 모두 줄이기</button>
+      <button type="button" class="btn" id="picClose">닫기</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog class="dlg wide" id="verDlg" aria-labelledby="verTitle" tabindex="-1">

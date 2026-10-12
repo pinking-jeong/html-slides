@@ -13,6 +13,7 @@ import { LAYOUTS, makeSlide } from './layouts.js';
 import { deckStyles } from './master.js';
 import { Master } from './masterui.js';
 import { PageLayout } from './pageui.js';
+import { Pictures } from './picui.js';
 import { Painter } from './painter.js';
 import { Pick } from './pick.js';
 import { Side } from './side.js';
@@ -946,6 +947,9 @@ async function boot() {
     },
   });
   master.attach();
+  // 그림 줄이기 — 장 안의 그림을 장에 보이는 크기의 두 배로(한 번이 되돌리기 한 칸)
+  const pictures = new Pictures({ model, msg, settle, commitSlides });
+  pictures.attach({ button: $('picShrinkBtn'), dialog: $('picDlg') });
   fillLayouts();
   toc = new Toc({ list: els.toc, model, onGo: go, onMove: moveSlide, onDelete: deleteSlide, onRename: renameSlide });
   toc.render();
