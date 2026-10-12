@@ -165,15 +165,15 @@ export class Formatter {
   }
 
   // 서식을 입힐 곳 → {parts: [{host, range}], from: 선택에서 왔으면 그 선택}. 캐럿만 있으면 그 글 칸 전체,
-  // 상자를 골랐으면(그 안에 선택이 없을 때) 상자 안의 글 칸 모두.
+  // 상자를 골랐으면(그 안에 선택이 없을 때) 고른 상자(여럿이면 모두) 안의 글 칸 모두.
   targets() {
-    const box = this.pick && this.pick.box;
+    const boxes = this.pick ? this.pick.boxes : [];
     const cur = this.current();
-    if (cur && (!box || box.contains(cur.host))) {
+    if (cur && (!boxes.length || boxes.some((b) => b.contains(cur.host)))) {
       return { parts: [cur.range.collapsed ? { host: cur.host, range: this.whole(cur.host) } : cur], from: cur };
     }
-    if (box) {
-      const hosts = textHosts(this.model.current, this.model.family).filter((h) => box.contains(h) || h.contains(box));
+    if (boxes.length) {
+      const hosts = textHosts(this.model.current, this.model.family).filter((h) => boxes.some((b) => b.contains(h) || h.contains(b)));
       return { parts: hosts.filter((h) => this.canvas.hostOf(h)).map((host) => ({ host, range: this.whole(host) })), from: null };
     }
     return { parts: [], from: null };
@@ -205,29 +205,32 @@ export class Formatter {
     // 끝에 있었으면 앞 글의 끝에, 아니면 다음 글의 처음에 — 문단 경계에서 옆 문단으로 넘어가지 않게.
     const off = from ? { host: from.host, ...offsetsOf(from.host, from.range), back: atEnd(from.range) } : null;
     this.canvas.change(() => {
-      for (const { host, range } of parts) {
-        // 덱 요소(문단·링크 등 — 서식 요소가 아닌 것)의 style 이 처음 바뀌면 바뀌기 전 것을 적어 둔다. 서식 지우기가 그 값으로
-        // 되돌린다(저장할 때 뗀다).
-        const was = [host, ...host.querySelectorAll('*')].filter((el) => !FORMAT.has(el.tagName) && !el.hasAttribute(A.st))
-          .map((el) => [el, el.getAttribute('style')]);
-        const before = snapshot(host);
-        const seen = looks(host, this.win);
-        const span = offsetsOf(host, range);
-        this.select(host, range);
-        this.exec(kind, value, host, range);
-        // 정리는 이번 명령이 만들거나 바꾼 요소만 — 고른 곳 밖의 덱 요소(빈 범례 칸, 덱 CSS 가 꾸미는 span 등)는 그대로
-        const touched = changedSince(host, before);
-        dropRedundant(touched, this.win);
-        tidy(host, touched, this.win);
-        if (kind !== 'clear') guard(host, this.win, seen, span, INTENT[kind]);
-        for (const [el, style] of was) {
-          if (!el.isConnected || el.getAttribute('style') === style) continue;
-          // 브라우저가 고쳐 쓰기만 하고 값은 같으면(#222 → rgb(34, 34, 34) 등) 덱의 글자 그대로 둔다
-          if (sameDecl(el.getAttribute('style'), style, this.doc)) restoreAttr(el, style);
-          else el.setAttribute(A.st, style || '');
-        }
-      }
+      for (const { host, range } of parts) this.pass(host, range, kind, value);
     });
+    this.reselect(off);
+    this.update();
+  }
+
+  // 글 칸 하나의 범위에 서식 하나 — 명령 뒤 정리까지
+  pass(host, range, kind, value) {
+    // 덱 요소(문단·링크 등 — 서식 요소가 아닌 것)의 style 이 처음 바뀌면 바뀌기 전 것을 적어 둔다. 서식 지우기가 그 값으로
+    // 되돌린다(저장할 때 뗀다).
+    const was = styled(host);
+    const before = snapshot(host);
+    const seen = looks(host, this.win);
+    const span = offsetsOf(host, range);
+    this.select(host, range);
+    this.exec(kind, value, host, range);
+    // 정리는 이번 명령이 만들거나 바꾼 요소만 — 고른 곳 밖의 덱 요소(빈 범례 칸, 덱 CSS 가 꾸미는 span 등)는 그대로
+    const touched = changedSince(host, before);
+    dropRedundant(touched, this.win);
+    tidy(host, touched, this.win);
+    if (kind !== 'clear') guard(host, this.win, seen, span, INTENT[kind]);
+    remember(was, this.doc);
+  }
+
+  // 서식을 입힌 뒤 — 글을 고르던 중이었으면 같은 글자 자리로 선택을 되돌리고, 아니면 글 고르기를 푼다
+  reselect(off) {
     if (off && off.host.isConnected) {
       const r = rangeAt(off.host, off.start, off.end, off.back);
       this.select(off.host, r);
@@ -239,7 +242,57 @@ export class Formatter {
       if (a && a !== this.doc.body && typeof a.blur === 'function') a.blur();
       this.saved = null;
     }
+  }
+
+  /* ---------- 서식 복사(painter.js) */
+
+  // 고른 글(캐럿이면 그 자리 글)의 글자 모양 — {font, size(px), color, bold, italic, underline, strike, mark}
+  lookAt(host, range) {
+    const win = this.win;
+    const at = elementAt(range, host);
+    const cs = win.getComputedStyle(at);
+    const st = styleState(at, host, win);
+    return {
+      font: cs.fontFamily, size: parseFloat(cs.fontSize), color: hexOf(cs.color),
+      bold: st.bold, italic: st.italic, underline: st.underline, strike: st.strike, mark: hexOf(markOf(at, host, win)),
+    };
+  }
+
+  // parts 의 글에 집은 글자 모양(look)을 입힌다 — before 가 있으면 먼저(상자 모양 등). 모두 되돌리기 한 칸.
+  paint(parts, look, before) {
+    const cur = this.current();
+    const off = cur && parts.some((p) => p.host === cur.host)
+      ? { host: cur.host, ...offsetsOf(cur.host, cur.range), back: atEnd(cur.range) } : null;
+    this.canvas.change(() => {
+      if (before) before();
+      if (look) for (const { host, range } of parts) this.paintPart(host, range, look);
+    });
+    this.reselect(off);
     this.update();
+  }
+
+  // 글 칸 하나 — 먼저 고른 글의 글자 서식을 걷어(문단의 모양으로) 집은 모양과 다른 것만 입힌다. 다른지는 범위 안의 글자 모두로
+  // 본다(첫 글자만 보면 문단마다 모양이 다른 글 칸의 나머지 문단이 그대로 남는다). 명령마다 글이 나뉘고 합쳐지므로 범위는 글자
+  // 자리로 다시 찾는다(글 칸 전체였으면 늘 전체 — 빈 문단까지).
+  paintPart(host, range, look) {
+    const win = this.win;
+    const all = !host.textContent.trim() || range.toString().length === host.textContent.length;
+    const { start, end } = offsetsOf(host, range);
+    const at = () => (all ? this.whole(host) : rangeAt(host, start, end));
+    const any = (differs) => textElements(at(), host).some(differs);
+    const cs = (el) => win.getComputedStyle(el);
+    this.pass(host, at(), 'clear');
+    const family = firstFamily(look.font).toLowerCase();
+    if (any((el) => firstFamily(cs(el).fontFamily).toLowerCase() !== family)) this.pass(host, at(), 'font', look.font);
+    if (any((el) => Math.abs(parseFloat(cs(el).fontSize) - look.size) > 0.05)) this.pass(host, at(), 'size', look.size * 0.75);
+    if (look.color && any((el) => hexOf(cs(el).color) !== look.color)) this.pass(host, at(), 'color', look.color);
+    // 굵게 등은 켜고 끄는 명령 — 섞여 있으면 한 번에 한쪽으로 모이므로 두 번까지
+    for (const [kind, key] of [['bold', 'bold'], ['italic', 'italic'], ['underline', 'underline'], ['strikeThrough', 'strike']]) {
+      for (let i = 0; i < 2 && any((el) => styleState(el, host, win)[key] !== look[key]); i += 1) this.pass(host, at(), kind);
+    }
+    const marks = textElements(at(), host).map((el) => hexOf(markOf(el, host, win)));
+    if (look.mark && marks.some((m) => m !== look.mark)) this.pass(host, at(), 'mark', look.mark);
+    else if (!look.mark && marks.some(Boolean)) this.pass(host, at(), 'unmark');
   }
 
   exec(kind, value, host, range) {
@@ -734,6 +787,22 @@ function restoreAttr(el, style) {
 }
 
 /* ---------- 명령 뒤 정리 — 이번 명령이 만들거나 바꾼 요소만 */
+
+// 글 칸의 덱 요소(서식 요소가 아닌 것) 가운데 바뀌기 전 style 을 아직 적어 두지 않은 것과 그 style
+function styled(host) {
+  return [host, ...host.querySelectorAll('*')].filter((el) => !FORMAT.has(el.tagName) && !el.hasAttribute(A.st))
+    .map((el) => [el, el.getAttribute('style')]);
+}
+
+// 명령이 style 을 바꾼 덱 요소에 바뀌기 전 값을 적어 둔다(data-hse-st — 저장할 때 뗀다)
+function remember(was, doc) {
+  for (const [el, style] of was) {
+    if (!el.isConnected || el.getAttribute('style') === style) continue;
+    // 브라우저가 고쳐 쓰기만 하고 값은 같으면(#222 → rgb(34, 34, 34) 등) 덱의 글자 그대로 둔다
+    if (sameDecl(el.getAttribute('style'), style, doc)) restoreAttr(el, style);
+    else el.setAttribute(A.st, style || '');
+  }
+}
 
 // 글 칸 안 요소들의 style 과 글 유무
 function snapshot(host) {

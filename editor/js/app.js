@@ -3,6 +3,7 @@
 
 import { download, h, objParticle } from './util.js';
 import { A, DeckModel, PLACE } from './deck.js';
+import { Arrange } from './arrange.js';
 import { Boxes } from './boxes.js';
 import { Canvas } from './canvas.js';
 import { Formatter } from './format.js';
@@ -11,16 +12,19 @@ import { LAYOUTS, makeSlide } from './layouts.js';
 import { deckStyles } from './master.js';
 import { Master } from './masterui.js';
 import { PageLayout } from './pageui.js';
+import { Painter } from './painter.js';
 import { Pick } from './pick.js';
 import { Side } from './side.js';
 import { openSource } from './source.js';
+import { Tables } from './tables.js';
 import { writeTermsRaw } from './terms.js';
 import { Toc } from './toc.js';
 
 const NOTES_MS = 700;
 const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
-  + '크기를 바꿉니다 · Esc 로 글 고치기를 마치면 Ctrl+C·V 로 상자를 다른 장에 붙여 넣습니다 · 차례에서 장을 끌어 순서를 바꿉니다 · '
-  + 'PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · Ctrl+S 저장';
+  + '크기를 바꿉니다(Shift+누르기·빈 곳에서 끌기로 여럿을 골라 ‘배치 ▾’로 맞추기) · Esc 로 글 고치기를 마치면 Ctrl+C·V 로 상자를 '
+  + '다른 장에 붙여 넣습니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · '
+  + 'Ctrl+S 저장';
 const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 
 const $ = (id) => document.getElementById(id);
@@ -54,6 +58,8 @@ let hist = null;
 let master = null;
 let layout = null;
 let boxes = null;
+let arrange = null;
+let painter = null;
 let side = null;
 let notesPending = null;
 let saving = false;
@@ -144,8 +150,10 @@ function go(i, focusToc) {
 
 // 칸은 늘 자리를 차지한 채 보이고 숨는다(visibility) — 칸이 생기고 없어지며 서식 막대의 줄 수가 바뀌면 덱 화면의 배율이
 // 바뀌어, 누르는 사이 상자가 포인터 밑에서 움직인다. force 면 고치는 중인 칸의 값도 지금 상자의 값으로(받지 않은 값 등).
+// 상자를 여럿 골랐으면 숨기고(맞추기는 ‘배치 ▾’에서), 잠근 상자면 값만 보이고 고치지 못하게 한다.
 function showBox(force = false) {
-  const box = pick.box;
+  const list = pick.boxes;
+  const box = list.length === 1 ? list[0] : null;
   els.fBox.classList.toggle('off', !box);
   if (!box) {
     // 숨긴 칸에 초점이 남으면 다음 키(PageDown 등)를 칸이 먹는다
@@ -154,8 +162,10 @@ function showBox(force = false) {
   }
   const g = pick.geom(box);
   const movable = pick.movable(box);
+  const locked = pick.locked(box);
   for (const label of els.fBox.querySelectorAll('.pos-field')) label.classList.toggle('off', !movable);
   for (const [input, v] of [[els.bW, g.w], [els.bH, g.h], [els.bX, g.x], [els.bY, g.y]]) {
+    input.disabled = locked;
     if (force || document.activeElement !== input) input.value = String(v);
   }
 }
@@ -504,6 +514,15 @@ function findKey(e, fromDeck) {
   return true;
 }
 
+// 배치 단축키 → 썼으면 true. ‘]’·‘[’ 은 Shift 를 누르면 글자가 바뀌므로 키 자리(code)로 본다.
+function arrangeKey(e, k) {
+  if (k === 'a' && !e.shiftKey) arrange.selectAll();
+  else if (k === 'g') { if (e.shiftKey) arrange.ungroup(); else arrange.group(); }
+  else if (e.shiftKey && (e.code === 'BracketRight' || e.code === 'BracketLeft')) arrange.order(e.code === 'BracketRight' ? 'front' : 'back');
+  else return false;
+  return true;
+}
+
 function onKey(e, inText, fromFrame, field = false) {
   // 상자를 끄는 동안에는 키를 쓰지 않는다(Esc 는 끌기 취소) — 장을 넘기거나 되돌리면 끌던 상자의 장과 기록이 엇갈린다
   if (pick.drag) {
@@ -541,12 +560,27 @@ function onKey(e, inText, fromFrame, field = false) {
     boxes.duplicate();
     return;
   }
+  // 서식 붓 — Esc 는 먼저 붓을 끈다(글 고치기·상자 고르기는 그대로). Ctrl+Shift+C 집기·V 입히기는 글을 고치는 중에도.
+  if (e.key === 'Escape' && painter.mode) {
+    e.preventDefault();
+    painter.off();
+    return;
+  }
+  if (!(inText && (!fromFrame || field)) && painter.key(e)) {
+    e.preventDefault();
+    return;
+  }
   if (inText) {
     if (e.key === 'Escape') {
       e.preventDefault();
       if (fromFrame && !field) canvas.stop();
       else e.target.blur();
     }
+    return;
+  }
+  // 배치 — 글을 고치는 중이 아닐 때: Ctrl+A 이 장의 상자 모두 · Ctrl+G 묶기 · Ctrl+Shift+G 묶음 풀기 · Ctrl+Shift+] 맨 앞 · [ 맨 뒤
+  if (mod && arrangeKey(e, k)) {
+    e.preventDefault();
     return;
   }
   // 고른 상자 복사·잘라내기·붙여 넣기(Ctrl+C·X·V) — 글을 고치는 중이 아닐 때
@@ -636,7 +670,7 @@ function bind() {
     if (t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind') && !mod) return;   // 색인·찾기 칸의 키는 그 칸의 것
     if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || (t instanceof Element && t.closest('dialog'))) return;
     if (t instanceof Element && t.closest('#toc') && !e.ctrlKey && !e.metaKey) return;   // 차례는 제 키를 쓴다
-    if (t instanceof Element && t.closest('#layMenu') && !e.ctrlKey && !e.metaKey) return;   // 레이아웃 고르기 창도
+    if (t instanceof Element && t.closest('#layMenu, [role="menu"]') && !e.ctrlKey && !e.metaKey) return;   // 펼침 메뉴도
     onKey(e, t === els.notes, false);
   });
   window.addEventListener('beforeunload', (e) => {
@@ -695,8 +729,8 @@ async function boot() {
     onFit: () => { if (pick) pick.place(); },
   });
   pick = new Pick({
-    layer: $('pickLayer'), bar: fmtEls.bar, canvas, model,
-    onSelect: () => { showBox(); if (fmt) fmt.update(); if (boxes) boxes.update(); },
+    layer: $('pickLayer'), bar: fmtEls.bar, canvas, model, msg,
+    onSelect: () => { showBox(); if (fmt) fmt.update(); if (boxes) boxes.update(); if (painter) painter.update(); },
     onPlace: () => showBox(),
   });
   // 자리 칸(왼쪽·위)은 옮길 수 있는 상자(빌더 상자·흐름 덱에 넣은 글상자)를 골랐을 때만 보인다(showBox) — 칸은 늘 자리를
@@ -707,6 +741,13 @@ async function boot() {
   fmt.attach();
   boxes = new Boxes({ model, canvas, pick, fmt, msg, els: boxEls });
   boxes.attach();
+  // 배치(맞추기·같은 간격·앞뒤 순서·묶기·잠그기) · 표의 행·열 · 서식 복사
+  arrange = new Arrange({ model, canvas, pick, msg });
+  arrange.attach({ button: $('arrBtn'), menu: $('arrMenu') });
+  const tables = new Tables({ model, canvas, fmt, msg });
+  tables.attach({ button: $('tblBtn'), menu: $('tblMenu') });
+  painter = new Painter({ model, canvas, pick, fmt, msg, button: $('fPaint') });
+  painter.attach();
   // 쪽 레이아웃(쪽 번호·꼬리말·로고) — 장마다의 자리 상자는 설정에서 그리고, 저장할 사본에는 새 차례로 다시 그린다
   layout = new PageLayout({
     model, hist, msg, settle, commitSlides, fonts: () => fmt.deckFonts,
@@ -749,7 +790,7 @@ async function boot() {
       cur: model.cur, n: model.slides.length, family: model.family, notesMode: model.notesMode, size: { ...model.size },
       titles: model.slides.map((s) => model.titleOf(s)), dirty: isDirty(), undo: hist.undoStack.length,
       redo: hist.redoStack.length, saving, scale: canvas.scale, box: pick.box ? pick.geom(pick.box) : null,
-      clip: !!boxes.clip,
+      clip: !!boxes.clip, sel: pick.boxes.length, paint: painter.mode,
     }),
     serialize: () => { settle(); return model.serialize(); },
     notes: () => model.slides.map((s) => model.notesOf(s)),

@@ -2,7 +2,7 @@
    되돌리기 한 칸으로 넣고, 차례·캔버스를 새로 그린다. */
 
 import { h } from './util.js';
-import { A } from './deck.js';
+import { A, LOCK } from './deck.js';
 import { firstFamily } from './format.js';
 import {
   applyLook, canCopy, colorHex, copyToAll, counterparts, deckStyles, matchAll, paintAll, removeAll, roleLook, roles,
@@ -250,8 +250,13 @@ export class Master {
     const b = this.box();
     if (!b) return;
     if (kind === 'remove' && Date.now() - this.armed > ARM_MS) {
+      const n = [b, ...sameBoxes(this.model, b)].filter((el) => !el.hasAttribute(LOCK)).length;
+      if (!n) {
+        this.say('같은 상자가 모두 잠겨 있어 지우지 않습니다 — 배치 ▾ 의 ‘잠금 풀기’로 푼 뒤 지우세요.', 'warn');
+        return;
+      }
       this.armed = Date.now();
-      $('mRemove').textContent = `한 번 더 누르면 ${sameBoxes(this.model, b).length + 1}개를 지웁니다`;
+      $('mRemove').textContent = `한 번 더 누르면 ${n}개를 지웁니다`;
       clearTimeout(this.armTimer);
       this.armTimer = setTimeout(() => { if (this.dlg.open) this.renderBox(); }, ARM_MS);   // 시간이 지나면 처음으로
       return;
@@ -269,10 +274,11 @@ export class Master {
       text = ok ? `${n}개 장에서 맞췄습니다(되돌리기 Ctrl+Z).`
         : result.changed.length ? '바뀐 장이 없습니다(이미 같습니다).' : '맞출 장이 없습니다.';
       if (result.skipped) text += ` 같은 상자 수가 이 장과 달라 어느 것과 맞출지 모르는 ${result.skipped}개 장은 건너뛰었습니다.`;
+      if (result.locked) text += ` 잠근 상자 ${result.locked}개는 그대로 두었습니다.`;
     } else {
-      const { n } = this.commit(() => removeAll(this.model, b));
+      const { n, result } = this.commit(() => removeAll(this.model, b));
       ok = n > 0;
-      text = `${n}개 장에서 지웠습니다(되돌리기 Ctrl+Z).`;
+      text = `${n}개 장에서 지웠습니다(되돌리기 Ctrl+Z).${result.locked ? ` 잠근 상자 ${result.locked}개는 두었습니다.` : ''}`;
     }
     this.say(text, ok ? 'ok' : '');
     this.renderBox();

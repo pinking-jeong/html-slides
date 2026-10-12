@@ -6,7 +6,7 @@
    4) 배경색: 모든 장(첫 장 빼기 선택)의 배경을 한 색으로, 또는 장마다 넣은 배경색을 걷는다.
    어느 것이든 되돌리기 한 칸 — 바뀐 장마다 사본(edit)과 바뀐 스타일 글(style)을 한 묶음으로 넣는다(masterui.js). */
 
-import { A, FREE_BOX, retagPages } from './deck.js';
+import { A, FREE_BOX, GROUP, LOCK, retagPages } from './deck.js';
 import { anchorSlide } from './pagelayout.js';
 import { toPx, toPt, hexOf, firstFamily, FONTS } from './format.js';
 
@@ -212,13 +212,15 @@ function unmark(root) {
   }
 }
 
-// 상자를 견줄 꼴 — 편집 표시·id(복제하면 '-c1' 이 붙는다)·그 참조와 상자의 자리·크기(style)는 빼고.
-// 글이 없는 그림·도형도 그림 주소(src)·모양(안의 HTML)이 같아야 같은 상자다.
+// 상자를 견줄 꼴 — 편집 표시·id(복제하면 '-c1' 이 붙는다)·그 참조, 묶음·잠금 표시(배치 ▾ — 한 장에서 묶거나 잠가도 같은
+// 상자다)와 상자의 자리·크기(style)는 빼고. 글이 없는 그림·도형도 그림 주소(src)·모양(안의 HTML)이 같아야 같은 상자다.
 function signature(el) {
   const c = el.cloneNode(true);
   unmark(c);
   for (const n of [c, ...c.querySelectorAll('*')]) {
-    for (const a of Array.from(n.attributes)) if (a.name === 'id' || a.name.startsWith('data-hse-')) n.removeAttribute(a.name);
+    for (const a of Array.from(n.attributes)) {
+      if (a.name === 'id' || a.name.startsWith('data-hse-') || a.name === GROUP || a.name === LOCK) n.removeAttribute(a.name);
+    }
   }
   c.removeAttribute('style');
   return c.outerHTML.replace(/url\(#[^)]*\)/g, 'url(#)').replace(/href="#[^"]*"/g, 'href="#"');
@@ -288,6 +290,7 @@ export function copyToAll(model, box, skipFirst) {
     if (sameIn(model, s, box, sig).length) return;
     const c = box.cloneNode(true);
     unmark(c);
+    c.removeAttribute(GROUP);           // 다른 장에 혼자 들어가는 사본 — 이 장의 묶음과는 상관없다
     model.renameIds(c);
     retagPages(c, home.getAttribute(A.pn), s.getAttribute(A.pn));
     // 흐름 덱의 글상자(장 위에 절대 배치)는 그 장을 자리의 기준으로 — 아니면 바깥 요소를 기준으로 엉뚱한 곳에 놓인다
@@ -298,8 +301,8 @@ export function copyToAll(model, box, skipFirst) {
   return changed;
 }
 
-// 맞출 상대(counterparts)를 box 의 자리·모양으로 — withText 면 글도 같게(쪽 번호 상자는 늘 제 번호를 지킨다)
-// → {changed: 바뀐 장, skipped: 건너뛴 장 수}
+// 맞출 상대(counterparts)를 box 의 자리·모양으로 — withText 면 글도 같게(쪽 번호 상자는 늘 제 번호를 지킨다). 잠근 상대는
+// 옮기지도 크기를 바꾸지도 않는다 → {changed: 바뀐 장, skipped: 건너뛴 장 수, locked: 잠겨 건너뛴 상자 수}
 export function matchAll(model, box, withText) {
   const { pairs, skipped } = counterparts(model, box);
   const home = homeOf(model, box);
@@ -307,7 +310,9 @@ export function matchAll(model, box, withText) {
   const srcPs = Array.from(box.querySelectorAll('.tin p'));
   const style = box.getAttribute('style');
   const changed = new Set();
+  let locked = 0;
   for (const [s, el] of pairs) {
+    if (el.hasAttribute(LOCK)) { locked += 1; continue; }
     if (style !== null) el.setAttribute('style', style); else el.removeAttribute('style');
     if (withText && role !== 'pageno') {
       el.innerHTML = box.innerHTML;
@@ -323,18 +328,20 @@ export function matchAll(model, box, withText) {
     }
     changed.add(s);
   }
-  return { changed: [...changed], skipped };
+  return { changed: [...changed], skipped, locked };
 }
 
-// box 와 같은 상자를 모든 장(이 장 포함)에서 지운다
+// box 와 같은 상자를 모든 장(이 장 포함)에서 지운다 — 잠근 상자는 둔다 → {changed: 바뀐 장, locked: 남긴 잠근 상자 수}
 export function removeAll(model, box) {
   const changed = new Set();
+  let locked = 0;
   for (const el of [box, ...sameBoxes(model, box)]) {
+    if (el.hasAttribute(LOCK)) { locked += 1; continue; }
     const slide = homeOf(model, el);
     el.remove();
     if (slide) changed.add(slide);
   }
-  return [...changed];
+  return { changed: [...changed], locked };
 }
 
 /* ---------- 4) 배경색 */

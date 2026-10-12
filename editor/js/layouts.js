@@ -312,8 +312,9 @@ function likeSlide(model, src) {
     for (const td of el.querySelectorAll(':scope > table td, :scope > table th')) td.textContent = '';
     return el;
   }
-  // 흐름 덱: 편집기가 고칠 수 있는 글 칸마다(꼬리말·쪽 번호 빼고) 안내 글로 — 목록은 항목 하나만, 표 칸은 비운다.
-  // 첫 제목(h1~h3)은 제목 안내, 머리말은 소제목 안내, 나머지(문단·수치 칸 등)는 본문 안내.
+  // 흐름 덱: 편집기가 고칠 수 있는 글 칸마다(꼬리말·쪽 번호 빼고) 안내 글로 — 목록은 항목 하나만, 표 칸은 비운다(칸 안의
+  // 문단이면 줄바꿈 하나만 남겨 새 장에서도 눌러 쓸 수 있게). 첫 제목(h1~h3)은 제목 안내, 머리말은 소제목 안내, 나머지(문단·
+  // 수치 칸 등)는 본문 안내.
   let titled = false;
   for (const host of textHosts(el, 'flow')) {
     if (host.closest('footer, .foot, .footer, .pageno')) continue;
@@ -322,6 +323,8 @@ function likeSlide(model, src) {
       host.replaceChildren(...(li ? [mark(li.cloneNode(false), PLACE.body)] : []));
     } else if (host.tagName === 'TD' || host.tagName === 'TH') {
       host.textContent = '';
+    } else if (host.closest('td, th')) {
+      host.replaceChildren(host.ownerDocument.createElement('br'));
     } else if (host.matches('.eyebrow, .kicker')) {
       placeText(host, PLACE.kicker);
     } else if (!titled && /^H[1-3]$/.test(host.tagName)) {

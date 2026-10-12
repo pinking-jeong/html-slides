@@ -1,5 +1,8 @@
 /* 그림 넣기 — 고른 그림 파일을 덱 안에 data: 주소로 넣는다(덱 파일 하나에 그림이 함께 들어 따로 올릴 것이 없다).
-   그림 자리(data-name="picture")나 그림을 고른 채 넣으면 그 자리에 비율을 지켜 맞춰 넣고, 아니면 장 가운데에 넣는다. */
+   그림 자리(data-name="picture")나 그림을 고른 채 넣으면 그 자리에 비율을 지켜 맞춰 넣고(묶음에 든 그림이면 새 그림도 그 묶음에),
+   아니면 장 가운데에 넣는다. */
+
+import { GROUP } from './deck.js';
 
 export const PICTURE_WARN = 4 * 1024 * 1024;     // 이보다 크면 덱 파일이 그만큼 커진다고 알린다
 export const PICTURE_MAX = 20 * 1024 * 1024;     // 이보다 크면 넣지 않는다(편집기·저장이 느려진다)
@@ -53,6 +56,7 @@ export function placePicture(model, slide, url, size, alt, target) {
       const h = parseFloat(target.style.height) || target.offsetHeight || 300;
       const f = fit(size, w, h);
       box = { x: x + (w - f.w) / 2, y: y + (h - f.h) / 2, w: f.w, h: f.h };
+      if (target.hasAttribute(GROUP)) img.setAttribute(GROUP, target.getAttribute(GROUP));
       target.replaceWith(img);
     } else {
       const { w: W, h: H } = model.size;
@@ -82,6 +86,7 @@ export function placePicture(model, slide, url, size, alt, target) {
     const h = target.offsetHeight || r.height;
     if (w > 0 && h > 0) setSize(fit(size, w, h));
     else img.style.height = 'auto';
+    if (target.hasAttribute(GROUP)) img.setAttribute(GROUP, target.getAttribute(GROUP));
     target.replaceWith(img);
     return img;
   }

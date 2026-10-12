@@ -390,6 +390,52 @@ a { color: var(--accent); }
 .hit-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hit mark { padding: 0 1px; border-radius: 2px; background: #FFE58A; color: #1A1A1A; }
 
+/* ---------- 여럿 고르기·잠근 상자·맞춤선·감싸 고르기 */
+.pick.multi { outline-style: dashed; }
+.pick.multi .pick-h, .pick.locked .pick-h { display: none; }
+.pick.multi .pick-badge, .pick.locked .pick-badge { display: block; }
+.pick.locked { outline-color: #8A96A0; }
+.pick-mem { position: absolute; outline: 1px solid rgba(37, 99, 235, .85); pointer-events: none; }
+.pick-mem.locked { outline-color: #8A96A0; }
+.pick-guide { position: absolute; z-index: 3; pointer-events: none; background: #E8318A; }
+.pick-guide.v { width: 1px; }
+.pick-guide.h { height: 1px; }
+.pick-band { position: absolute; pointer-events: none; border: 1px dashed #2563EB; background: rgba(37, 99, 235, .08); }
+
+/* ---------- 서식 복사(서식 붓) — 두 번 눌러 여러 번 쓰는 중이면 테두리를 진하게 */
+#fPaint { gap: 4px; }
+.tb.sticky[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* ---------- 펼침 메뉴(배치 ▾ · 표 ▾) — 화면에 고정해 막대가 옆으로 밀리는 좁은 화면에서도 잘리지 않게 */
+.menu {
+  position: fixed; z-index: 60; width: 300px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto;
+  padding: 8px; border: 1px solid var(--line2); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow);
+}
+#tblMenu { width: 210px; }
+.menu:focus { outline: none; }
+.menu:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.menu-h { margin: 10px 4px 4px; font-size: 11.5px; font-weight: 700; color: var(--muted); }
+.menu-h:first-child { margin-top: 2px; }
+.menu-note { margin: 2px 4px 6px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.menu-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; }
+.menu-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.menu-grid.one { grid-template-columns: minmax(0, 1fr); }
+.menu-sep { height: 1px; margin: 6px 2px; background: var(--line); }
+.menu [role="menuitem"] {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 30px; padding: 4px 8px; border: 1px solid transparent;
+  border-radius: 7px; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.menu-grid:not(.one):not(.two) [role="menuitem"] {
+  flex-direction: column; justify-content: center; gap: 3px; padding: 6px 4px; font-size: 11.5px; text-align: center;
+}
+.menu [role="menuitem"]:hover:not(:disabled), .menu [role="menuitem"]:focus-visible {
+  border-color: var(--accent-line); background: var(--accent-soft); outline: none;
+}
+.menu [role="menuitem"]:disabled { opacity: .4; cursor: default; }
+.menu [role="menuitem"].danger:not(:disabled) { color: var(--err); }
+.menu [role="menuitem"] svg { flex: none; width: 16px; height: 16px; }
+.menu-wide { margin-top: 8px; justify-content: center; }
+
 /* ---------- 좁은 화면: 차례를 위로 */
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }

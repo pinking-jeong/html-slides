@@ -107,6 +107,7 @@
       <button type="button" class="tb" id="fJustify" aria-pressed="false" title="양쪽 맞춤" aria-label="양쪽 맞춤"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 6.5h12M2 10h12M2 13.5h12" stroke="currentColor" stroke-width="1.5"/></svg></button>
       <span class="sep" aria-hidden="true"></span>
       <button type="button" class="tb wide" id="fClear" title="고른 글에 따로 입힌 글자 서식(굵게·색·크기 등)을 걷어 문단의 모양으로 되돌립니다">서식 지우기</button>
+      <button type="button" class="tb wide" id="fPaint" data-fmt-free aria-pressed="false" title="서식 복사 — 고른 글·상자의 모양을 집어 다음에 누르는 글·상자에 입힙니다. 두 번 누르면 Esc 까지 여러 번 (Ctrl+Shift+C 집기 · Ctrl+Shift+V 입히기)"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2" width="9" height="4" rx=".8" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M11.5 4h2v3.5H7.5V10" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="6.3" y="10" width="2.4" height="4.5" rx=".6" fill="currentColor"/></svg>서식 복사</button>
       <span class="fbox off" id="fBox" data-fmt-box>
         <span class="sep" aria-hidden="true"></span>
         <label>가로<input id="bW" type="number" min="8" max="10000" step="1"></label>
@@ -125,6 +126,54 @@
       <button type="button" class="tb wide" id="boxCopy" title="고른 상자를 복사합니다 (Ctrl+C) — 다른 장에서 붙여 넣으면 같은 자리에" disabled>복사</button>
       <button type="button" class="tb wide" id="boxPaste" title="복사한 상자를 이 장에 붙여 넣습니다 (Ctrl+V)" disabled>붙여 넣기</button>
       <button type="button" class="tb wide danger" id="boxDel" title="고른 상자를 지웁니다 (Delete)" disabled>지우기</button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="tb wide" id="arrBtn" aria-controls="arrMenu" title="배치 — 맞추기·같은 간격·앞뒤 순서·묶기·잠그기 (여럿은 Shift+누르기·빈 곳에서 끌기로 고릅니다)">배치 ▾</button>
+      <div class="menu" id="arrMenu" role="menu" aria-label="배치" hidden>
+        <p class="menu-h" aria-hidden="true">맞추기 — 하나는 장에, 여럿은 고른 상자끼리</p>
+        <div class="menu-grid" role="group" aria-label="맞추기">
+          <button type="button" role="menuitem" data-act="align:left"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 1.5v13" stroke="currentColor" stroke-width="1.4"/><rect x="4" y="3.5" width="9" height="3" rx=".6" fill="currentColor"/><rect x="4" y="9.5" width="5.5" height="3" rx=".6" fill="currentColor"/></svg>왼쪽 끝</button>
+          <button type="button" role="menuitem" data-act="align:center"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v13" stroke="currentColor" stroke-width="1.4"/><rect x="3" y="3.5" width="10" height="3" rx=".6" fill="currentColor"/><rect x="5" y="9.5" width="6" height="3" rx=".6" fill="currentColor"/></svg>가로 가운데</button>
+          <button type="button" role="menuitem" data-act="align:right"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 1.5v13" stroke="currentColor" stroke-width="1.4"/><rect x="3" y="3.5" width="9" height="3" rx=".6" fill="currentColor"/><rect x="6.5" y="9.5" width="5.5" height="3" rx=".6" fill="currentColor"/></svg>오른쪽 끝</button>
+          <button type="button" role="menuitem" data-act="align:top"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 2h13" stroke="currentColor" stroke-width="1.4"/><rect x="3.5" y="4" width="3" height="9" rx=".6" fill="currentColor"/><rect x="9.5" y="4" width="3" height="5.5" rx=".6" fill="currentColor"/></svg>위쪽 끝</button>
+          <button type="button" role="menuitem" data-act="align:middle"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h13" stroke="currentColor" stroke-width="1.4"/><rect x="3.5" y="3" width="3" height="10" rx=".6" fill="currentColor"/><rect x="9.5" y="5" width="3" height="6" rx=".6" fill="currentColor"/></svg>세로 가운데</button>
+          <button type="button" role="menuitem" data-act="align:bottom"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 14h13" stroke="currentColor" stroke-width="1.4"/><rect x="3.5" y="3" width="3" height="9" rx=".6" fill="currentColor"/><rect x="9.5" y="6.5" width="3" height="5.5" rx=".6" fill="currentColor"/></svg>아래쪽 끝</button>
+        </div>
+        <p class="menu-h" aria-hidden="true">같은 간격 — 상자(묶음) 셋 이상</p>
+        <div class="menu-grid two" role="group" aria-label="같은 간격">
+          <button type="button" role="menuitem" data-act="dist:h"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4" width="2.5" height="8" rx=".5" fill="currentColor"/><rect x="6.75" y="4" width="2.5" height="8" rx=".5" fill="currentColor"/><rect x="12" y="4" width="2.5" height="8" rx=".5" fill="currentColor"/></svg>가로 간격 같게</button>
+          <button type="button" role="menuitem" data-act="dist:v"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="1.5" width="8" height="2.5" rx=".5" fill="currentColor"/><rect x="4" y="6.75" width="8" height="2.5" rx=".5" fill="currentColor"/><rect x="4" y="12" width="8" height="2.5" rx=".5" fill="currentColor"/></svg>세로 간격 같게</button>
+        </div>
+        <p class="menu-h" aria-hidden="true">앞뒤 순서</p>
+        <div class="menu-grid two" role="group" aria-label="앞뒤 순서">
+          <button type="button" role="menuitem" data-act="order:front" title="Ctrl+Shift+]">맨 앞으로</button>
+          <button type="button" role="menuitem" data-act="order:forward">앞으로</button>
+          <button type="button" role="menuitem" data-act="order:back" title="Ctrl+Shift+[">맨 뒤로</button>
+          <button type="button" role="menuitem" data-act="order:backward">뒤로</button>
+        </div>
+        <p class="menu-h" aria-hidden="true">묶기 · 잠그기 — 덱에 남습니다</p>
+        <div class="menu-grid two" role="group" aria-label="묶기·잠그기">
+          <button type="button" role="menuitem" data-act="group" title="Ctrl+G">묶기</button>
+          <button type="button" role="menuitem" data-act="ungroup" title="Ctrl+Shift+G">묶음 풀기</button>
+          <button type="button" role="menuitem" data-act="lock" title="옮기기·크기 바꾸기·지우기를 막습니다(글은 고칩니다)">잠그기</button>
+          <button type="button" role="menuitem" data-act="unlock">잠금 풀기</button>
+        </div>
+        <button type="button" role="menuitem" class="menu-wide" data-act="all" title="Ctrl+A">이 장의 상자 모두 고르기</button>
+      </div>
+      <button type="button" class="tb wide" id="tblBtn" aria-controls="tblMenu" title="표 — 글을 고치는 표 칸을 기준으로 행·열을 넣고 지웁니다">표 ▾</button>
+      <div class="menu" id="tblMenu" role="menu" aria-label="표 행·열" hidden>
+        <p class="menu-note" data-tbl-hint>표 칸을 눌러 글을 고치는 중일 때 씁니다.</p>
+        <div class="menu-grid one" role="group" aria-label="행">
+          <button type="button" role="menuitem" data-act="row-above">위에 행 넣기</button>
+          <button type="button" role="menuitem" data-act="row-below">아래에 행 넣기</button>
+          <button type="button" role="menuitem" data-act="row-del" class="danger">이 행 지우기</button>
+        </div>
+        <div class="menu-sep" aria-hidden="true"></div>
+        <div class="menu-grid one" role="group" aria-label="열">
+          <button type="button" role="menuitem" data-act="col-left">왼쪽에 열 넣기</button>
+          <button type="button" role="menuitem" data-act="col-right">오른쪽에 열 넣기</button>
+          <button type="button" role="menuitem" data-act="col-del" class="danger">이 열 지우기</button>
+        </div>
+      </div>
       <span class="fend">
         <button type="button" class="tb wide" id="layoutBtn" title="쪽 레이아웃 — 쪽 번호·꼬리말·기관·학회 로고를 모든 장의 같은 자리에">쪽 레이아웃</button>
         <button type="button" class="tb wide" id="masterBtn" title="모든 장에 한꺼번에(슬라이드 마스터처럼) — 덱 색·글꼴, 역할별 글자 모양, 공통 상자, 배경색">모든 장에</button>

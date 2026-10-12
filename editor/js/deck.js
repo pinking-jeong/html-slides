@@ -22,6 +22,7 @@ export const A = {
   ce: `${P}ce`,           // 편집기가 contenteditable 을 붙인 글 칸
   st: `${P}st`,           // 글자 서식을 블록으로 올리기 전 그 블록의 style — 서식 지우기가 되돌릴 값
   ph: `${P}ph`,           // 새 장의 안내 글을 넣은 요소 — 그 글 그대로면 누를 때 통째로 골라진다(canvas.js)
+  paint: `${P}paint`,     // 서식 붓을 든 동안 덱 문서(html)에 — 덱 화면의 포인터를 붓 모양으로
 };
 
 const UI_STYLE = (w, h) => `
@@ -40,6 +41,7 @@ html, body { overflow: hidden !important; }
 [${A.ce}]:focus { outline: 2px solid #2563EB !important; outline-offset: 2px !important; }
 ::highlight(hse-hit) { background-color: rgba(255, 214, 10, .45); }
 ::highlight(hse-cur) { background-color: rgba(255, 149, 0, .85); color: #111; }
+html[${A.paint}], html[${A.paint}] * { cursor: copy !important; }
 `;
 
 const HEAD_RE = /<head\b[^>]{0,4096}>/i;
@@ -63,7 +65,21 @@ export const PLACE = {
 export const PLACE_TEXTS = new Set([PLACE.title, PLACE.kicker, PLACE.body]);
 // 편집기가 흐름 덱에 넣은 글상자(장 위에 절대 배치) — 저장해도 남는 표라 다시 열어도 옮기고 크기를 바꿀 수 있다
 export const FREE_BOX = 'data-hs-box';
+// 묶음(그룹) 이름·잠금 — 옮길 수 있는 상자에 붙이는 표. 덱에 남아 다시 열어도 묶이고 잠겨 있다(arrange.js·pick.js).
+export const GROUP = 'data-hs-group';
+export const LOCK = 'data-hs-lock';
 const NO_NOTES_JSON = Symbol('no-notes');
+
+// 덱의 다른 묶음과 겹치지 않는 새 묶음 이름
+export function newGroupId(slides) {
+  const used = new Set();
+  for (const s of slides) for (const el of s.querySelectorAll(`[${GROUP}]`)) used.add(el.getAttribute(GROUP));
+  for (let i = 0; i < 100; i += 1) {
+    const id = `g${Math.random().toString(36).slice(2, 8)}`;
+    if (id.length > 3 && !used.has(id)) return id;
+  }
+  return `g${Date.now().toString(36)}`;
+}
 
 // 저장할 때 원본과 같은 모양으로 되돌릴 것 — 손대지 않은 줄까지 바뀐 것으로 보이지 않게.
 // 파서가 CRLF 를 LF 로 읽으므로 줄바꿈은 원본이 모두 CRLF 일 때 CRLF 로 되돌린다.

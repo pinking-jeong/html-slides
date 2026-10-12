@@ -3,7 +3,7 @@
    설정에서 다시 그리므로(sync) 기록하지 않는다. 덱에 원래 있던 쪽 번호·꼬리말 지우기도 되돌리기 한 칸. */
 
 import { h, subjParticle } from './util.js';
-import { A } from './deck.js';
+import { A, LOCK } from './deck.js';
 import { firstFamily, FONTS } from './format.js';
 import { altOf, checkPicture, naturalSize, readPicture } from './insert.js';
 import {
@@ -363,12 +363,18 @@ export class PageLayout {
     this.say('쪽 레이아웃(쪽 번호·꼬리말·로고)을 모든 장에서 걷었습니다(되돌리기 Ctrl+Z).', 'ok');
   }
 
-  // 덱에 원래 있던 쪽 번호·꼬리말 — 한 번 더 눌러야 지운다
+  // 덱에 원래 있던 쪽 번호·꼬리말 — 한 번 더 눌러야 지운다. 잠근 상자(배치 ▾)는 두고 알린다.
   removeOld(kind) {
-    const list = kind === 'page' ? deckPageNumbers(this.model) : deckFooters(this.model);
+    const found = kind === 'page' ? deckPageNumbers(this.model) : deckFooters(this.model);
+    const list = found.filter((el) => !el.hasAttribute(LOCK));
+    const locked = found.length - list.length;
     const label = kind === 'page' ? '쪽 번호' : '꼬리말';
     const b = $(kind === 'page' ? 'pOldPageDel' : 'pOldFootDel');
-    if (!list.length) { this.renderOld(); return; }
+    if (!list.length) {
+      this.renderOld();
+      if (locked) this.say(`덱에 원래 있던 ${label}${kind === 'page' ? '는' : '은'} 모두 잠근 상자라 지우지 않습니다 — 배치 ▾ 의 ‘잠금 풀기’로 푼 뒤 지우세요.`, 'warn');
+      return;
+    }
     if (Date.now() - this.armed[kind] > ARM_MS) {
       this.armed[kind] = Date.now();
       b.textContent = `한 번 더 누르면 ${list.length}곳을 지웁니다`;
@@ -378,7 +384,8 @@ export class PageLayout {
     }
     const n = this.commitSlides(() => { for (const el of list) el.remove(); });
     this.renderOld();
-    this.say(`${n}개 장에서 덱에 원래 있던 ${label}${kind === 'page' ? '를' : '을'} 지웠습니다(되돌리기 Ctrl+Z).`, 'ok');
+    this.say(`${n}개 장에서 덱에 원래 있던 ${label}${kind === 'page' ? '를' : '을'} 지웠습니다(되돌리기 Ctrl+Z).`
+      + `${locked ? ` 잠근 상자 ${locked}곳은 두었습니다.` : ''}`, 'ok');
     (b.hidden ? $('pApply') : b).focus();
   }
 

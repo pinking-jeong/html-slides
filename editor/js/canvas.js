@@ -28,6 +28,22 @@ const isPlaceholder = (host) => {
 const inlineOnly = (el) => Array.from(el.children).every((c) => INLINE.has(c.tagName) && !c.matches(SKIP));
 const isList = (el) => (el.tagName === 'UL' || el.tagName === 'OL') && el.children.length > 0
   && Array.from(el.children).every((li) => li.tagName === 'LI' && inlineOnly(li));
+// 빈 표 칸 — 행·열을 넣어 새로 생긴 칸(또는 비워 둔 칸)도 눌러 글을 쓴다. 줄바꿈(<br>) 말고는 아무것도 없는 칸 자신, 아니면
+// 칸 안에 홀로 든 문단 줄기(<td><p><br></p></td>)의 줄바꿈 하나 든 블록만 — 그림·아이콘(<img>·<i>)이나 아무것도 없는 div·span
+// (색 견본·점 같은 꾸밈)은 글 칸으로 만들지 않는다.
+const CELL_BLOCK = /^(P|DIV|H[1-6])$/;
+const emptyCell = (el) => {
+  if (hasText(el) || !Array.from(el.children).every((c) => c.tagName === 'BR')) return false;
+  if (el.tagName === 'TD' || el.tagName === 'TH') return true;
+  if (!CELL_BLOCK.test(el.tagName) || !el.children.length) return false;
+  for (let n = el; n.parentElement; n = n.parentElement) {
+    const p = n.parentElement;
+    if (p.children.length !== 1) return false;
+    if (p.tagName === 'TD' || p.tagName === 'TH') return true;
+    if (!CELL_BLOCK.test(p.tagName)) return false;
+  }
+  return false;
+};
 
 // 지금 장에서 고칠 수 있는 글 칸 목록
 export function textHosts(slide, family) {
@@ -46,7 +62,7 @@ export function textHosts(slide, family) {
       if (c.matches(SKIP)) continue;
       // 편집기가 넣은 글상자는 상자째 한 칸(그 안의 문단을 Enter 로 나눈다)
       if (c.hasAttribute(FREE_BOX) && c.parentElement === slide) { out.push(c); continue; }
-      if (isList(c) || (hasText(c) && inlineOnly(c))) { out.push(c); continue; }
+      if (isList(c) || (hasText(c) && inlineOnly(c)) || emptyCell(c)) { out.push(c); continue; }
       visit(c);
     }
   };
@@ -80,7 +96,8 @@ export class Canvas {
     // 링크(HTML·SVG 의 a, 이미지 맵의 area)를 누르면 편집 화면이 다른 문서로 넘어가 편집을 잃는다 — 늘 막는다
     d.addEventListener('click', (e) => {
       if (e.composedPath().some((n) => n.localName === 'a' || n.localName === 'area')) e.preventDefault();
-      this.pickPlaceholder(e.target);
+      // Shift·Ctrl+누르기는 상자 고르기(pick.js)다 — 안내 글을 고르지 않는다(골라 두면 서식이 그 글에만 간다)
+      if (!(e.shiftKey || e.ctrlKey || e.metaKey)) this.pickPlaceholder(e.target);
     });
     d.addEventListener('dragstart', (e) => e.preventDefault());
     d.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'none'; });
