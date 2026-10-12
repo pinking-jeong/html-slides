@@ -240,7 +240,7 @@ export function findSlides(doc) {
   return null;
 }
 
-function detectOnClass(doc, slides) {
+export function detectOnClass(doc, slides) {
   for (const c of ON_CLASSES) if (slides.some((s) => s.classList.contains(c))) return c;
   const css = Array.from(doc.querySelectorAll('style'), (s) => s.textContent).join('\n');
   for (const c of ON_CLASSES) if (new RegExp(`\\.${c}(?![\\w-])`).test(css)) return c;

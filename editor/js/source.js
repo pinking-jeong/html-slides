@@ -90,6 +90,8 @@ class GithubSource {
   get fileName() { return fileName(this.path); }
   get base() { return new URL(`../${enc(this.path.split('/').slice(0, -1).join('/'))}/`, location.href).href; }
   get presentUrl() { return new URL(`../${enc(this.path)}`, location.href).href; }
+  // 발표자 보기(presenter.html) — 편집기가 덱을 찾은 이름(id, 없으면 path)으로
+  get presenterUrl() { return new URL(`presenter.html?deck=${encodeURIComponent(String(this.deck.id || this.deck.path))}`, location.href).href; }
   get historyUrl() { return `https://github.com/${this.repo}/commits/${enc(this.branch)}/${enc(this.path)}`; }
   get tokenUrl() {
     const q = new URLSearchParams({
@@ -219,6 +221,7 @@ class LocalSource {
   get base() { return `${location.origin}/deck-files/${this.key}/`; }
   // 저장된 파일을 덱 스크립트가 도는 보통 화면으로 — 편집기·저장과는 다른 출처(포트)에서 연다
   get presentUrl() { return this.present || null; }
+  get presenterUrl() { return null; }        // 발표자 보기는 갤러리(decks.json)의 덱만
   get historyUrl() { return null; }
   hasToken() { return true; }
 

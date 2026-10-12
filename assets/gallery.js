@@ -345,6 +345,11 @@
       items.push(h('a', { href: `editor/?deck=${encodeURIComponent(d.id)}`, target: '_blank', rel: 'noopener', 'data-act': 'edit-deck' },
         '편집기에서 열기', h('small', null, '글 고치기·장 더하기·지우기·순서 바꾸기')));
     }
+    // 발표자 보기는 토큰을 쓰지 않으므로 저장소와 상관없이 HTML 덱에
+    if (d.kind === 'file' || d.kind === 'dir') {
+      items.push(h('a', { href: `editor/presenter.html?deck=${encodeURIComponent(d.id)}`, target: '_blank', rel: 'noopener', 'data-act': 'presenter' },
+        '발표자 보기', h('small', null, '노트·다음 장·시간 — 청중 화면은 따로 띄움')));
+    }
     items.push(h('button', { type: 'button', onclick: () => copy(new URL(openUrl(d), location.href).href) }, '주소 복사'));
     if (d.kind === 'file') items.push(getLink(d.path, 'HTML 받기'));
     if (d.kind === 'pdf') items.push(getLink(d.path, 'PDF 받기'));

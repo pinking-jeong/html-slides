@@ -30,7 +30,7 @@ const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 const $ = (id) => document.getElementById(id);
 const els = {
   app: $('app'), back: $('back'), title: $('title'), where: $('where'), dirty: $('dirty'),
-  undo: $('undo'), redo: $('redo'), present: $('present'), download: $('download'), save: $('save'),
+  undo: $('undo'), redo: $('redo'), present: $('present'), presenter: $('presenter'), download: $('download'), save: $('save'),
   count: $('count'), add: $('add'), dup: $('dup'), del: $('del'), up: $('up'), down: $('down'), toc: $('toc'),
   canvas: $('canvas'), sheet: $('sheet'), frame: $('frame'), pos: $('pos'), hint: $('hint'), notes: $('notes'),
   loading: $('loading'), fail: $('fail'), failMsg: $('failMsg'), status: $('status'),
@@ -704,6 +704,8 @@ async function boot() {
   els.back.hidden = source.kind !== 'github';
   els.present.hidden = !source.presentUrl;
   if (source.presentUrl) els.present.href = source.presentUrl;
+  els.presenter.hidden = !source.presenterUrl;
+  if (source.presenterUrl) els.presenter.href = source.presenterUrl;
   document.title = `${source.title} — 덱 편집`;
   model = new DeckModel(els.frame);
   try {

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 미리보기는 편집기처럼 덱을 스크립트 없는 sandbox iframe(srcdoc)에 띄운다 — 그 문서는 이 정책을 물려받는다.
+     이 창은 토큰을 받지 않는다(청중 화면의 덱 스크립트와 같은 출처다). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>발표자 보기</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.css" integrity="sha384-uR1wgObmx89ZQ4VVXHdzjbDJZ1PvBK01K+E3GebmaBKdZ87qRJvBWPoPbzWeEd5T" crossorigin="anonymous">
+<link rel="stylesheet" href="presenter.css">
+<script type="module" src="js/presenter.js"></script>
+</head>
+<body>
+<header class="pbar">
+  <a class="back" href="../" title="갤러리로 돌아가기">← 갤러리</a>
+  <div class="titles">
+    <h1 id="title">발표자 보기</h1>
+    <p class="where" id="where">덱을 불러오는 중…</p>
+  </div>
+  <div class="times" role="group" aria-label="시간">
+    <span class="clock" title="지금 시각"><span class="lbl">지금</span><b id="clock">--:--</b></span>
+    <span class="clock" title="발표한 시간 (T 시작·멈춤)"><span class="lbl">지난 시간</span><b id="elapsed">0:00</b></span>
+    <span class="clock" id="remainBox" title="목표 시간에서 남은 시간"><span class="lbl">남은 시간</span><b id="remain">—</b></span>
+    <label class="goal" title="목표 발표 시간(분) — 비우면 남은 시간을 보이지 않습니다">목표<input id="goal" type="number" min="1" max="600" step="1" inputmode="numeric">분</label>
+    <button class="btn" type="button" id="tStart" title="시간 재기 시작·멈춤 (T)">시작</button>
+    <button class="btn ghost" type="button" id="tReset" title="시간을 0 으로">0 으로</button>
+  </div>
+  <div class="acts" role="toolbar" aria-label="청중 화면">
+    <span class="fhint" id="focusHint" role="status" hidden>키가 이 창에 닿지 않습니다 — 이 창을 한 번 누르세요</span>
+    <span class="aud" id="audState" role="status">청중 화면 닫힘</span>
+    <button class="btn primary" type="button" id="audBtn" title="덱을 새 창으로 엽니다 — 그 창을 프로젝터 화면으로 옮겨 F11 로 전체 화면">청중 화면 열기</button>
+    <button class="btn" type="button" id="black" aria-pressed="false" title="청중 화면을 잠시 검게 (B)">검은 화면</button>
+  </div>
+</header>
+
+<main class="pmain" id="app" hidden>
+  <section class="now" aria-label="지금 장">
+    <div class="phead"><span class="pos" id="pos">1 / 1</span><span class="ptitle" id="nowTitle"></span></div>
+    <div class="screen" id="nowBox"><div class="sheet" id="nowSheet"><iframe id="nowFrame" sandbox="allow-same-origin" inert title="지금 장" width="1280" height="720"></iframe></div></div>
+    <div class="nav">
+      <button class="btn" type="button" id="prev" title="앞 장 (← · PageUp)">◀ 앞 장</button>
+      <button class="btn primary" type="button" id="next" title="다음 장 (→ · PageDown · Space)">다음 장 ▶</button>
+      <label class="jump" title="장 번호를 넣고 Enter (숫자를 치고 Enter 도 됩니다)">장<input id="jump" type="number" min="1" step="1" inputmode="numeric"></label>
+      <span class="hint">미리보기는 스크립트가 그리는 것(차트·3D 등)이 비어 보일 수 있습니다 — 청중 화면은 덱 그대로입니다.</span>
+    </div>
+  </section>
+  <aside class="side" aria-label="다음 장과 노트">
+    <section class="next" aria-label="다음 장">
+      <div class="phead"><span class="lbl">다음</span><span class="ptitle" id="nextTitle"></span></div>
+      <div class="screen small" id="nextBox">
+        <div class="sheet" id="nextSheet"><iframe id="nextFrame" sandbox="allow-same-origin" inert title="다음 장" width="1280" height="720"></iframe></div>
+        <p class="end" id="endNote" hidden>마지막 장입니다</p>
+      </div>
+    </section>
+    <section class="notes" aria-label="발표자 노트">
+      <div class="phead">
+        <span class="lbl">노트</span>
+        <span class="fsz" role="group" aria-label="노트 글자 크기">
+          <button class="btn small" type="button" id="fsDown" title="노트 글자 작게 (-)" aria-label="노트 글자 작게">가−</button>
+          <button class="btn small" type="button" id="fsUp" title="노트 글자 크게 (+)" aria-label="노트 글자 크게">가+</button>
+        </span>
+      </div>
+      <div class="ntext" id="notes" tabindex="0"></div>
+    </section>
+  </aside>
+  <nav class="strip" aria-label="모든 장">
+    <ol id="strip"></ol>
+  </nav>
+</main>
+
+<div class="loading" id="loading" role="status">덱을 불러오는 중…</div>
+<div class="fail" id="fail" hidden>
+  <h2>발표자 보기를 열지 못했습니다</h2>
+  <p id="failMsg"></p>
+  <p><a class="btn" href="../">갤러리로</a></p>
+</div>
+<p class="status" id="status" role="status" aria-live="polite"></p>
+</body>
+</html>
