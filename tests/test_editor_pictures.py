@@ -201,8 +201,8 @@ def test_picture_dialog_stays_open_while_shrinking(browser, tmp_path, serve):
     expect(page.locator("#picDlg")).to_have_attribute("aria-busy", "true")
     page.keyboard.press("Escape")                                  # 줄이는 동안에는 닫히지 않는다
     assert page.locator("#picDlg").evaluate("(d) => d.open") is True
-    page.locator("#picDlg").evaluate("(d) => d.close()")           # 그래도 닫히면(잇따른 Esc 등) 다시 연다
-    assert page.locator("#picDlg").evaluate("(d) => d.open") is True
+    page.locator("#picDlg").evaluate("(d) => d.close()")           # 그래도 닫히면(잇따른 Esc 등) 다시 연다 —
+    expect(page.locator("#picDlg")).to_have_js_property("open", True)   # close 이벤트(다음 차례)에서 열므로 기다린다
     expect(page.locator("#picStatus")).to_contain_text("그림 1개를 줄였습니다", timeout=30000)
     assert page.locator("#picDlg").evaluate("(d) => d.open") is True
     expect(page.locator("#picClose")).to_be_enabled()
