@@ -20,8 +20,10 @@ from urllib.parse import quote, unquote
 
 import pytest
 
+import deckmerge as dm
 import samples
 import slides
+import test_deckmerge as tdm
 
 REPO = Path(__file__).resolve().parents[1]
 BS = chr(92)                                                # 역슬래시(Windows 경로 흉내)
@@ -1677,3 +1679,555 @@ def test_web_label_ignores_unreadable_layout(tmp_path):
     assert slides.web_label(tmp_path, "conf") == ""
     path.write_text(json.dumps({"categories": [{"key": "conf", "label": " 학회 "}]}), encoding="utf-8")
     assert slides.web_label(tmp_path, "conf") == "학회"
+
+
+# ---------------------------------------------------------------- 빌더 덱 다시 입히기(편집기에서 고친 덱의 원본을 다시 빌드)
+
+@pytest.fixture
+def backups(tmp_path, monkeypatch):
+    """slides edit 의 저장 전 판이 쌓이는 곳(LOCALAPPDATA 아래)을 시험 폴더로."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    return slides.backup_home()
+
+
+def built(body2: str = "둘째 본문", title2: str = "둘째 제목") -> str:
+    """시험 빌더 — 둘째 장의 제목·본문만 바꿔 빌드한다."""
+    return tdm.build([tdm.BASE[0], ("s2", "둘째", [tdm.tx("title", title2), tdm.tx("body", body2, 120)]), tdm.BASE[2]])
+
+
+def blob_at(env, rev: str, path: str) -> bytes:
+    r = subprocess.run(["git", "-C", str(env.remote), "cat-file", "blob", f"{rev}:{path}"], capture_output=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def add_built(env, name: str = "talk") -> tuple[Path, str]:
+    deck = env.src / f"{name}.html"
+    v1 = built()
+    deck.write_bytes(v1.encode("utf-8"))
+    assert run(env, "add", str(deck), "--yes") == 0
+    return deck, v1
+
+
+def test_rebuilt_builder_deck_keeps_web_edits(env, backups, capsys):
+    deck, v1 = add_built(env)
+    web = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹 고침"))     # 웹 편집기에서 고쳐 저장(편집 기록이 든 판)
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")}, "docs: 덱 고침 — talk.html(웹 편집기)")
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []                     # 원본은 편집을 시작한 그 빌드 그대로 — 조용히 둔다
+    assert "덮지 않았습니다" not in capsys.readouterr().out
+    assert remote_bytes(env, "decks/talk.html") == web
+    run(env, "list")
+    assert "편집기에서 고친 판" in capsys.readouterr().out
+    # 원본을 다시 빌드 — 고친 곳(첫 장 제목)을 새 빌드에 다시 입혀 올린다
+    v2 = built("둘째 본문 — 빌더 v2")
+    deck.write_bytes(v2.encode("utf-8"))
+    run(env, "list")
+    assert "원본을 다시 빌드함" in capsys.readouterr().out
+    assert slides.sync(repo(env)) == ["talk"]
+    out = capsys.readouterr().out
+    assert "다시 입혔습니다 — 고친 상자 1" in out and "커밋: 덱 빌드 — talk" in out
+    assert subjects(env, 3) == ["docs: 덱 갱신 — talk", "docs: 덱 빌드 — talk", "docs: 덱 고침 — talk.html(웹 편집기)"]
+    assert blob_at(env, "main~1", "decks/talk.html") == v2.encode("utf-8")   # 새 빌드 그대로 — 다음에 쓸 옛 빌드
+    merged = remote_bytes(env, "decks/talk.html")
+    assert "제목 하나 — 웹 고침" in merged.decode("utf-8") and "둘째 본문 — 빌더 v2" in merged.decode("utf-8")
+    assert dm.edits_of(merged)["build"] == dm.blob_sha(v2.encode("utf-8"))
+    assert deck.read_bytes() == merged                      # 원본 자리에도 — 바로 열어도 고친 것이 보이게
+    kept = list(backups.glob("talk-*/*.html"))
+    assert len(kept) == 1 and kept[0].read_bytes() == v2.encode("utf-8")   # 덮기 전 새 빌드는 저장 전 판으로
+    assert slides.sync(repo(env)) == []                     # 다시 돌려도 할 일이 없다
+    run(env, "list")
+    assert "상태: 같음" in capsys.readouterr().out
+    # 한 번 더 빌드해도 — 옛 빌드(v2)를 git 에서 찾아 다시 입힌다
+    v3 = built("둘째 본문 — 빌더 v3", title2="빌더가 바꾼 둘째 제목")
+    deck.write_bytes(v3.encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹 고침" in final and "둘째 본문 — 빌더 v3" in final and "빌더가 바꾼 둘째 제목" in final
+
+
+def test_rebuild_follows_the_builder_where_both_changed(env, backups, capsys):
+    deck, v1 = add_built(env)
+    web = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹").replace("둘째 본문", "둘째 본문 — 웹"))
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")})
+    deck.write_bytes(built("둘째 본문 — 빌더").encode("utf-8"))
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == ["talk"]
+    out = capsys.readouterr().out
+    assert "새 빌드를 따른 곳 1개" in out and "2장 「둘째」의 본문 상자 — 빌더도 바꿔 빌더 것을 따랐습니다" in out
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹" in final and "둘째 본문 — 빌더" in final and "둘째 본문 — 웹" not in final
+
+
+def test_local_edit_then_rebuild_finds_the_old_build_in_backups(env, backups, capsys):
+    """slides edit 으로 원본을 고친 덱 — 고치기 전 빌드는 git 에 없어도 저장 전 판에 있다."""
+    deck = env.src / "local.html"
+    v1 = built()
+    slides.EditSession(deck.resolve(), slides.backup_home()).keep(v1.encode("utf-8"))   # slides edit 의 첫 저장 전 판
+    deck.write_bytes(tdm.saved(v1, v1.replace("셋째 제목", "셋째 제목 — 이 PC 에서")))
+    assert run(env, "add", str(deck), "--yes") == 0
+    deck.write_bytes(built("둘째 본문 — 다시 빌드").encode("utf-8"))
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == ["local"]
+    final = remote_bytes(env, "decks/local.html").decode("utf-8")
+    assert "셋째 제목 — 이 PC 에서" in final and "둘째 본문 — 다시 빌드" in final
+
+
+def test_rebuild_without_the_old_build_is_held(env, backups, capsys):
+    deck = env.src / "lost.html"
+    v1 = built()
+    edited = tdm.saved(v1, v1.replace("셋째 제목", "셋째 제목 — 고침"))   # 옛 빌드(v1)는 git 에도 저장 전 판에도 없다
+    deck.write_bytes(edited)
+    assert run(env, "add", str(deck), "--yes") == 0
+    deck.write_bytes(built("둘째 본문 — 다시 빌드").encode("utf-8"))
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    out = capsys.readouterr().out
+    assert "편집을 시작한 빌드를 git 과 저장 전 판에서 찾지 못해" in out and "--force" in out
+    assert remote_bytes(env, "decks/lost.html") == edited   # 고친 판은 그대로
+    # --force 로 새 빌드를 그대로 올리면(고친 것은 버림) 다시 원본을 따른다
+    assert run(env, "add", str(deck), "--yes", "--force") == 0
+    assert dm.record_of(remote_bytes(env, "decks/lost.html")) is None
+
+
+def test_incomplete_record_and_tampered_copy_are_not_reapplied(env, backups, capsys):
+    deck, v1 = add_built(env)
+    b1 = dm.blob_sha(v1.encode("utf-8"))
+    half = dm.stamp(v1.replace("제목 하나", "제목 하나 — 고침"), b1, False, ["편집기 밖에서 바뀐 파일을 열어 고쳤습니다"])
+    web_upload(env, {"decks/talk.html": half})
+    deck.write_bytes(built("둘째 본문 — 다시 빌드").encode("utf-8"))
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    out = capsys.readouterr().out
+    assert "편집 기록이 온전하지 않아(편집기 밖에서 바뀐 파일을 열어 고쳤습니다)" in out
+    assert remote_bytes(env, "decks/talk.html") == half.encode("utf-8")
+    run(env, "list")
+    assert "원본을 다시 빌드함(편집 기록이 온전하지 않아 다시 빌드해도 고친 곳을 다시 입히지 않음)" in capsys.readouterr().out
+    # 기록을 남긴 뒤 편집기 밖에서 고친 판 — 기록이 맞지 않으니 지금 규칙대로(덮지 않고 알림)
+    tampered = dm.stamp(v1, b1).replace("셋째 제목", "밖에서 고친 셋째")
+    web_upload(env, {"decks/talk.html": tampered})
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    assert "덮지 않았습니다" in capsys.readouterr().out
+    assert remote_bytes(env, "decks/talk.html") == tampered.encode("utf-8")
+
+
+def test_record_without_real_edits_takes_the_rebuild_as_is(env, backups, capsys):
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1).decode("utf-8")})   # 손대지 않고 저장(다시 쓴 꼴만 다름)
+    v2 = built("둘째 본문 — 다시 빌드")
+    deck.write_bytes(v2.encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    assert remote_bytes(env, "decks/talk.html") == v2.encode("utf-8")
+    assert "docs: 덱 빌드 — talk" not in subjects(env, 3)
+
+
+def test_source_rebuilt_again_during_reapply_is_not_overwritten(env, backups, monkeypatch):
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹")).decode("utf-8")})
+    v2 = built("둘째 본문 — v2")
+    v3 = built("둘째 본문 — v3")
+    deck.write_bytes(v2.encode("utf-8"))
+    real = slides.deckmerge.reapply
+
+    def slow(base, ours, theirs):                           # 다시 입히는 사이 빌더가 원본을 또 썼다
+        r = real(base, ours, theirs)
+        deck.write_bytes(v3.encode("utf-8"))
+        return r
+
+    monkeypatch.setattr(slides.deckmerge, "reapply", slow)
+    assert slides.sync(repo(env)) == ["talk"]
+    assert deck.read_bytes() == v3.encode("utf-8")          # 새로 쓴 원본은 덮지 않는다
+    monkeypatch.setattr(slides.deckmerge, "reapply", real)
+    assert slides.sync(repo(env)) == ["talk"]               # 다음 sync 가 그 새 빌드에 다시 입힌다
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹" in final and "둘째 본문 — v3" in final
+
+
+def test_nothing_moves_if_the_merged_deck_cannot_be_written(env, backups, monkeypatch):
+    """다시 입힌 판을 저장소의 덱 자리에 쓰다 멈추면(Ctrl+C) HEAD 는 그대로다 — 커밋은 만들어 두었어도 HEAD 를 옮기는 것이
+    맨 나중이라, 새 빌드만 올라가 웹 고침이 사라지는 때가 없다."""
+    deck, v1 = add_built(env)
+    web = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹"))
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")}, "docs: 웹 고침")
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    real = slides.write_atomic
+    target = (env.work / "decks" / "talk.html").resolve()
+
+    def stuck(dst, data):                                   # 저장소의 덱 자리에 쓰다 멈춤(Ctrl+C)
+        if Path(dst).resolve() == target:
+            raise KeyboardInterrupt
+        real(dst, data)
+
+    monkeypatch.setattr(slides, "write_atomic", stuck)
+    with pytest.raises(KeyboardInterrupt):
+        slides.sync(repo(env))
+    assert git(env.work, "log", "-1", "--format=%s").strip() == "docs: 웹 고침"
+    assert target.read_bytes() == web and git(env.work, "status", "--porcelain", "--", "decks").strip() == ""
+    assert remote_bytes(env, "decks/talk.html") == web
+    monkeypatch.setattr(slides, "write_atomic", real)
+    assert slides.sync(repo(env)) == ["talk"]
+    assert subjects(env, 3) == ["docs: 덱 갱신 — talk", "docs: 덱 빌드 — talk", "docs: 웹 고침"]
+
+
+def local_bytes(env, rev: str, path: str) -> bytes:
+    r = subprocess.run(["git", "-C", str(env.work), "cat-file", "blob", f"{rev}:{path}"], capture_output=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def rebuilt_once(env) -> tuple[Path, bytes, bytes]:
+    """웹 편집기에서 고친 덱(받아 둠)과, 그 원본을 다시 빌드한 판(v2) — (원본, 웹 고친 판, v2)."""
+    deck, v1 = add_built(env)
+    web = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹"))
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")}, "docs: 웹 고침")
+    assert slides.sync(repo(env)) == []                     # 웹 고침을 받아 둔다(원본은 그 빌드 그대로라 할 일 없음)
+    v2 = built("둘째 본문 — v2").encode("utf-8")
+    deck.write_bytes(v2)
+    return deck, web, v2
+
+
+def test_deck_staged_before_head_moved_is_committed_by_the_next_sync(env, backups, monkeypatch):
+    """다시 입힌 판을 작업 폴더에 써 색인에 담은 뒤 HEAD 를 옮기기 전에 프로세스가 죽은 것처럼 — HEAD 는 그대로이고 그 판은
+    slides 가 마지막으로 쓴 판이라, 다음 sync 가 커밋 전에 남은 사본처럼 담는다(그사이 원격이 바뀌어도 멈추지 않는다). 원본
+    자리에는 그 sync 가 쓰고, 새 빌드는 저장 전 판 폴더에 남아 git 에서 사라져도 다음 빌드 때 옛 빌드로 쓰인다."""
+    deck, web, v2 = rebuilt_once(env)
+    real = slides.Repo.move_head
+
+    def died(self, base, made):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(slides.Repo, "move_head", died)
+    with pytest.raises(KeyboardInterrupt):
+        slides.sync(repo(env))
+    monkeypatch.setattr(slides.Repo, "move_head", real)
+    merged = (env.work / "decks" / "talk.html").read_bytes()
+    assert git(env.work, "log", "-1", "--format=%s").strip() == "docs: 웹 고침"      # HEAD 는 그대로
+    assert git(env.work, "status", "--porcelain", "--", "decks").startswith("M ")    # 다시 입힌 판은 색인에
+    assert "제목 하나 — 웹" in merged.decode("utf-8") and "둘째 본문 — v2" in merged.decode("utf-8")
+    assert deck.read_bytes() == v2                                                    # 원본에는 아직 쓰지 않았다
+    assert [p.read_bytes() for p in backups.glob("talk-*/*.html")] == [v2]           # 새 빌드는 저장 전 판으로
+    web_upload(env, {"decks/other.html": "<p>다른 곳에서 올린 덱</p>"}, "docs: 다른 곳에서 올림")
+    assert slides.sync(repo(env)) == ["talk"]
+    assert subjects(env, 3) == ["docs: 덱 갱신 — talk", "docs: 다른 곳에서 올림", "docs: 웹 고침"]
+    assert remote_bytes(env, "decks/talk.html") == merged == deck.read_bytes()
+    assert git(env.work, "status", "--porcelain", "--", "decks").strip() == ""
+    git(env.work, "gc", "-q", "--prune=now")                # 버려진 '덱 빌드' 커밋과 그 v2 를 git 에서 지운다
+    deck.write_bytes(built("둘째 본문 — v3").encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]               # 옛 빌드(v2)는 저장 전 판 폴더에서 찾는다
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹" in final and "둘째 본문 — v3" in final
+
+
+def test_stop_right_after_the_commits_leaves_the_source_to_the_next_sync(env, backups, monkeypatch):
+    """HEAD 를 옮긴 바로 뒤(원본 자리에 쓰기 전)에 프로세스가 죽은 것처럼 — 다음 sync 는 커밋을 겹쳐 만들지 않고, 원격이
+    바뀌었으면 그 위에 얹어 올리며, 원본 자리에 다시 입힌 판을 쓴다."""
+    deck, web, v2 = rebuilt_once(env)
+    real = slides.Repo.move_head
+
+    def died(self, base, made):
+        real(self, base, made)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(slides.Repo, "move_head", died)
+    with pytest.raises(KeyboardInterrupt):
+        slides.sync(repo(env))
+    monkeypatch.setattr(slides.Repo, "move_head", real)
+    merged = local_bytes(env, "HEAD", "decks/talk.html")
+    assert local_bytes(env, "HEAD~1", "decks/talk.html") == v2 and merged != v2
+    assert (env.work / "decks" / "talk.html").read_bytes() == merged and deck.read_bytes() == v2
+    assert git(env.work, "status", "--porcelain", "--", "decks").strip() == ""
+    versions = [(v2, "docs: 덱 빌드 — talk"), (merged, "docs: 덱 갱신 — talk")]
+    assert repo(env).commit_chain("decks/talk.html", versions)[1] == []            # HEAD 에 이미 있으면 만들지 않는다
+    web_upload(env, {"decks/other.html": "<p>다른 곳에서 올린 덱</p>"}, "docs: 다른 곳에서 올림")
+    assert slides.sync(repo(env)) == []                     # 새로 커밋할 것은 없다 — 지난번 커밋을 얹어 올리고 원본에 쓴다
+    assert deck.read_bytes() == merged and remote_bytes(env, "decks/talk.html") == merged
+    assert subjects(env, 4) == ["docs: 덱 갱신 — talk", "docs: 덱 빌드 — talk", "docs: 다른 곳에서 올림", "docs: 웹 고침"]
+
+
+def test_deck_reverted_by_hand_after_a_stop_is_merged_again(env, backups, monkeypatch):
+    """다시 입힌 판을 작업 폴더에 쓴 뒤(색인에 담기 전) 멈췄고, 그 파일을 손으로 되돌렸다(slides add 가 '고치던 파일'을
+    알린 경우 등) — HEAD 는 옮기지 않았으므로 되돌리면 깨끗해지고, 원격이 바뀌었어도 다음 sync 가 처음부터 다시 입힌다."""
+    deck, web, v2 = rebuilt_once(env)
+    real = slides.Repo.run
+
+    def stop(self, *args, **kw):
+        if args == ("add", "--", "decks/talk.html"):
+            raise KeyboardInterrupt
+        return real(self, *args, **kw)
+
+    monkeypatch.setattr(slides.Repo, "run", stop)
+    with pytest.raises(KeyboardInterrupt):
+        slides.sync(repo(env))
+    monkeypatch.setattr(slides.Repo, "run", real)
+    assert git(env.work, "status", "--porcelain", "--", "decks").startswith(" M")
+    git(env.work, "checkout", "--", "decks/talk.html")      # 손으로 되돌림
+    assert (env.work / "decks" / "talk.html").read_bytes() == web
+    web_upload(env, {"decks/other.html": "<p>다른 곳에서 올린 덱</p>"}, "docs: 다른 곳에서 올림")
+    assert slides.sync(repo(env)) == ["talk"]
+    assert subjects(env, 4) == ["docs: 덱 갱신 — talk", "docs: 덱 빌드 — talk", "docs: 다른 곳에서 올림", "docs: 웹 고침"]
+    final = remote_bytes(env, "decks/talk.html")
+    assert "제목 하나 — 웹" in final.decode("utf-8") and "둘째 본문 — v2" in final.decode("utf-8")
+    assert deck.read_bytes() == final
+
+
+def test_repo_copy_changed_during_reapply_is_not_overwritten(env, backups, capsys, monkeypatch):
+    """다시 입히는 사이 저장소의 덱이 바뀌었다(밖에서 받거나 고침) — 옛 판에서 다시 입힌 판으로 덮지 않고, 이번에는 아무것도
+    올리지 않는다."""
+    deck, web, v2 = rebuilt_once(env)
+    newer = web.replace("제목 하나 — 웹".encode("utf-8"), "제목 하나 — 웹 2".encode("utf-8"))
+    target = env.work / "decks" / "talk.html"
+    real = slides.keep_build
+
+    def pulled(src, theirs, base_build=""):                 # 새 빌드를 남기는 사이 다른 곳에서 새 판을 받았다
+        real(src, theirs, base_build)
+        target.write_bytes(newer)
+
+    monkeypatch.setattr(slides, "keep_build", pulled)
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    assert "다시 입히는 사이 저장소가 바뀌어(밖에서 받거나 커밋함) 쓰지 않았습니다" in capsys.readouterr().out
+    assert target.read_bytes() == newer and git(env.work, "log", "-1", "--format=%s").strip() == "docs: 웹 고침"
+    assert remote_bytes(env, "decks/talk.html") == web
+
+
+def test_old_build_stays_known_through_failed_attempts(env, backups, capsys, monkeypatch):
+    """저장소의 덱 자리에 쓰지 못해 거듭 실패해도 편집을 시작한 빌드의 지문은 밀려나지 않는다 — 밀려나면 그 빌드를 slides 가
+    올린 판으로 알아보지 못해 다시 입히지 못한다(지문은 덱마다 KNOWN_MAX 개 — 여기서는 4개로 줄여 본다)."""
+    monkeypatch.setattr(slides, "KNOWN_MAX", 4)
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹")).decode("utf-8")})
+    real = slides.write_atomic
+    target = (env.work / "decks" / "talk.html").resolve()
+
+    def locked(dst, data):                                  # 다른 프로그램이 저장소의 덱을 붙들고 있다
+        if Path(dst).resolve() == target:
+            raise PermissionError(13, "다른 프로그램이 쓰는 중")
+        real(dst, data)
+
+    monkeypatch.setattr(slides, "write_atomic", locked)
+    for i in (2, 3, 4):
+        deck.write_bytes(built(f"둘째 본문 — v{i}").encode("utf-8"))
+        capsys.readouterr()
+        assert slides.sync(repo(env)) == []
+        assert "talk.html: 읽거나 쓰지 못해 이번에는 건너뜁니다" in capsys.readouterr().out
+    monkeypatch.setattr(slides, "write_atomic", real)
+    assert slides.sync(repo(env)) == ["talk"]
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹" in final and "둘째 본문 — v4" in final
+
+
+def test_source_restored_to_an_older_write_back_is_uploaded(env, backups, capsys):
+    """저장소 판은 slides 가 마지막으로 쓴 그대로인데 원본을 예전에 다시 입혀 쓴 판으로 되돌렸다(원본 폴더의 이전 버전 등) —
+    지금 규칙대로 원본을 올린다(‘다른 빌드에서 고친 판’이라며 붙들지 않는다)."""
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹")).decode("utf-8")})
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    first = deck.read_bytes()                               # 처음 다시 입혀 쓴 판(기록의 build = v2)
+    deck.write_bytes(built("둘째 본문 — v3").encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    assert deck.read_bytes() != first and remote_bytes(env, "decks/talk.html") == deck.read_bytes()
+    deck.write_bytes(first)                                 # 원본을 그 판으로 되돌림
+    capsys.readouterr()
+    run(env, "list")
+    assert "상태: 바뀜(올릴 것)" in capsys.readouterr().out
+    assert slides.sync(repo(env)) == ["talk"]
+    assert "다른 빌드에서 고친 판" not in capsys.readouterr().out
+    assert remote_bytes(env, "decks/talk.html") == first
+
+
+def test_source_back_to_the_build_gets_the_merged_deck_again(env, backups, capsys):
+    """다시 입힌 뒤 빌더가 같은 빌드를 다시 써 원본이 편집을 시작한 빌드로 돌아갔다(다시 입힌 판을 원본에 쓰지 못한 때도 같다)
+    — 다음 sync 가 고친 판을 원본 자리에 다시 써, 그 원본을 slides edit 으로 고쳐도 웹에서 고친 것이 남게 한다."""
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹")).decode("utf-8")})
+    v2 = built("둘째 본문 — v2").encode("utf-8")
+    deck.write_bytes(v2)
+    assert slides.sync(repo(env)) == ["talk"]
+    merged = remote_bytes(env, "decks/talk.html")
+    deck.write_bytes(v2)                                    # 빌더가 같은 판을 다시 씀
+    capsys.readouterr()
+    run(env, "list")
+    assert "다음 sync 가 고친 판을 원본 자리에 다시 씀" in capsys.readouterr().out
+    assert slides.sync(repo(env)) == []
+    out = capsys.readouterr().out
+    assert "원본이 편집을 시작한 빌드 그대로라 저장소의 고친 판을 원본 자리에 다시 썼습니다" in out and "--force" in out
+    assert deck.read_bytes() == merged and remote_bytes(env, "decks/talk.html") == merged
+    assert [p.read_bytes() for p in backups.glob("talk-*/*.html")] == [v2]           # 같은 빌드는 한 번만 남긴다
+    assert slides.sync(repo(env)) == []
+
+
+def test_local_edit_missing_the_merged_edits_is_held(env, backups, capsys):
+    """다시 입힌 판이 원본에 아직 없을 때(빌더가 같은 빌드를 다시 씀·원본에 쓰지 못함) slides edit 으로 원본을 고쳤다 — 그
+    원본에는 웹에서 고친 곳이 없어 그대로 올리면 사라지므로 붙들고 알린다. 다시 입힌 판을 고친 원본은 그대로 올린다."""
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹")).decode("utf-8")})
+    v2 = built("둘째 본문 — v2")
+    deck.write_bytes(v2.encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    merged = remote_bytes(env, "decks/talk.html")
+    deck.write_bytes(tdm.saved(v2, v2.replace("셋째 제목", "셋째 제목 — 로컬")))   # 빌드(v2)에서 고친 원본 — 웹 고침이 없다
+    capsys.readouterr()
+    run(env, "list")
+    assert "저장소 판에 다시 입힌 고친 곳이 원본에 빠져 올리지 않음" in capsys.readouterr().out
+    assert slides.sync(repo(env)) == []
+    out = capsys.readouterr().out
+    assert "원본(편집기로 고친 판)에 저장소 판에 다시 입힌 고친 곳이 빠져 있어(고친 상자 1) 올리지 않았습니다" in out
+    assert "--force" in out and remote_bytes(env, "decks/talk.html") == merged
+    plain = dm.read_edits(merged.decode("utf-8"))[1]                        # 다시 입힌 판을 고친 원본
+    good = dm.stamp(plain.replace("셋째 제목", "셋째 제목 — 로컬"), dm.blob_sha(v2.encode("utf-8"))).encode("utf-8")
+    deck.write_bytes(good)
+    assert slides.sync(repo(env)) == ["talk"]
+    assert remote_bytes(env, "decks/talk.html") == good
+
+
+def test_old_build_kept_only_in_backups_is_not_pruned(env, backups, monkeypatch):
+    """slides edit 으로 고친 덱은 옛 빌드가 저장 전 판 폴더에만 있을 수 있다 — 다시 입히다 실패해 새 빌드를 남기며 꽉 찬 폴더의
+    오래된 판을 지울 때도 그 빌드는 남긴다(지우면 다음에 옛 빌드를 찾지 못해 붙들린다)."""
+    deck = env.src / "local.html"
+    v1 = built()
+    session = slides.EditSession(deck.resolve(), slides.backup_home())
+    session.keep(v1.encode("utf-8"))                        # 고치기 전 빌드 — 폴더에서 가장 오래된 판
+    for i in range(slides.BACKUP_KEEP - 1):                 # 그 뒤로 폴더가 꽉 차게
+        session.keep(f"저장 {i}".encode("utf-8"))
+    deck.write_bytes(tdm.saved(v1, v1.replace("셋째 제목", "셋째 제목 — 이 PC 에서")))
+    assert run(env, "add", str(deck), "--yes") == 0
+    real = slides.write_atomic
+    target = (env.work / "decks" / "local.html").resolve()
+
+    def locked(dst, data):                                  # 다른 프로그램이 저장소의 덱을 붙들고 있다
+        if Path(dst).resolve() == target:
+            raise PermissionError(13, "다른 프로그램이 쓰는 중")
+        real(dst, data)
+
+    monkeypatch.setattr(slides, "write_atomic", locked)
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    assert slides.sync(repo(env)) == []
+    monkeypatch.setattr(slides, "write_atomic", real)
+    assert slides.sync(repo(env)) == ["local"]
+    final = remote_bytes(env, "decks/local.html").decode("utf-8")
+    assert "셋째 제목 — 이 PC 에서" in final and "둘째 본문 — v2" in final
+
+
+def test_build_commits_follow_the_signing_setting(env, backups, capsys):
+    """commit.gpgsign 을 켠 저장소 — commit-tree 는 그 설정을 따르지 않으므로 slides 가 서명을 청한다. 서명하지 못하면(여기서는
+    서명 프로그램이 늘 실패) 커밋도 HEAD 도 그대로 두고 알린다."""
+    deck, v1 = add_built(env)
+    web = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹"))
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")}, "docs: 웹 고침")
+    assert slides.sync(repo(env)) == []
+    git(env.work, "config", "commit.gpgsign", "true")
+    git(env.work, "config", "gpg.program", "false")
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    assert "talk.html: 다시 입힌 판을 올리다 오류가 나 이번에는 건너뜁니다(SlidesError: git commit-tree" in capsys.readouterr().out
+    assert git(env.work, "log", "-1", "--format=%s").strip() == "docs: 웹 고침"
+    assert (env.work / "decks" / "talk.html").read_bytes() == web and remote_bytes(env, "decks/talk.html") == web
+    git(env.work, "config", "commit.gpgsign", "false")
+    assert slides.sync(repo(env)) == ["talk"]
+    assert subjects(env, 3) == ["docs: 덱 갱신 — talk", "docs: 덱 빌드 — talk", "docs: 웹 고침"]
+
+
+def test_head_stays_if_the_commits_cannot_be_recorded(env, backups, capsys, monkeypatch):
+    """slides 의 커밋으로 적지 못하면 HEAD 를 옮기지 않는다 — 적지 못한 커밋은 올리지 않으므로, 옮긴 뒤라면 덱이 멈춘다."""
+    deck, v1 = add_built(env)
+    web = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹"))
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")}, "docs: 웹 고침")
+    assert slides.sync(repo(env)) == []
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    real = slides.Repo.remember_made
+
+    def full(self, shas):
+        raise slides.SlidesError("slides 가 만든 커밋의 기록(slides-commits)을 쓰지 못했습니다: 디스크가 가득 참")
+
+    monkeypatch.setattr(slides.Repo, "remember_made", full)
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    assert "다시 입힌 판을 올리다 오류가 나 이번에는 건너뜁니다(SlidesError: slides 가 만든 커밋의 기록" in capsys.readouterr().out
+    assert git(env.work, "log", "-1", "--format=%s").strip() == "docs: 웹 고침"
+    assert git(env.work, "status", "--porcelain", "--", "decks").strip() == ""
+    monkeypatch.setattr(slides.Repo, "remember_made", real)
+    assert slides.sync(repo(env)) == ["talk"]
+    assert subjects(env, 3) == ["docs: 덱 갱신 — talk", "docs: 덱 빌드 — talk", "docs: 웹 고침"]
+
+
+def test_repo_copy_edited_from_another_build_waits_for_the_next_build(env, backups, capsys):
+    """원본은 지난번에 다시 입혀 쓴 판인데 저장소 판은 다른 빌드에서 고친 판(올리기 전에 받은 웹 고침을 따른 경우 등) — 덮지도
+    알 수 없는 판이라 하지도 않고 그대로 둔 채 알리고, 원본을 다시 빌드하면 저장소 판의 고친 곳을 다시 입힌다."""
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹 1")).decode("utf-8")})
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    assert dm.edits_of(deck.read_bytes()) is not None                 # 원본 자리에 다시 입힌 판
+    other = tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹 1").replace("셋째 제목", "셋째 제목 — 웹 2"))
+    web_upload(env, {"decks/talk.html": other.decode("utf-8")})       # v1 에서 고친 판(기록의 build = v1)
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    out = capsys.readouterr().out
+    assert "원본은 slides 가 지난번에 다시 입혀 쓴 판인데 저장소 판은 다른 빌드에서 고친 판입니다" in out
+    assert "덮지 않았습니다" not in out and remote_bytes(env, "decks/talk.html") == other
+    run(env, "list")
+    assert "편집기에서 고친 판(원본을 다시 빌드하면 고친 곳을 새 빌드에 다시 입힘)" in capsys.readouterr().out
+    deck.write_bytes(built("둘째 본문 — v3").encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹 1" in final and "셋째 제목 — 웹 2" in final and "둘째 본문 — v3" in final
+
+
+def test_old_build_must_be_one_that_slides_uploaded(env, backups, capsys):
+    """웹에서 올린 판(slides 가 쓰지 않은 판)을 편집기로 고친 덱 — 그 판을 옛 빌드로 삼으면 그 판에서 바뀐 것이 '빌더가
+    바꾼 것'으로 보여 사라지므로, 다시 입히지 않고 알린다."""
+    deck, v1 = add_built(env)
+    up = built("둘째 본문 — 웹에서 올린 판")
+    web_upload(env, {"decks/talk.html": up})
+    web = tdm.saved(up, up.replace("제목 하나", "제목 하나 — 웹"))
+    web_upload(env, {"decks/talk.html": web.decode("utf-8")})
+    deck.write_bytes(built("둘째 본문 — 빌더 v2").encode("utf-8"))
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []
+    out = capsys.readouterr().out
+    assert "편집을 시작한 판이 slides 가 올린 빌드가 아니라(웹에서 올리거나 고친 판 등)" in out and "--force" in out
+    assert remote_bytes(env, "decks/talk.html") == web
+
+
+def test_web_edit_after_a_reapply_waits_for_the_next_build(env, backups, capsys):
+    deck, v1 = add_built(env)
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹 1")).decode("utf-8")})
+    v2 = built("둘째 본문 — v2").encode("utf-8")
+    deck.write_bytes(v2)
+    assert slides.sync(repo(env)) == ["talk"]
+    merged = remote_bytes(env, "decks/talk.html")
+    assert deck.read_bytes() == merged
+    # 다시 입힌 판을 웹에서 또 고쳤다 — 편집기는 그 판의 기록(build = v2)을 이어받는다
+    plain = dm.read_edits(merged.decode("utf-8"))[1]
+    web2 = dm.stamp(plain.replace("셋째 제목", "셋째 제목 — 웹 2"), dm.blob_sha(v2))
+    web_upload(env, {"decks/talk.html": web2})
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == []                     # 원본은 지난번에 다시 입혀 쓴 판 — 다음 빌드를 조용히 기다린다
+    assert "덮지 않았습니다" not in capsys.readouterr().out
+    run(env, "list")
+    assert "편집기에서 고친 판(원본을 다시 빌드하면 고친 곳을 새 빌드에 다시 입힘)" in capsys.readouterr().out
+    deck.write_bytes(built("둘째 본문 — v3").encode("utf-8"))
+    assert slides.sync(repo(env)) == ["talk"]
+    final = remote_bytes(env, "decks/talk.html").decode("utf-8")
+    assert "제목 하나 — 웹 1" in final and "셋째 제목 — 웹 2" in final and "둘째 본문 — v3" in final
+
+
+def test_unexpected_error_while_reapplying_skips_only_that_deck(env, backups, capsys, monkeypatch):
+    deck, v1 = add_built(env)
+    other, _ = add_built(env, "other")
+    web_upload(env, {"decks/talk.html": tdm.saved(v1, v1.replace("제목 하나", "제목 하나 — 웹")).decode("utf-8")})
+    deck.write_bytes(built("둘째 본문 — v2").encode("utf-8"))
+    other.write_bytes(built("둘째 본문 — 다른 덱 v2").encode("utf-8"))
+
+    def boom(base, ours, theirs):
+        raise RuntimeError("뜻밖의 오류")
+
+    monkeypatch.setattr(slides.deckmerge, "reapply", boom)
+    capsys.readouterr()
+    assert slides.sync(repo(env)) == ["other"]              # 다른 덱은 그대로 올린다
+    out = capsys.readouterr().out
+    assert "talk.html: 편집기에서 고친 곳을 다시 입히다 오류가 나 이번에는 건너뜁니다(RuntimeError: 뜻밖의 오류)" in out
+    assert "제목 하나 — 웹" in remote_bytes(env, "decks/talk.html").decode("utf-8")

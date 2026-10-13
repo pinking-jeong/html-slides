@@ -241,7 +241,7 @@ def test_page_layout_puts_numbers_footer_and_one_logo_on_every_slide(browser, de
     text = hub.saved("decks/builder.html")
     s = parse_saved(page, text)
     assert s["titles"] == ["표지", "새 장", "둘째", "셋째"] and s["hse"] is False
-    assert s["scripts"] == ["deck-layout", "notes-data", "deck-js"]
+    assert s["scripts"] == ["deck-layout", "notes-data", "deck-js", "deck-edits"]
     assert text.count("data:image/png;base64,") == 1      # 로고 그림은 덱에 한 번만
     assert saved_zones(page, text) == zones(page)
     conf = page.evaluate("(t) => JSON.parse(new DOMParser().parseFromString(t, 'text/html').getElementById('deck-layout').textContent)", text)

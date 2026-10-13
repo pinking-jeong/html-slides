@@ -17,6 +17,8 @@
 원칙
 - 원본은 저장소 폴더 밖에 둔다. 저장소의 decks/ 는 slides 가 원본을 비춰 두는 거울이다.
 - slides 가 마지막으로 쓴 판이 아닌 것(웹 업로드·되돌림·직접 수정)은 덮지 않고, 저장소에서 지워진 덱은 되살리지 않는다.
+- 편집기에서 고친 빌더 덱(편집 기록이 든 저장소 판)의 원본을 다시 빌드하면, 고친 곳을 새 빌드에 다시 입혀 올리고 원본
+  자리에도 쓴다(deckmerge.py). 빌더도 같은 곳을 바꿨으면 빌더 것을 따르고 알린다.
 - 원격의 새 판을 먼저 받은 뒤 올린다. 부딪치면 원본이 있는 덱만 원격 쪽을 따르고 그 밖에는 멈춘다 — 어느 쪽도 말없이 잃지 않는다.
 - 커밋은 등록한 덱 파일만 골라서 하고, slides 가 만든 커밋만 올린다. 지우기는 slides remove 로만 한다.
 - 원격의 기록이 고쳐 쓰였으면(force-push) 멈춘다 — 옛 커밋을 다시 올려 지운 것을 되살리지 않는다.
@@ -49,6 +51,8 @@ import zlib
 from pathlib import Path
 from secrets import token_urlsafe
 from urllib.parse import quote, unquote, urlsplit
+
+import deckmerge                            # 같은 폴더(tools/)의 빌더 덱 다시 입히기
 
 ROOT = Path(__file__).resolve().parents[1]
 DECKS_DIR = "decks"
@@ -584,10 +588,11 @@ class Repo:
 
     # ---- 기본
     def run(self, *args: str, stdin: str | None = None, net: bool = False,
-            check: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess:
+            check: bool = True, timeout: float | None = None,
+            extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         # 편집기는 띄우지 않는다(환경 변수의 GIT_EDITOR 가 -c core.editor 보다 앞서므로 환경으로 막는다).
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_LITERAL_PATHSPECS": "1",
-               "GIT_EDITOR": "true", "GIT_MERGE_AUTOEDIT": "no"}
+               "GIT_EDITOR": "true", "GIT_MERGE_AUTOEDIT": "no", **(extra_env or {})}
         if not self.interactive:
             env["GCM_INTERACTIVE"] = "never"
         cmd = ["git", "-c", "core.quotepath=false"]
@@ -641,6 +646,77 @@ class Repo:
 
     def rev(self, ref: str) -> str | None:
         return self.run("rev-parse", "--verify", "-q", ref + "^{commit}", check=False).stdout.strip() or None
+
+    def run_bytes(self, *args: str, stdin: bytes = b"") -> bytes:
+        """바이트를 넣고 받는 git — 덱 파일을 줄바꿈·글자 변환 없이 그대로. 실패하면 SlidesError."""
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_LITERAL_PATHSPECS": "1"}
+        try:
+            r = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(self.root), *args], input=stdin,
+                               capture_output=True, env=env, timeout=LOCAL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise SlidesError(f"git {args[0]} 가 {LOCAL_TIMEOUT}초 안에 끝나지 않았습니다") from None
+        if r.returncode != 0:
+            raise SlidesError(f"git {' '.join(args[:2])} 실패: {r.stderr.decode('utf-8', 'replace').strip()}")
+        return r.stdout
+
+    def blob(self, sha: str) -> bytes | None:
+        """git 이 담아 둔 blob(덱 파일 한 판)의 바이트 — 없으면 None. 줄바꿈이 바뀌지 않게 바이트로 읽는다."""
+        if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+            return None
+        try:
+            return self.run_bytes("cat-file", "blob", sha)
+        except (OSError, SlidesError):
+            return None
+
+    def commit_chain(self, path: str, versions: list[tuple[bytes, str]]) -> tuple[str, list[tuple[str, str]]]:
+        """작업 폴더와 색인, HEAD 를 건드리지 않고, 지금 HEAD 위에 path 하나만 versions 의 판(바이트, 커밋 메시지)으로 차례로
+        바꾼 커밋을 잇달아 만든다(git 배관 명령 — 임시 색인·commit-tree). (바탕 커밋 = 지금 HEAD, 만든 커밋의 (이름, 메시지)들)
+        을 돌려준다 — HEAD 는 move_head 로 옮긴다. 바로 앞 판과 같은 판은 건너뛰고, HEAD 에 이미 마지막 판이 있으면 만들지 않는다.
+        - 만든 커밋은 slides 의 것으로 적어 둔다(적지 못하면 SlidesError — 적지 못한 커밋은 올리지 않으므로 HEAD 에 두면 그
+          덱이 올라가지 못하고 멈춘다). HEAD 로 옮기지 않은 커밋은 버려질 뿐 올라가지 않는다.
+        - commit.gpgsign 이 켜져 있으면 서명한다(commit-tree 는 그 설정을 따르지 않는다). git commit 이 아니라 커밋
+          훅(pre-commit·commit-msg)은 돌지 않는다."""
+        head = self.rev("HEAD")
+        if head is None:
+            raise SlidesError("커밋이 하나도 없는 저장소라 덱 빌드를 커밋하지 못했습니다")
+        meta, _, _ = self.git("ls-tree", "-z", head, "--", path).partition("\t")
+        mode, _, cur = (meta.split() + ["", "", ""])[:3]
+        mode = mode if mode in ("100644", "100755") else "100644"
+        shas = [deckmerge.blob_sha(data) for data, _ in versions]
+        if not versions or cur == shas[-1]:
+            return head, []
+        for (data, _), sha in zip(versions, shas):
+            if self.run_bytes("hash-object", "-w", "--no-filters", "--stdin", stdin=data).decode("ascii", "replace").strip() != sha:
+                raise SlidesError(f"{path}: git 이 덱 판을 다른 이름(blob)으로 담았습니다")
+        sign = self.run("config", "--type=bool", "--get", "commit.gpgsign", check=False).stdout.strip() == "true"
+        # 임시 색인 — 이름에 무작위 꼬리를 붙인다(멈춘 실행이 남긴 파일·잠금이 PID 가 같은 다음 실행을 막지 않게)
+        index = self.gitdir / f"slides-index-{os.getpid()}-{os.urandom(4).hex()}.tmp"
+        env = {"GIT_INDEX_FILE": str(index)}
+        made: list[tuple[str, str]] = []
+        tip = head
+        try:
+            self.run("read-tree", head, extra_env=env)
+            for (_, message), sha in zip(versions, shas):
+                if sha == cur:
+                    continue
+                self.run("update-index", "--add", "--cacheinfo", f"{mode},{sha},{path}", extra_env=env)
+                tree = self.git("write-tree", extra_env=env).strip()
+                tip = self.git("commit-tree", "-p", tip, *(["-S"] if sign else []), tree, stdin=message).strip()
+                made.append((tip, message))
+                cur = sha
+        finally:
+            try:
+                index.unlink()
+            except OSError:
+                pass
+        self.remember_made([c for c, _ in made])
+        return head, made
+
+    def move_head(self, base: str, made: list[tuple[str, str]]) -> None:
+        """commit_chain 으로 만든 커밋 가운데 마지막으로 HEAD 를 옮긴다 — 그사이 HEAD 가 바탕(base)에서 움직였으면 git 이
+        거절한다(옛 값 확인, SlidesError)."""
+        if made:
+            self.run("update-ref", "-m", f"slides: {made[-1][1]}", "HEAD", made[-1][0], base)
 
     def in_head(self) -> set[str]:
         """마지막 커밋(HEAD)의 decks/ 아래 경로(normcase) — 지운 것이 커밋까지 되었는지 볼 때 쓴다."""
@@ -1473,9 +1549,221 @@ def tool_owned_dirty(repo: Repo, reg: dict, dirty: dict[str, str], quiet: bool =
     return sorted(set(out))
 
 
-def copy_changed(repo: Repo, reg: dict, quiet: bool) -> list[str]:
+# ---- 빌더 덱 다시 입히기 — 편집기에서 고친 덱의 원본(빌더가 만든 파일)을 다시 빌드했을 때
+
+def edits_base(repo: Repo, src: Path, build: str, known: list[str]) -> tuple[bytes | None, str]:
+    """편집을 시작한 빌드(git blob sha 가 build 인 판)와, 찾지 못했으면 그 까닭. 저장소의 git 에서는 slides 가 올린 판(지문이
+    known 에 있는 것)만 받는다 — 웹에서 올리거나 고친 판을 옛 빌드로 삼으면 그 판에서 바뀐 것이 '빌더가 바꾼 것'으로 보여
+    사라진다. git 에 없으면 slides edit 이 남긴 원본의 저장 전 판(편집 기록이 없는 것)에서 찾는다."""
+    data = repo.blob(build)
+    if data is not None and deckmerge.blob_sha(data) != build:
+        data = None
+    if data is not None and hashlib.sha256(data).hexdigest() in known:
+        return data, ""
+    try:
+        folder = backup_dir(backup_home(), src.resolve())
+        files = sorted((p for p in folder.iterdir() if BACKUP_RE.fullmatch(p.name)), reverse=True)
+    except OSError:
+        files = []
+    for p in files:
+        try:
+            kept = p.read_bytes()
+        except OSError:
+            continue
+        if deckmerge.blob_sha(kept) == build and deckmerge.record_of(kept) is None:
+            return kept, ""
+    if data is not None:
+        return None, "편집을 시작한 판이 slides 가 올린 빌드가 아니라(웹에서 올리거나 고친 판 등)"
+    return None, "편집을 시작한 빌드를 git 과 저장 전 판에서 찾지 못해"
+
+
+def own_write_back(theirs: bytes, known: list[str]) -> dict | None:
+    """원본(theirs)이 slides 가 지난번에 다시 입혀 원본 자리에 쓴 판이면 그 편집 기록, 아니면 None. 그런 원본은 빌드가
+    아니다 — 저장소 판은 그 판이거나 그 뒤에 고친 판이라, 원본을 다시 빌드할 때까지 할 일이 없다."""
+    mine = deckmerge.edits_of(theirs)
+    return mine if mine is not None and hashlib.sha256(theirs).hexdigest() in known else None
+
+
+def rebuilt_plan(repo: Repo, rel: str, entry: dict, src: Path, dst: Path, known: list[str], say) -> tuple:
+    """저장소 판(dst)에 편집기의 편집 기록이 있을 때 어떻게 할지 → (할 일, 다시 입힐 거리(옛 빌드, 새 빌드, 다시 입힌 결과,
+    다시 입힌 저장소 판의 지문)). 'none': 기록이 없거나 원본이 빌드가 아님 — 지금 규칙대로. 'skip': 할 일 없음(알릴 것은
+    여기서 알림). 'copy': 고친 곳이 없어 원본을 그대로 올림. 'merge': 새 빌드에 고친 곳을 다시 입힌 판을 올림(put_rebuilt)."""
+    ours_b = dst.read_bytes()
+    if deckmerge.EDITS_OPEN.encode("utf-8") not in ours_b:
+        return "none", None
+    ov = deckmerge.edits_of(ours_b)
+    if ov is None:                              # 기록을 남긴 뒤 편집기 밖에서 바뀐 판 — 지금 규칙(덮지 않고 알림)
+        return "none", None
+    last = known[-1] if known else None
+    mine_last = hashlib.sha256(ours_b).hexdigest() == last         # 저장소 판이 slides 가 마지막으로 쓴 그대로
+    theirs = src.read_bytes()
+    if deckmerge.blob_sha(theirs) == ov["build"]:                  # 원본이 편집을 시작한 빌드 그대로 — 저장소 판이 더 새것
+        if mine_last and write_back(src, theirs, ours_b, say):     # 다시 입힌 판을 원본에 못 썼거나 빌더가 같은 판을 다시 씀
+            say(f"{rel}: 원본이 편집을 시작한 빌드 그대로라 저장소의 고친 판을 원본 자리에 다시 썼습니다(덮은 빌드는 저장 전 "
+                f"판 폴더에).\n  빌드를 그대로 올리려면(편집기에서 고친 것은 버림): {readd_hint(rel, entry)}")
+        return "skip", None
+    mine = own_write_back(theirs, known)
+    if mine is not None:                        # 원본은 slides 가 다시 입혀 쓴 판
+        if mine_last:
+            return "none", None                 # 저장소 판은 slides 가 마지막으로 쓴 그대로 — 원본을 예전 판으로 되돌렸다(올림)
+        if mine["build"] != ov["build"]:        # 저장소 판은 다른 빌드에서 고친 판(올리기 전에 받은 웹 고침을 따름 등)
+            say(f"{rel}: 원본은 slides 가 지난번에 다시 입혀 쓴 판인데 저장소 판은 다른 빌드에서 고친 판입니다(올리기 전에 "
+                f"받은 웹 고침 등) — 저장소 판을 그대로 둡니다. 원본을 다시 빌드하면 저장소 판의 고친 곳을 새 빌드에 다시 "
+                f"입힙니다")
+        return "skip", None                     # 저장소 판은 그 뒤에 더 고친 판 — 다음 빌드를 기다린다
+    if deckmerge.record_of(theirs) is not None:  # 원본도 편집기로 고친 판(slides edit) — 빌드가 아니다
+        lost = missing_edits(repo, src, ours_b, theirs, ov, known) if mine_last else []
+        if lost:
+            say(f"{rel}: 원본(편집기로 고친 판)에 저장소 판에 다시 입힌 고친 곳이 빠져 있어({', '.join(lost[:4])}) 올리지 "
+                f"않았습니다 — 원본이 다시 입힌 판이 아니라 그 전 빌드에서 고친 판으로 보입니다. 저장소 판({dst})을 원본 자리에 "
+                f"두고 다시 고쳐 주세요.\n  원본 그대로 올리려면(빠진 고친 곳은 버림): {readd_hint(rel, entry)}")
+            return "skip", None
+        return "none", None
+    hint = f"새 빌드를 그대로 올리려면(편집기에서 고친 것은 버림): {readd_hint(rel, entry)}"
+    if not ov["complete"]:
+        why = "; ".join(str(w) for w in ov.get("why", [])[:3]) or "까닭 모름"
+        say(f"{rel}: 원본을 다시 빌드했지만 저장소 판의 편집 기록이 온전하지 않아({why}) 편집기에서 고친 곳을 다시 입히지 "
+            f"않았습니다 — 올리지 않았습니다.\n  {hint}")
+        return "skip", None
+    base, why = edits_base(repo, src, ov["build"], known)
+    if base is None:
+        say(f"{rel}: 원본을 다시 빌드했지만 {why} 편집기에서 고친 곳을 다시 입히지 못했습니다 — 올리지 않았습니다.\n  {hint}")
+        return "skip", None
+    r = deckmerge.reapply(base, ours_b, theirs)
+    if r.refused:
+        say(f"{rel}: 원본을 다시 빌드했지만 편집기에서 고친 곳을 다시 입히지 못했습니다({r.refused}) — 올리지 않았습니다.\n"
+            f"  {hint}")
+        return "skip", None
+    if not r.edits:
+        return "copy", None
+    return "merge", (base, theirs, r, hashlib.sha256(ours_b).hexdigest())
+
+
+def missing_edits(repo: Repo, src: Path, ours_b: bytes, theirs: bytes, ov: dict, known: list[str]) -> list[str]:
+    """저장소 판이 slides 가 다시 입혀 쓴 판 그대로(지문이 마지막이고 그 앞이 기록의 빌드)인데 원본이 같은 빌드에서 편집기로
+    고친 판이면 — 다시 입힌 고친 곳(웹 고침) 가운데 원본에 빠진 것의 요약. 원본이 다시 입힌 판이 아니라 그 전 빌드에서 고친
+    판이면(다시 입힌 판을 원본에 쓰기 전에 고침 등) 그대로 올렸을 때 웹 고침이 사라진다. 그런 게 아니거나 가려낼 수 없으면 []."""
+    mine = deckmerge.edits_of(theirs)
+    if mine is None or mine["build"] != ov["build"] or len(known) < 2:
+        return []
+    base, _ = edits_base(repo, src, ov["build"], known)
+    if base is None or hashlib.sha256(base).hexdigest() != known[-2]:
+        return []                               # 저장소 판이 다시 입힌 판이 아니다(원본을 그대로 올린 판 등)
+    text = theirs.decode("utf-8")
+    plain = deckmerge.read_edits(text.removeprefix(deckmerge.BOM))[1]
+    bom = deckmerge.BOM if text.startswith(deckmerge.BOM) else ""
+    r = deckmerge.reapply(base, ours_b, (bom + plain).encode("utf-8"))   # 원본을 새 빌드로 삼아 — 다시 입힐 것이 남는가
+    return [] if r.refused or r.text is None else r.applied
+
+
+def put_rebuilt(repo: Repo, reg: dict, rel: str, path: str, src: Path, dst: Path, job: tuple, known: list[str],
+                say) -> list[str]:
+    """새 빌드 그대로('docs: 덱 빌드' — 다음에 다시 입힐 때 쓸 옛 빌드)와 다시 입힌 판('docs: 덱 갱신')을 잇단 두 커밋으로
+    만들고(작업 폴더·색인·HEAD 를 건드리지 않는 배관 커밋), 작업 폴더에 다시 입힌 판을 써 색인에 담은 뒤 HEAD 를 그 커밋으로
+    한 번에 옮긴다. 다시 입힌 판을 쓴 덱 경로를 돌려준다. 새 빌드만 올라가 고친 것이 갤러리에서 사라지는 때는 없고, 어디서
+    멈춰도 sync 가 잇는다.
+    - 작업 폴더에 쓰기 전(커밋을 만들거나 쓰지 못함, 그사이 저장소가 바뀜 등): 바뀐 것이 없다 — 다음에 처음부터 다시 한다.
+    - 쓴 뒤 HEAD 를 옮기기 전: HEAD 는 그대로이고 작업 폴더(와 색인)의 판이 slides 가 마지막으로 쓴 판이라, 커밋 전에 남은
+      사본처럼 '덱 갱신' 하나로 커밋된다(새 빌드는 쓰기 전에 저장 전 판 폴더에 남겨 다음에 옛 빌드로 찾는다). 그 판을 손으로
+      되돌려도 HEAD 와 같아질 뿐이라 막히지 않는다.
+    - 옮긴 뒤: 원본에 다시 쓰지 못했으면 다음 sync 가 쓴다(rebuilt_plan).
+    다시 입힌 판은 원본 자리에도 쓴다 — 덱을 바로 열거나 slides edit 으로 다시 열어도 보이게."""
+    base, theirs, res, seen = job
+    merged = res.text.encode("utf-8")
+    if len(merged) > SIZE_LIMIT:
+        say(f"{src.name}: 다시 입힌 판이 100 MB 에 가까워 올리지 않았습니다")
+        return []
+    name = Path(rel).stem
+    head, made = repo.commit_chain(path, [(theirs, f"docs: 덱 빌드 — {name}"), (merged, f"docs: 덱 갱신 — {name}")])
+    # 지문은 작업 폴더에 쓰기 전에 남긴다 — 마지막(다시 입힌 판)이 slides 가 덮어써도 되는 판. 옛 빌드의 지문도 다시 앞으로
+    # 올려, 쓰지 못해 거듭 다시 해도 밀려나지 않게(밀려나면 다음에 그 판을 옛 빌드로 받지 못한다)
+    for data in (base, theirs, merged):
+        remember(known, hashlib.sha256(data).hexdigest())
+    save_registry(repo, reg)
+    try:
+        keep_build(src, theirs, deckmerge.blob_sha(base))
+    except OSError:
+        pass                                    # 남기지 못해도 — HEAD 로 옮기면 git 에서 찾는다
+    # 쓰기 바로 전 — 그사이 저장소가 바뀌었으면(밖에서 받거나 커밋함) 쓰지 않는다. 새로 받은 판을 옛 판에서 다시 입힌 판으로
+    # 덮지 않게(다음 sync 가 바뀐 저장소에서 다시 한다)
+    if repo.rev("HEAD") != head or sha256_file(dst) != seen:
+        raise SlidesError("다시 입히는 사이 저장소가 바뀌어(밖에서 받거나 커밋함) 쓰지 않았습니다 — 다음 sync 가 다시 합니다")
+    write_atomic(dst, merged)
+    try:
+        repo.run("add", "--", path)             # 색인에 먼저 담고 HEAD 를 옮긴다
+        repo.move_head(head, made)
+    except SlidesError as e:                    # 쓴 판은 커밋 전에 남은 사본처럼 이번 sync 가 따로 커밋한다
+        say(f"{rel}: 다시 입힌 판을 썼지만 커밋 둘로 올리지 못해({e}) '덱 갱신' 하나로 커밋합니다")
+        made = []
+    for _, message in made:
+        print(f"[{stamp()}] 커밋: {message.removeprefix('docs: ')}")
+    say(f"{rel}: 원본을 다시 빌드해 편집기에서 고친 곳을 새 빌드에 다시 입혔습니다 — {', '.join(res.applied) or '고친 곳'}")
+    if res.kept:
+        say(f"  빌더도 같은 곳을 바꿨거나 다시 입힐 수 없어 새 빌드를 따른 곳 {len(res.kept)}개:\n"
+            + "\n".join(f"   - {k}" for k in res.kept[:8]) + (f"\n   … 외 {len(res.kept) - 8}개" if len(res.kept) > 8 else ""))
+    write_back(src, theirs, merged, say)
+    return [path] if made else []
+
+
+def keep_build(src: Path, theirs: bytes, base_build: str = "") -> None:
+    """새 빌드를 원본의 저장 전 판 폴더(slides edit 과 같은 곳)에 남긴다 — 같은 판이 이미 있으면 그대로. 오래된 판을 지울 때
+    편집을 시작한 빌드(base_build — git blob sha)는 남긴다: slides edit 으로 고친 덱은 그 판이 이 폴더에만 있을 수 있다.
+    못 하면 OSError."""
+    session = EditSession(src.resolve(), backup_home())
+    files = sorted(p for p in session.backups.iterdir() if BACKUP_RE.fullmatch(p.name)) if session.backups.is_dir() else []
+    tag = hashlib.sha256(theirs).hexdigest()[:8]
+    if any(p.stem.endswith(f"-{tag}") and p.read_bytes() == theirs for p in files):
+        return
+    if base_build and len(files) >= BACKUP_KEEP:        # 오래된 것을 지울 때 — 옛 빌드는 이번 실행의 첫 판처럼 남긴다
+        session.first = next((p for p in files if deckmerge.blob_sha(p.read_bytes()) == base_build), None)
+    session.keep(theirs)
+
+
+def write_back(src: Path, theirs: bytes, merged: bytes, say) -> bool:
+    """다시 입힌 판을 원본 자리에도 쓴다(썼으면 True). 그 사이 원본이 또 바뀌었으면(빌드 중) 쓰지 않는다 — 다음 sync 가 그
+    새 빌드에 다시 입힌다. 덮기 전 새 빌드가 저장 전 판 폴더에 있어야 쓴다(put_rebuilt 가 남겼고, 없으면 다시 남긴다)."""
+    try:
+        if src.read_bytes() != theirs:
+            return False
+        keep_build(src, theirs)
+        write_atomic(src, merged)
+        return True
+    except OSError as e:
+        say(f"{src.name}: 다시 입힌 판을 원본 자리에 쓰지 못했습니다({e.strerror or e}) — 저장소에는 올렸고, 다음 sync 가 "
+            f"다시 씁니다")
+        return False
+
+
+def rebuilt_status(repo: Repo, src: Path, dst: Path, known: list[str]) -> str | None:
+    """slides list — 편집 기록이 든 저장소 판의 상태(없으면 None: 지금 규칙대로). rebuilt_plan 과 같은 갈래로."""
+    ours_b = dst.read_bytes()
+    ov = deckmerge.edits_of(ours_b)
+    if ov is None:
+        return None
+    mine_last = bool(known) and hashlib.sha256(ours_b).hexdigest() == known[-1]
+    data = src.read_bytes()
+    mine = own_write_back(data, known)
+    if mine is not None and mine_last:
+        return None                             # 원본을 예전에 다시 입혀 쓴 판으로 되돌림 — 지금 규칙대로(올릴 것)
+    if deckmerge.blob_sha(data) == ov["build"] and mine_last:
+        what, then = "편집기에서 고친 판", "원본이 그 전 빌드 그대로라 다음 sync 가 고친 판을 원본 자리에 다시 씀"
+    elif deckmerge.blob_sha(data) == ov["build"] or mine is not None:
+        what, then = "편집기에서 고친 판", "원본을 다시 빌드하면 고친 곳을 새 빌드에 다시 입힘"
+    elif deckmerge.record_of(data) is None:
+        what, then = "원본을 다시 빌드함", "올릴 때 편집기에서 고친 곳을 새 빌드에 다시 입힘"
+    elif mine_last and missing_edits(repo, src, ours_b, data, ov, known):
+        return "원본을 편집기로 고침(저장소 판에 다시 입힌 고친 곳이 원본에 빠져 올리지 않음 — sync 의 알림 참고)"
+    else:
+        return None
+    if not ov["complete"]:
+        then = "편집 기록이 온전하지 않아 다시 빌드해도 고친 곳을 다시 입히지 않음"
+    return f"{what}({then})"
+
+
+def copy_changed(repo: Repo, reg: dict, quiet: bool, merged: list[str] | None = None) -> list[str]:
     """원본이 바뀐 덱을 저장소 사본에 옮긴다. slides 가 마지막으로 쓴 판이 아닌 사본(웹 업로드·되돌림·직접 수정)은
-    덮지 않고, 저장소에서 지워진 덱(웹에서 지움·다른 PC 에서 내림)은 되살리지 않는다."""
+    덮지 않고, 저장소에서 지워진 덱(웹에서 지움·다른 PC 에서 내림)은 되살리지 않는다. 편집기에서 고친 곳을 다시 입혀 바로
+    커밋한 덱(put_rebuilt)은 merged 에 담는다(주지 않으면 옮긴 덱과 함께 돌려준다)."""
     copied: list[str] = []
     head = repo.in_head()
 
@@ -1506,7 +1794,19 @@ def copy_changed(repo: Repo, reg: dict, quiet: bool) -> list[str]:
                     say(f"{paths[kind]}: 저장소에서 지워졌습니다(웹에서 지웠거나 다른 PC 에서 내림) — 되살리지 않았습니다.\n"
                         f"  다시 올리려면: {readd_hint(rel, entry)}\n  그만 지켜보려면: slides forget {Path(rel).stem}")
                     continue
-                if d is not None and d != last:
+                # 편집기에서 고친 빌더 덱 — 원본을 다시 빌드했으면 고친 곳을 새 빌드에 다시 입힌다(deckmerge)
+                plan, job = "none", None
+                if d is not None and kind == "main" and dst.suffix.lower() in (".html", ".htm"):
+                    try:
+                        plan, job = rebuilt_plan(repo, rel, entry, src, dst, known, say)
+                    except OSError:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — 다시 입히다 난 뜻밖의 오류는 이 덱만 건너뛴다
+                        say(f"{rel}: 편집기에서 고친 곳을 다시 입히다 오류가 나 이번에는 건너뜁니다({type(e).__name__}: {e})")
+                        continue
+                if plan == "skip":
+                    continue
+                if plan == "none" and d is not None and d != last:
                     why = ("예전에 올린 판으로 되돌려져 있어(웹에서 되돌림 등)" if d in known
                            else "slides 가 올린 판이 아니라(웹 업로드·직접 수정)")
                     say(f"{paths[kind]}: 저장소 쪽 판이 {why} 덮지 않았습니다.\n"
@@ -1520,6 +1820,16 @@ def copy_changed(repo: Repo, reg: dict, quiet: bool) -> list[str]:
                     if secrets:
                         say(f"{src.name}: 열쇠·토큰처럼 보이는 글이 있어 올리지 않았습니다 — " + "; ".join(secrets))
                         continue
+                if plan == "merge":
+                    try:
+                        put = put_rebuilt(repo, reg, rel, paths[kind], src, dst, job, known, say)
+                    except OSError:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — 이 덱만 건너뛴다(이미 쓴 판은 커밋 전 사본처럼 담긴다)
+                        say(f"{rel}: 다시 입힌 판을 올리다 오류가 나 이번에는 건너뜁니다({type(e).__name__}: {e})")
+                        continue
+                    (copied if merged is None else merged).extend(put)
+                    continue
                 remember(known, copy_atomic(src, dst))
                 save_registry(repo, reg)          # 사본을 쓴 즉시 남긴다(멈춰도 다음에 slides 의 판으로 알아보게)
                 copied.append(paths[kind])
@@ -1554,7 +1864,8 @@ def sync(repo: Repo, push: bool = True, quiet: bool = False, wait: float = 60) -
                 taken = repo.integrate(regen_paths(reg))
             except OfflineError as e:
                 offline = e
-        copied = copy_changed(repo, reg, quiet)
+        merged: list[str] = []                  # 편집기에서 고친 곳을 다시 입혀 바로 커밋한 덱(put_rebuilt)
+        copied = copy_changed(repo, reg, quiet, merged)
         save_registry(repo, reg)
         changed = sorted(set(copied) | set(tool_owned_dirty(repo, reg, repo.dirty())))
         names = names_of(changed)
@@ -1569,8 +1880,8 @@ def sync(repo: Repo, push: bool = True, quiet: bool = False, wait: float = 60) -
             taken += repo.publish(regen_paths(reg))
             print(f"[{stamp()}] {repo.remote}/{repo.target_branch} 에 올렸습니다")
         report_taken(taken)
-        done = sorted(set((names if committed else []) + (names_of(leftover) if early else [])))
-        tidy = bool(committed or early)
+        done = sorted(set((names if committed else []) + (names_of(leftover) if early else []) + names_of(merged)))
+        tidy = bool(committed or early or merged)
     if tidy:                                    # 잠금을 푼 뒤에 — 오래 걸려도 다른 slides 작업을 막지 않게
         repo.gc_auto()
     return done
@@ -1646,6 +1957,10 @@ def deck_status(repo: Repo, rel: str, entry: dict, head: set[str]) -> str:
     s, d = sha256_file(src), sha256_file(dst)
     if s == d:
         return "같음"
+    if rel.lower().endswith((".html", ".htm")):
+        status = rebuilt_status(repo, src, dst, entry["known"].get("main") or [])
+        if status:
+            return status
     if d != last:
         return "저장소 쪽이 바뀜(웹 업로드·되돌림 등 — 덮지 않음)"
     return "바뀜(올릴 것)"
@@ -1913,6 +2228,12 @@ def backup_home() -> Path:
     return (Path(base) if base else Path.home() / ".local" / "share") / "html-slides" / "backups"
 
 
+def backup_dir(home: Path, path: Path) -> Path:
+    """덱 파일(path)의 저장 전 판을 남기는 폴더 — 이름 앞부분과 경로의 지문으로."""
+    tag = hashlib.sha256(os.path.normcase(str(path)).encode("utf-8")).hexdigest()[:10]
+    return home / f"{path.stem[:40]}-{tag}"
+
+
 def personal_folder(folder: Path) -> bool:
     """드라이브 맨 위, 홈과 그 위, 홈(또는 OneDrive) 바로 아래의 바탕 화면·문서·다운로드·사진 등인가."""
     try:
@@ -1994,8 +2315,7 @@ class EditSession:
         self.folder = path.parent
         self.key = token_urlsafe(32)
         self.show_key = token_urlsafe(32)
-        tag = hashlib.sha256(os.path.normcase(str(path)).encode("utf-8")).hexdigest()[:10]
-        self.backups = backups / f"{path.stem[:40]}-{tag}"
+        self.backups = backup_dir(backups, path)
         self.first: Path | None = None          # 이번 실행에서 처음 남긴 판 — 고치기 시작하기 전의 파일
         self.lock = threading.Lock()
         self.present_url = ""

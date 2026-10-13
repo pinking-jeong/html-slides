@@ -1317,7 +1317,7 @@ def test_builder_save_renumbers_everything(browser, decks, tmp_path, serve):
     assert s["toc"] == [["sec", "1. 서론"], ["a", "#1", "0", "1둘째"], ["sec", "표지"], ["a", "#2", "1", "2표지"],
                         ["sec", "1. 서론"], ["a", "#3", "2", "3방법"], ["sec", "2. 본론"], ["a", "#4", "3", "4셋째"]]
     assert s["cnt"] == "1 / 4" and s["hse"] is False and s["editable"] == 0 and s["base"] == 0
-    assert s["scripts"] == ["notes-data", "deck-js"]
+    assert s["scripts"] == ["notes-data", "deck-js", "deck-edits"]      # 빌더 덱의 편집 기록(edits.js)
     assert state(page)["dirty"] is False and "저장했습니다" in page.inner_text("#status")
     ctx.close()
     assert errors == []

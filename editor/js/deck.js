@@ -52,6 +52,8 @@ const NOSCRIPT_RE = /<noscript\b[^>]{0,4096}>([\s\S]*?)<\/noscript\s*>/gi;
 // 원본의 끝 모양 — </body>·</html> 앞뒤와 파일 끝의 공백(끝 태그를 생략했으면 그 그룹은 없다)
 const END_RE = /(?:([ \t\n\f\r]*)<\/body\s*>)?(?:([ \t\n\f\r]*)<\/html\s*>)?([ \t\n\f\r]*)$/i;
 const TRAIL_WS_RE = /[ \t\n\f\r]+$/;
+// 저장 글에서 편집 기록(edits.js)이 들어갈 자리 — 덱 글에는 나올 수 없는 글자(NUL)로
+const EDITS_TOKEN = `${String.fromCharCode(0)}HS-EDITS${String.fromCharCode(0)}`;
 const PAGE_RE = /^\s*(\d{1,4})\s*\/\s*(\d{1,4})\s*$/;
 const LABEL_NUM_RE = /^(\d{1,4})\.\s+/;
 const NON_VISUAL = new Set(['script', 'style', 'link', 'meta', 'template', 'base', 'title', 'noscript']);
@@ -355,6 +357,7 @@ export class DeckModel {
     this.seq = 0;
     this.keySeq = 0;
     this.onSerialize = null;      // (사본 문서, 새 차례의 장들) — 저장할 사본에서 장 차례에 매인 것을 더 고칠 때(쪽 레이아웃)
+    this.edits = null;            // 빌더 덱의 편집 기록(edits.js — app.js 가 불러온 뒤 단다)
   }
 
   /* ---------- 불러오기 */
@@ -696,6 +699,9 @@ export class DeckModel {
     const doc = this.doc;
     const root = doc.documentElement.cloneNode(true);
     for (const n of root.querySelectorAll(`[${A.ui}]`)) n.remove();
+    // 빌더 덱의 편집 기록 — 지난 기록은 떼고 저장할 때마다 새로 쓴다(상자 표식·기록, edits.js)
+    const edits = this.edits && this.edits.on ? this.edits : null;
+    if (edits) edits.strip(root);
     // </body>·</html> 앞뒤의 공백은 다시 읽으면 body 끝으로 들어온다 — 떼어 두고 끝에서 원본 모양(shape)대로 되돌려야
     // 저장할 때마다 빈 줄이 늘지 않는다
     const body = root.querySelector(':scope > body');
@@ -725,6 +731,7 @@ export class DeckModel {
     if (this.family === 'builder') this.syncBuilderDeck(root, slides);
     // 장 차례에 매인 것을 더 고칠 곳(쪽 레이아웃의 쪽 번호 등) — 저장할 사본의 장들을 새 차례로 받는다
     if (this.onSerialize) this.onSerialize(root, slides);
+    if (edits) edits.mark(slides);
     for (const el of [root, ...root.querySelectorAll('*')]) {
       for (const a of Array.from(el.attributes)) if (a.name.startsWith(P)) el.removeAttribute(a.name);
     }
@@ -732,7 +739,11 @@ export class DeckModel {
     let html = root.outerHTML;
     const END = '</body></html>';
     if (html.endsWith(END)) {
-      html = html.slice(0, -END.length) + (sh.body ? `${sh.preBody}</body>` : '') + (sh.html ? `${sh.preHtml}</html>` : '');
+      html = html.slice(0, -END.length) + (edits ? EDITS_TOKEN : '') + (sh.body ? `${sh.preBody}</body>` : '')
+        + (sh.html ? `${sh.preHtml}</html>` : '');
+    } else if (edits) {                   // </body> 뒤에 주석 같은 것이 있는 덱 — 기록 자리는 그래도 본문 끝(</body> 바로 앞)
+      const at = html.lastIndexOf('</body>');
+      if (at >= 0) html = html.slice(0, at) + EDITS_TOKEN + html.slice(at);
     }
     const parts = [];                     // <html> 과 그 뒤의 주석 — 앞의 doctype·주석은 머리말(prolog)이 글자 그대로 쓴다
     for (const node of doc.childNodes) {
@@ -740,7 +751,8 @@ export class DeckModel {
       else if (parts.length && node.nodeType === Node.COMMENT_NODE) parts.push(`<!--${node.data}-->`);
     }
     const out = `${this.prolog}${parts.join('\n')}${sh.tail}`;
-    return sh.eol === '\r\n' ? out.replace(/\n/g, '\r\n') : out;
+    const text = sh.eol === '\r\n' ? out.replace(/\n/g, '\r\n') : out;
+    return edits ? edits.seal(text, EDITS_TOKEN) : text;
   }
 
   syncBuilderSlide(s, i) {

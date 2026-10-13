@@ -90,6 +90,7 @@ class GithubSource {
     this.sha = null;
     this.text = '';
     this.bom = false;
+    this.blob = '';         // 불러온 파일의 git blob sha — 빌더 덱 편집 기록의 build(edits.js)
   }
 
   get title() { return String(this.deck.title || this.deck.name || fileName(this.path)); }
@@ -148,6 +149,7 @@ class GithubSource {
     const got = await this.fetchRaw();
     if (!got) throw fail('missing', `저장소에서 ${this.path} 를 찾지 못했습니다 — 지웠거나 이름을 바꿨을 수 있습니다.`);
     this.sha = got.sha;
+    this.blob = got.sha;
     this.bom = hasBom(got.bytes);
     this.text = fromUtf8(got.bytes);
   }
@@ -169,14 +171,15 @@ class GithubSource {
     });
   }
 
-  // 옛 판(커밋)의 글 — 저장은 여전히 지금 판(this.sha) 위에 새 커밋으로
+  // 옛 판(커밋)의 글과 그 파일의 blob sha → {text, blob} — 저장은 여전히 지금 판(this.sha) 위에 새 커밋으로
   async readAt(ref) {
     if (!SHA_RE.test(String(ref))) throw fail('ref', '판 표시가 이상해 열지 않습니다.');
     const r = await this.gh(`${this.contentsUrl()}?ref=${encodeURIComponent(ref)}`,
       { headers: { Accept: 'application/vnd.github.raw+json' } });
     if (r.status === 404) throw fail('missing', '그 판에는 이 덱 파일이 없습니다.');
     if (!r.ok) throw await this.apiError(r, 'read');
-    return fromUtf8(new Uint8Array(await r.arrayBuffer()));
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    return { text: fromUtf8(bytes), blob: await gitBlobSha(bytes) };
   }
 
   // force: 그 사이 바뀐 저장소의 판을 덮어쓴다(바뀐 판은 GitHub 기록에 남는다)
@@ -256,6 +259,7 @@ class LocalSource {
     this.path = '';
     this.text = '';
     this.present = '';
+    this.blob = '';         // 불러온 파일의 git blob sha — 빌더 덱 편집 기록의 build(edits.js)
   }
 
   get title() { return this.name; }
@@ -298,7 +302,9 @@ class LocalSource {
     this.path = head('X-HSE-Path');
     const present = r.headers.get('X-HSE-Present') || '';
     this.present = PRESENT_RE.test(present) ? present : '';
-    this.text = fromUtf8(new Uint8Array(await r.arrayBuffer()));
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    this.blob = await gitBlobSha(bytes);
+    this.text = fromUtf8(bytes);
   }
 
   async save(text, { force } = {}) {
@@ -330,7 +336,8 @@ class LocalSource {
     if (!BACKUP_ID_RE.test(String(id))) throw fail('ref', '판 이름이 이상해 열지 않습니다.');
     const r = await this.api('GET', undefined, undefined, `/api/history/${encodeURIComponent(id)}`);
     if (!r.ok) throw await this.error(r, 'read');
-    return fromUtf8(new Uint8Array(await r.arrayBuffer()));
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    return { text: fromUtf8(bytes), blob: await gitBlobSha(bytes) };
   }
 
   async error(r, phase = 'save') {

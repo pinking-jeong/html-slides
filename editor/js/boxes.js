@@ -9,6 +9,7 @@
 
 import { textHosts } from './canvas.js';
 import { A, FREE_BOX, GROUP, newGroupId, PLACE, retagPages } from './deck.js';
+import { asNew } from './edits.js';
 import { altOf, checkPicture, naturalSize, PICTURE_WARN, placePicture, readPicture } from './insert.js';
 import { bigPicture, fmtBytes, shrinkFile } from './pictures.js';
 import { flowBodyLook } from './layouts.js';
@@ -310,6 +311,7 @@ export class Boxes {
       items.forEach((el, i) => {
         const copy = el.cloneNode(true);
         unmark(copy);
+        asNew(copy);                           // 빌더 덱의 편집 기록에는 새 상자(edits.js)
         this.model.renameIds(copy);
         if (movable[i]) {
           // 옮길 수 있는 상자는 맨 위에, 조금 비켜서 — 원래 상자와 겹쳐 보이지 않게(여럿이면 같은 만큼, 서로의 순서대로)
@@ -344,6 +346,7 @@ export class Boxes {
     const items = inOrder(boxes).map((b) => {
       const c = b.cloneNode(true);
       unmark(c);
+      asNew(c);
       if (c.hasAttribute(GROUP) && !whole.has(c.getAttribute(GROUP))) c.removeAttribute(GROUP);
       return c.outerHTML;
     });

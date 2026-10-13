@@ -3,6 +3,7 @@
    아니면 장 가운데에 넣는다. */
 
 import { GROUP } from './deck.js';
+import { SESSION } from './edits.js';
 
 export const PICTURE_WARN = 4 * 1024 * 1024;     // 이보다 크면 덱 파일이 그만큼 커진다고 알린다
 export const PICTURE_MAX = 20 * 1024 * 1024;     // 이보다 크면 넣지 않는다(편집기·저장이 느려진다)
@@ -57,6 +58,9 @@ export function placePicture(model, slide, url, size, alt, target) {
       const f = fit(size, w, h);
       box = { x: x + (w - f.w) / 2, y: y + (h - f.h) / 2, w: f.w, h: f.h };
       if (target.hasAttribute(GROUP)) img.setAttribute(GROUP, target.getAttribute(GROUP));
+      // 빌더 덱의 편집 기록에서는 바꿔 넣은 그림이 그 자리 상자를 이어받는다(edits.js) — 새 상자로 치면, 빌더도 그 상자를
+      // 바꿨을 때 다시 빌드하면 빌더의 새 상자와 그림이 함께 남는다
+      if (target.hasAttribute(SESSION)) img.setAttribute(SESSION, target.getAttribute(SESSION));
       target.replaceWith(img);
     } else {
       const { w: W, h: H } = model.size;

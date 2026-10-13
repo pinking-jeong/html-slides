@@ -7,6 +7,7 @@ import { Arrange } from './arrange.js';
 import { Boxes } from './boxes.js';
 import { Canvas } from './canvas.js';
 import { deleteDraft, getDraft, listDrafts, putDraft } from './drafts.js';
+import { Edits } from './edits.js';
 import { Formatter } from './format.js';
 import { History } from './history.js';
 import { LAYOUTS, makeSlide } from './layouts.js';
@@ -259,9 +260,21 @@ async function restoreFrom(params) {
       return { text: d.text, label, draftId: d.id, time: d.time, base: typeof d.base === 'string' ? d.base : '' };
     }
     if ((k === 'ref') !== (source.kind === 'github')) continue;   // 저장소의 판은 갤러리에서, 저장 전 판은 이 PC 에서만
-    return { text: await source.readAt(id), label };
+    const got = await source.readAt(id);
+    return { text: got.text, blob: got.blob, label };
   }
   return null;
+}
+
+// 연 글이 나온 빌드 파일의 git blob sha(편집 기록의 build) — 지금 판이면 그 파일, 저장소의 판·저장 전 판이면 그 판, 임시
+// 저장본이면 그 고침의 바탕 판(GitHub 은 blob sha 를 적어 두었고, 이 PC 는 바탕 판이 지금 파일일 때만 안다). 글에 편집 기록이
+// 있으면 Edits 가 그 기록의 build 를 따른다.
+function blobOf(restored) {
+  if (!restored) return source.blob || '';
+  if (restored.blob) return restored.blob;
+  if (!restored.draftId || !restored.base) return '';
+  if (source.kind === 'github') return restored.base;
+  return restored.base === source.version ? source.blob || '' : '';
 }
 
 // 주소에서 판 표시를 지운다(저장한 뒤·고른 판을 열지 못했을 때) — 새로 고치면 지금 판이 열리게
@@ -959,14 +972,19 @@ async function boot() {
   if (source.presenterUrl) els.presenter.href = source.presenterUrl;
   document.title = `${source.title} — 덱 편집`;
   model = new DeckModel(els.frame);
+  const loaded = source.text;
   try {
-    await model.load(source.text, source.base);
+    await model.load(loaded, source.base);
   } catch (e) {
     if (restored) dropVersionParams();      // 새로 고치면 지금 판이 열리게
     fail(restored ? `고른 판을 열지 못했습니다 — ${e.message} 새로 고치면 지금 판을 엽니다.` : e.message);
     return;
   }
   source.text = '';
+  // 빌더 덱의 편집 기록(edits.js) — 저장하면 본문 끝에 남아, 원본을 다시 빌드해도 slides sync 가 고친 곳을 새 빌드에 다시 입힌다
+  model.edits = new Edits(model);
+  model.edits.begin(loaded, blobOf(restored));
+  model.edits.edited = () => !!hist && (hist.topSeq() !== 0 || !!canvas.pending || !!notesPending);
   hist = new History(applyOp);
   currentVersion = source.version;
   if (restored) {

@@ -7,6 +7,7 @@
    어느 것이든 되돌리기 한 칸 — 바뀐 장마다 사본(edit)과 바뀐 스타일 글(style)을 한 묶음으로 넣는다(masterui.js). */
 
 import { A, FREE_BOX, GROUP, LOCK, retagPages } from './deck.js';
+import { asNew, REF } from './edits.js';
 import { anchorSlide } from './pagelayout.js';
 import { toPx, toPt, hexOf, firstFamily, FONTS } from './format.js';
 
@@ -212,14 +213,17 @@ function unmark(root) {
   }
 }
 
-// 상자를 견줄 꼴 — 편집 표시·id(복제하면 '-c1' 이 붙는다)·그 참조, 묶음·잠금 표시(배치 ▾ — 한 장에서 묶거나 잠가도 같은
-// 상자다)와 상자의 자리·크기(style)는 빼고. 글이 없는 그림·도형도 그림 주소(src)·모양(안의 HTML)이 같아야 같은 상자다.
+// 상자를 견줄 꼴 — 편집 표시·id(복제하면 '-c1' 이 붙는다)·그 참조, 상자 표식(data-hs-ref — 빌더 덱 편집 기록), 묶음·잠금
+// 표시(배치 ▾ — 한 장에서 묶거나 잠가도 같은 상자다)와 상자의 자리·크기(style)는 빼고. 글이 없는 그림·도형도 그림 주소(src)·
+// 모양(안의 HTML)이 같아야 같은 상자다.
 function signature(el) {
   const c = el.cloneNode(true);
   unmark(c);
   for (const n of [c, ...c.querySelectorAll('*')]) {
     for (const a of Array.from(n.attributes)) {
-      if (a.name === 'id' || a.name.startsWith('data-hse-') || a.name === GROUP || a.name === LOCK) n.removeAttribute(a.name);
+      if (a.name === 'id' || a.name.startsWith('data-hse-') || a.name === REF || a.name === GROUP || a.name === LOCK) {
+        n.removeAttribute(a.name);
+      }
     }
   }
   c.removeAttribute('style');
@@ -290,6 +294,7 @@ export function copyToAll(model, box, skipFirst) {
     if (sameIn(model, s, box, sig).length) return;
     const c = box.cloneNode(true);
     unmark(c);
+    asNew(c);
     c.removeAttribute(GROUP);           // 다른 장에 혼자 들어가는 사본 — 이 장의 묶음과는 상관없다
     model.renameIds(c);
     retagPages(c, home.getAttribute(A.pn), s.getAttribute(A.pn));
