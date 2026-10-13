@@ -2149,6 +2149,8 @@ class EditHandler(http.server.BaseHTTPRequestHandler):
             return self._deck_file(path, self.session.key)
         if path.startswith("/editor/"):
             return self._static(EDITOR_DIR, path[len("/editor/"):] or "index.html")
+        if path.startswith("/vendor/pptxgenjs/"):                  # 편집기의 ‘PPTX 받기’가 처음 누를 때 부른다
+            return self._static(ROOT / "vendor" / "pptxgenjs", path[len("/vendor/pptxgenjs/"):])
         if path == "/assets/favicon.svg":
             return self._static(ROOT / "assets", "favicon.svg")
         self._missing()

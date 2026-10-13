@@ -16,6 +16,7 @@ import { PageLayout } from './pageui.js';
 import { Pictures } from './picui.js';
 import { Painter } from './painter.js';
 import { Pick } from './pick.js';
+import { exportPptx } from './pptx.js';
 import { Side } from './side.js';
 import { openSource } from './source.js';
 import { Tables } from './tables.js';
@@ -40,6 +41,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   app: $('app'), back: $('back'), title: $('title'), where: $('where'), dirty: $('dirty'),
   undo: $('undo'), redo: $('redo'), present: $('present'), presenter: $('presenter'), download: $('download'), save: $('save'),
+  pptx: $('pptx'),
   count: $('count'), add: $('add'), dup: $('dup'), del: $('del'), up: $('up'), down: $('down'), toc: $('toc'),
   canvas: $('canvas'), sheet: $('sheet'), frame: $('frame'), pos: $('pos'), hint: $('hint'), notes: $('notes'),
   loading: $('loading'), fail: $('fail'), failMsg: $('failMsg'), status: $('status'),
@@ -650,6 +652,88 @@ function downloadNow() {
   }
 }
 
+// PPTX 받기 — 장마다 띄워 재므로 만드는 동안은 창(pxDlg)으로 편집을 막고, 끝나면(그만둬도) 보던 장으로 돌아온다
+let exporting = false;
+async function downloadPptx() {
+  if (exporting || !model) return;
+  settle();
+  exporting = true;
+  const dlg = $('pxDlg');
+  const text = $('pxText');
+  const stopBtn = $('pxStop');
+  let stop = false;
+  const onStop = () => {
+    stop = true;
+    stopBtn.disabled = true;
+    text.textContent = '그만두는 중…';
+  };
+  const onCancel = (e) => {                // Esc 도 그만두기로(창은 다 멈춘 뒤 닫는다)
+    e.preventDefault();
+    onStop();
+  };
+  // 그래도 닫히면(브라우저는 잇따른 Esc 를 막지 못하게 두기도 한다) 그만두기로 보고, 다 멈출 때까지 다시 연다
+  const onClose = () => {
+    onStop();
+    dlg.showModal();
+  };
+  stopBtn.disabled = false;
+  stopBtn.addEventListener('click', onStop);
+  dlg.addEventListener('cancel', onCancel);
+  dlg.addEventListener('close', onClose);
+  text.textContent = 'PPTX 도구를 불러오는 중…';
+  dlg.showModal();
+  const keep = model.cur;
+  const chosen = pick.boxes;               // 받은 뒤에도 고른 상자는 그대로
+  try {
+    const r = await exportPptx({
+      model, title: source.title, cancelled: () => stop,
+      onSlide: (i, n) => {
+        if (!stop) text.textContent = i < n ? `${n}장 가운데 ${i + 1}장째를 옮기는 중…` : '파일로 묶는 중…';
+      },
+    });
+    if (r && !stop) {
+      download(r.blob, editedName().replace(/\.html$/i, '.pptx'));
+      msg(pptxNote(r.report), r.report.lost || r.report.media || r.report.web.length ? 'warn' : 'ok', 20000);
+    } else msg('PPTX 만들기를 그만두었습니다.', '', 6000);
+  } catch (e) {
+    msg(`PPTX 를 만들지 못했습니다 — ${e.message}`, 'err', 15000);
+  } finally {
+    stopBtn.removeEventListener('click', onStop);
+    dlg.removeEventListener('cancel', onCancel);
+    dlg.removeEventListener('close', onClose);
+    dlg.close();
+    exporting = false;
+    go(keep);
+    const live = chosen.filter((b) => b.isConnected && model.current.contains(b));
+    if (live.length) pick.setSel(live);
+  }
+}
+
+// PPTX 를 받은 뒤 알림 — 그림으로 바꾼 것·옮기지 못한 것·웹 글꼴·쓴 글꼴
+function pptxNote(r) {
+  const out = [`PPTX 로 받았습니다 — ${r.slides}장(저장소·원본 파일은 그대로입니다).`];
+  const pics = [];
+  if (r.svg) pics.push(`도표(SVG) ${r.svg}개`);
+  if (r.paint) pics.push(`그라데이션·배경 그림 ${r.paint}개`);
+  if (r.poster) pics.push(`동영상 표지 ${r.poster}개`);
+  if (pics.length) out.push(`그림으로 옮긴 것: ${pics.join(' · ')}.`);
+  const lost = [];
+  if (r.media) lost.push(`canvas·동영상·iframe ${r.media}개`);
+  if (r.lost) lost.push(`읽지 못한 그림 ${r.lost}개`);
+  if (lost.length) out.push(`옮기지 못한 것: ${lost.join(' · ')}.`);
+  if (r.shrunk) out.push(`표 ${r.shrunk}개는 PowerPoint 글꼴로 넓어진 글이 꺾이지 않게 글자를 조금(15% 안) 줄였습니다.`);
+  if (r.web.length) {
+    out.push(`웹 글꼴(${r.web.join(' · ')})은 덱이 인터넷에서 불러 쓰던 것이라 그 글꼴을 깔지 않은 PC 에서는 다른 글꼴로 바뀌어 `
+      + '글이 상자를 넘칠 수 있습니다 — 그 글꼴을 깔거나 PowerPoint 에서 글꼴을 바꾸세요.');
+  }
+  const local = r.fonts.filter((f) => !r.web.includes(f));
+  if (local.length) {
+    out.push(`글꼴: ${local.slice(0, 4).join(' · ')}${local.length > 4 ? ' 등' : ''} — 이 글꼴이 없는 PC 에서는 다른 글꼴로 `
+      + '보이고 줄이 조금 다르게 꺾일 수 있습니다.');
+  }
+  return out.join(' ');
+}
+
 /* ---------- 키 */
 
 // fromFrame: 캔버스(덱 iframe)에서 온 키 — 방향키로도 장을 넘긴다. inText: 글 칸·노트 칸에서 쓰는 중.
@@ -785,6 +869,7 @@ function bind() {
   els.redo.addEventListener('click', () => travel('redo'));
   els.save.addEventListener('click', () => save(false));
   els.download.addEventListener('click', downloadNow);
+  els.pptx.addEventListener('click', downloadPptx);
   els.notes.addEventListener('input', onNotesInput);
   els.notes.addEventListener('blur', flushNotes);
   for (const [input, field] of [[els.bW, 'w'], [els.bH, 'h'], [els.bX, 'x'], [els.bY, 'y']]) {

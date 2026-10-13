@@ -163,7 +163,7 @@ def make_site(tmp_path: Path, decks: dict[str, str]) -> tuple[Path, Path]:
     root = tmp_path / "repo"
     root.mkdir(parents=True)
     shutil.copy(REPO / "index.html", root / "index.html")
-    for d in ("assets", "editor"):
+    for d in ("assets", "editor", "vendor/pptxgenjs"):
         shutil.copytree(REPO / d, root / d)
     for rel, text in decks.items():
         write(root / "decks" / rel, text)

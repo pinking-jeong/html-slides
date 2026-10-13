@@ -498,8 +498,9 @@ def test_browser_sandbox_falls_back_with_notice(capsys):
     assert "샌드박스 없이" in out and "No usable sandbox!" in out
 
 
-def test_vendored_pdfjs_matches_its_sums():
-    base = REPO / "vendor/pdfjs"
+@pytest.mark.parametrize("lib", ["pdfjs", "pptxgenjs"])
+def test_vendored_libraries_match_their_sums(lib):
+    base = REPO / "vendor" / lib
     listed = dict(reversed(line.split("  ", 1))
                   for line in (base / "SHA256SUMS").read_text(encoding="ascii").splitlines())
     files = {p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()} - {"README.md", "SHA256SUMS"}

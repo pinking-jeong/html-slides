@@ -29,6 +29,7 @@
     <a class="btn ghost" id="present" href="#" target="_blank" rel="noopener" title="저장된 판을 새 탭에서 발표 화면으로 엽니다">발표로 보기</a>
     <a class="btn ghost" id="presenter" href="#" target="_blank" rel="noopener" hidden title="저장된 판을 발표자 보기로 엽니다 — 노트·다음 장·시간을 보며 청중 화면을 넘깁니다">발표자 보기</a>
     <button class="btn ghost" type="button" id="download" title="지금 편집한 덱을 HTML 파일로 받습니다(저장하지 않음)">HTML 받기</button>
+    <button class="btn ghost" type="button" id="pptx" title="지금 편집한 덱을 PowerPoint 파일로 받습니다(저장하지 않음) — 글·표는 고칠 수 있게, 도표는 그림으로">PPTX 받기</button>
     <button class="btn primary" type="button" id="save" title="저장 (Ctrl+S)">저장</button>
   </div>
 </header>
@@ -243,6 +244,14 @@
     <button class="btn ghost" type="button" id="cfCancel">닫기</button>
     <button class="btn ghost" type="button" id="cfDownload">편집본 HTML 받기</button>
     <button class="btn danger" type="button" id="cfOverwrite">덮어쓰기</button>
+  </div>
+</dialog>
+
+<dialog class="dlg" id="pxDlg" aria-labelledby="pxTitle">
+  <h2 id="pxTitle">PPTX 만드는 중</h2>
+  <p id="pxText" role="status" aria-live="polite"></p>
+  <div class="dlg-acts">
+    <button class="btn ghost" type="button" id="pxStop">그만두기</button>
   </div>
 </dialog>
 
