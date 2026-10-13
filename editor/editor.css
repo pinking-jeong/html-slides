@@ -416,6 +416,11 @@ a { color: var(--accent); }
 .hit-n { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
 .hit-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hit mark { padding: 0 1px; border-radius: 2px; background: #FFE58A; color: #1A1A1A; }
+.num-sum { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--ink2); }
+.num li { align-items: flex-start; }
+.num li.cur { background: var(--accent-soft); }
+.num-t { display: block; font-size: 12.5px; }
+.num-d { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 
 /* ---------- 여럿 고르기·잠근 상자·맞춤선·감싸 고르기 */
 .pick.multi { outline-style: dashed; }

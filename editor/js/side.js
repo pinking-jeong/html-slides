@@ -1,13 +1,15 @@
-/* 왼쪽 칸의 색인·찾기 — 차례 옆 탭. 색인의 장 번호·찾기 결과를 누르면 그 장으로 가서 그 말을 덱 화면에 형광으로 보인다.
+/* 왼쪽 칸의 색인·찾기·숫자 — 차례 옆 탭. 색인의 장 번호·찾기 결과를 누르면 그 장으로 가서 그 말을 덱 화면에 형광으로 보인다.
+   숫자 탭(numui.js)은 어긋나 보이는 숫자를 묶어 보이고, 장 번호를 누르면 그 숫자들을 형광으로 보인다.
    찾기: Enter·↓ 다음, Shift+Enter·↑ 앞, ‘바꾸기’ 지금 것, ‘모두 바꾸기’ 덱 전체(되돌리기 한 칸). Ctrl+F 찾기, Ctrl+H 바꾸기. */
 
 import { h } from './util.js';
 import { buildIndex, canStoreTerms, readTermsRaw, readUserTerms, tidyTerm, wholeWord, writeUserTerms } from './terms.js';
 import { atOrAfter, findAll, highlight, unhighlight, replaceMatches } from './find.js';
+import { NumPanel } from './numui.js';
 
 const $ = (id) => document.getElementById(id);
 const REBUILD_MS = 400;
-const TABS = [['toc', 'tabToc', 'panToc'], ['idx', 'tabIdx', 'panIdx'], ['find', 'tabFind', 'panFind']];
+const TABS = [['toc', 'tabToc', 'panToc'], ['idx', 'tabIdx', 'panIdx'], ['find', 'tabFind', 'panFind'], ['num', 'tabNum', 'panNum']];
 
 export class Side {
   /* model, go(i): 장으로, msg, settle(): 고치던 것 마무리, change(fn): 지금 장을 되돌리기 한 칸으로 고치기,
@@ -21,6 +23,7 @@ export class Side {
     this.timer = 0;
     this.stale = false;        // 덱을 고친 뒤 아직 다시 찾지 않았다 — 찾은 자리(글 마디·글자 번호)가 옛것일 수 있다
     this.index = null;         // 만들어 둔 색인 — 덱이 바뀌면 버린다(거르기 칸은 이것으로 다시 그린다)
+    this.num = new NumPanel({ model, go: (i) => this.go(i) });
   }
 
   attach() {
@@ -55,6 +58,7 @@ export class Side {
       const b = e.target.closest('[data-hit]');
       if (b) this.pick(Number(b.dataset.hit));
     });
+    this.num.attach();
   }
 
   /* ---------- 탭 */
@@ -71,6 +75,7 @@ export class Side {
     if (key === 'idx') { this.term = null; this.renderIndex(); }
     if (key === 'find') this.search();
     else this.lightOff();
+    if (key === 'num') this.num.run();
   }
 
   // 찾기 열기(Ctrl+F) — replace 면 바꿀 글 칸에(Ctrl+H). 덱 화면에서 눌렀고(fromDeck) 고른 짧은 글이 있으면 그 글을 찾는다 —
@@ -91,11 +96,13 @@ export class Side {
   changed() {
     clearTimeout(this.timer);
     this.stale = true;
+    this.num.stale = true;
     this.index = null;
     if (this.tab === 'toc') return;
     this.timer = setTimeout(() => {
       if (this.tab === 'idx') this.renderIndex();
       else if (this.tab === 'find') this.search(true);
+      else if (this.tab === 'num') this.num.run();
     }, REBUILD_MS);
   }
 
@@ -105,7 +112,13 @@ export class Side {
       if (this.stale) this.search(true);
       else this.light();
     } else if (this.tab === 'idx' && this.term) this.lightTerm(this.term);
-    else this.lightOff();
+    else if (this.tab === 'num') {
+      // 고친 뒤 아직 다시 살피지 않았으면 옛 자리(글자 번호)로 형광을 칠하지 않게 먼저 다시 살핀다
+      if (this.num.stale) {
+        clearTimeout(this.timer);
+        this.num.run();
+      } else this.num.light();
+    } else this.lightOff();
   }
 
   lightOff() { if (this.model.doc) unhighlight(this.model); }

@@ -34,11 +34,12 @@
 </header>
 
 <main class="layout" id="app">
-  <aside class="side" aria-label="차례·색인·찾기">
+  <aside class="side" aria-label="차례·색인·찾기·숫자">
     <div class="side-tabs" id="sideTabs" role="tablist" aria-label="왼쪽 칸">
       <button type="button" class="stab" role="tab" id="tabToc" aria-controls="panToc" aria-selected="true">차례</button>
       <button type="button" class="stab" role="tab" id="tabIdx" aria-controls="panIdx" aria-selected="false" tabindex="-1">색인</button>
       <button type="button" class="stab" role="tab" id="tabFind" aria-controls="panFind" aria-selected="false" tabindex="-1" title="찾기·바꾸기 (Ctrl+F · Ctrl+H)">찾기</button>
+      <button type="button" class="stab" role="tab" id="tabNum" aria-controls="panNum" aria-selected="false" tabindex="-1" title="숫자 감사 — 장마다 다른 값·표의 합·표기 섞임">숫자</button>
       <span class="count" id="count"></span>
     </div>
     <div class="pan" id="panToc" role="tabpanel" aria-labelledby="tabToc">
@@ -83,6 +84,13 @@
         </div>
       </div>
       <ol class="hits" id="hits" tabindex="-1" aria-label="찾은 곳"></ol>
+    </div>
+    <div class="pan" id="panNum" role="tabpanel" aria-labelledby="tabNum" hidden>
+      <div class="pan-tools">
+        <p class="num-sum" id="numSum" aria-live="polite"></p>
+        <div class="find-row"><button class="btn small" type="button" id="numRun">다시 살피기</button></div>
+      </div>
+      <div class="idx" id="numList" tabindex="-1" aria-label="숫자 감사 — 살펴볼 곳"></div>
     </div>
   </aside>
 

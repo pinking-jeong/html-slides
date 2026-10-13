@@ -809,7 +809,7 @@ function bind() {
       const inMaster = $('masterDlg').open && (loose || (t instanceof Element && t.closest('#masterDlg')));
       // 쪽 레이아웃 창은 글 칸(꼬리말 글·그림 설명)·숫자 칸 안이 아니면 편집기의 되돌리기
       const inPage = $('pageDlg').open && (loose || (t instanceof Element && t.closest('#pageDlg')));
-      const inPanel = t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind');
+      const inPanel = t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind, #panNum');
       const otherDialog = Array.from(document.querySelectorAll('dialog[open]')).some((d) => d.id !== 'masterDlg' && d.id !== 'pageDlg');
       if (k === 's' ? !otherDialog : (inFmt || (inMaster && !num) || (inPage && !typing) || (inPanel && !typing))) {
         onKey(e, false, false);
@@ -818,7 +818,7 @@ function bind() {
     }
     if (document.querySelector('dialog[open]')) return;                                 // 창이 열린 동안 덱 키는 쉰다
     if (findKey(e, false)) return;                                                      // 찾기 칸 안에서도 Ctrl+F·H
-    if (t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind') && !mod) return;   // 색인·찾기 칸의 키는 그 칸의 것
+    if (t instanceof Element && t.closest('#sideTabs, #panIdx, #panFind, #panNum') && !mod) return;   // 색인·찾기·숫자 칸의 키는 그 칸의 것
     if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || (t instanceof Element && t.closest('dialog'))) return;
     if (t instanceof Element && t.closest('#toc') && !e.ctrlKey && !e.metaKey) return;   // 차례는 제 키를 쓴다
     if (t instanceof Element && t.closest('#layMenu, [role="menu"]') && !e.ctrlKey && !e.metaKey) return;   // 펼침 메뉴도
