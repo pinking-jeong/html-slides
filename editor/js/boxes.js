@@ -5,10 +5,14 @@
      조금 비켜), 안의 id 는 새 이름으로, 쪽 번호('k / N')는 그 장의 번호표로 고친다. 묶음째 옮긴 것은 새 묶음으로, 묶음의
      일부만 옮긴 것은 묶음 없이.
    - 지우기·복제: 고른 상자가 없으면 흐름 덱에서 글을 고치던 칸(문단·제목 — 목록은 그 항목)을. 잠근 상자는 지우지 않는다.
+   - 복사·잘라내기·붙여 넣기는 시스템 클립보드에 덱 공통 꼴(deckclip.js)로 쓰고 읽는다 — 다른 장·다른 덱·다른 편집기(빌더 덱
+     안의 편집기 등)에는 상자로, PowerPoint·Word·한글에는 글·그림·표로 붙는다. 같은 꼴 덱(빌더 ↔ 빌더, 흐름 ↔ 흐름)이면
+     상자를 그대로, 아니면 혼자 서는 꼴(서식을 인라인으로 든 것)을 이 덱의 상자로 바꿔 넣는다. 받은 것은 늘 거른다.
    - 그림 넣기도 여기서(insert.js 가 그림을 읽고 놓는다). */
 
 import { textHosts } from './canvas.js';
-import { A, FREE_BOX, GROUP, newGroupId, PLACE, retagPages } from './deck.js';
+import DeckClip from './deckclip.js';
+import { A, FREE_BOX, GROUP, LOCK, newGroupId, PLACE, retagPages } from './deck.js';
 import { asNew } from './edits.js';
 import { altOf, checkPicture, naturalSize, PICTURE_WARN, placePicture, readPicture } from './insert.js';
 import { bigPicture, fmtBytes, shrinkFile } from './pictures.js';
@@ -17,6 +21,11 @@ import { anchorSlide } from './pagelayout.js';
 
 const OFFSET = 16;                           // 같은 장에 복제·붙여 넣을 때 비켜 놓는 거리(px)
 const SKIP_ROLES = new Set(['title', 'kicker', 'pageno', 'footer', 'source']);
+// 같은 꼴 덱끼리 상자를 그대로 넘기는 꼴 이름 — 빌더 덱은 빌더 덱 안의 편집기와 같은 이름(서로 그대로 받는다)
+const NATIVE = { builder: 'deck-el/1', flow: 'hs-box/1' };
+// 그대로 받을 때 남기는 상자 표시 — 그 밖의 속성(스크립트·이벤트·위젯 표시 등)은 공통 거르기가 벗긴다
+const KEEP = new RegExp(`^(class|data-name|${FREE_BOX}|${GROUP}|${LOCK})$`);
+const WARM_MS = 150;                         // 고른 뒤 그림을 미리 준비하기까지 기다리는 시간(ms)
 
 // 편집 표시(편집기가 글 칸에 붙인 contenteditable)를 뗀다 — 덱이 원래 둔 contenteditable 은 남는다
 function unmark(root) {
@@ -29,6 +38,62 @@ function unmark(root) {
 }
 
 const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+
+// 같은 꼴 덱이 그대로 받는 상자 — 편집 표시를 떼고 새 상자로(편집 기록), 통째로 고르지 않은 묶음은 뗀다
+function nativeHtml(el, whole) {
+  const c = el.cloneNode(true);
+  unmark(c);
+  asNew(c);
+  if (c.hasAttribute(GROUP) && !whole.has(c.getAttribute(GROUP))) c.removeAttribute(GROUP);
+  return c.outerHTML;
+}
+
+const copyMsg = (n, ok) => `${n > 1 ? `상자 ${n}개를` : '상자를'} 복사했습니다 — ${ok
+  ? '다른 장·다른 덱에서 Ctrl+V 로 붙이거나 PowerPoint·Word·한글에 붙여 넣을 수 있습니다.'
+  : '이 편집기의 ‘붙여 넣기’로 붙습니다. 다른 덱·프로그램에 붙이려면 상자를 고른 채 Ctrl+C 를 누르세요.'}`;
+
+// 흐름 덱에 넣을 상자 — 장 위에 절대 배치한 글상자(div[data-hs-box] > p — 상자째 한 글 칸), 그림(img[data-hs-box]),
+// 표·차트·그 밖의 것을 든 상자. it 은 거르지 않은 바깥 자료라 공통 거르기를 먼저 지난다.
+function flowNode(d, it, k) {
+  const pic = (src, alt) => {
+    if (!src || !/^data:image\//.test(src)) return null;
+    const im = d.createElement('img');
+    im.setAttribute(FREE_BOX, '');
+    im.setAttribute('src', src);
+    im.setAttribute('alt', alt || '');
+    im.style.objectFit = 'contain';
+    return im;
+  };
+  if (it.type === 'image') return pic(it.src || it.office, it.alt || it.name);
+  const root = DeckClip.clean(it.html, d).firstElementChild;
+  if (root) DeckClip.scaleNode(root, k);
+  const box = d.createElement('div');
+  box.setAttribute(FREE_BOX, '');
+  if (root && it.type === 'text') {
+    const t = DeckClip.textParas(root);
+    if (t.paras.length) {
+      box.setAttribute('style', t.box);
+      for (const para of t.paras) {
+        const p = d.createElement('p');
+        p.setAttribute('style', para.style);
+        p.innerHTML = para.html;               // 거른 뿌리에서 나온 글(스크립트·이벤트 속성 없음)
+        box.append(p);
+      }
+      return box;
+    }
+  }
+  if (root && (it.type === 'table' || (it.type === 'graphic' && root.localName === 'svg'))) {
+    root.style.width = '100%';
+    if (root.localName === 'svg') root.style.height = '100%';
+    box.append(root);
+    return box;
+  }
+  const im = pic(it.png, it.name);
+  if (im) return im;
+  if (!root) return null;
+  box.append(root);
+  return box;
+}
 
 // 색 글('#rgb'·'#rrggbb'·'rgb(…)'·'rgba(…)') → [r, g, b, a] 또는 null
 function rgbOf(c) {
@@ -115,7 +180,11 @@ export class Boxes {
   /* model·canvas·pick·fmt, msg(글, 종류), els: 막대의 단추들 */
   constructor({ model, canvas, pick, fmt, msg, els }) {
     Object.assign(this, { model, canvas, pick, fmt, msg, els });
-    this.clip = null;                        // 복사한 상자들 {items: [html …], pn, id}
+    this.clip = null;                        // 마지막으로 복사한 것(덱 공통 꼴 페이로드) — 막대의 ‘붙여 넣기’가 쓴다
+    this.mine = null;                        // 그 페이로드의 이름과 복사한 장의 쪽 번호표 — 같은 덱에 붙일 때 번호표를 고친다
+    this.warmT = 0;
+    this.warmed = [];
+    this.warmKey = '';
   }
 
   get doc() { return this.model.doc; }
@@ -130,6 +199,12 @@ export class Boxes {
     e.copy.addEventListener('click', () => this.copy());
     e.paste.addEventListener('click', () => this.paste());
     this.doc.addEventListener('selectionchange', () => this.update());
+    // Ctrl+C·X·V(와 브라우저 메뉴)의 복사·잘라내기·붙여 넣기 — 편집기 화면과 덱 문서 어느 쪽에 초점이 있어도
+    for (const d of [document, this.doc]) {
+      d.addEventListener('copy', (ev) => this.onClip(ev, false), true);
+      d.addEventListener('cut', (ev) => this.onClip(ev, true), true);
+      d.addEventListener('paste', (ev) => this.onPasteEv(ev), true);
+    }
     this.update();
   }
 
@@ -179,8 +254,9 @@ export class Boxes {
     const n = t ? t.els.length : 0;
     e.del.disabled = !t;
     e.dup.disabled = !t;
-    e.copy.disabled = !this.pick.boxes.some((b) => this.pick.movable(b));
+    e.copy.disabled = !this.pick.boxes.length;
     e.paste.disabled = !this.clip;
+    this.warmSoon();
     e.del.title = t && t.kind === 'text' ? '글을 고치던 칸(문단·목록 항목)을 지웁니다'
       : n > 1 ? `고른 상자 ${n}개를 지웁니다 (Delete)` : '고른 상자를 지웁니다 (Delete)';
   }
@@ -336,89 +412,189 @@ export class Boxes {
     return true;
   }
 
-  /* ---------- 복사·잘라내기·붙여 넣기(옮길 수 있는 상자) */
+  /* ---------- 복사·잘라내기·붙여 넣기 — 시스템 클립보드(덱 공통 꼴) */
+
+  clipOpts(whole) {
+    const m = this.model;
+    return {
+      stage: m.current, stageW: m.size.w, stageH: m.size.h, editor: 'html-slides', title: m.doc.title || document.title,
+      native: (el) => (this.pick.movable(el) ? { fmt: NATIVE[m.family], html: nativeHtml(el, whole) } : null),
+      clean: (c) => unmark(c),
+    };
+  }
+
+  // 고른 것 → 페이로드(문서 순서로 — 앞뒤 순서를 지켜). 묶음은 통째로 고른 것만 묶음째.
+  payload(els) {
+    const list = inOrder(els);
+    return DeckClip.capture(list, this.clipOpts(this.wholeGroups(list)));
+  }
+
+  // 고르면 바로 그림을 준비해 둔다(차트·도형은 PNG 로, 주소로 든 그림은 data URI 로) — 복사 이벤트 안에서는 기다릴 수 없다
+  // 고른 것·크기가 그대로면 다시 하지 않는다(글을 고치는 동안 selectionchange 마다 불린다)
+  warmSoon() {
+    clearTimeout(this.warmT);
+    const els = this.pick.boxes;
+    if (!els.length) return;
+    const key = els.map((b) => `${b.offsetWidth}x${b.offsetHeight}`).join(',');
+    if (this.warmKey === key && this.warmed.length === els.length && this.warmed.every((b, i) => b === els[i])) return;
+    this.warmT = setTimeout(() => {
+      if (!els.every((b) => b.isConnected)) return;
+      this.warmed = els.slice();
+      this.warmKey = key;
+      DeckClip.warm(els, this.clipOpts(new Set())).catch(() => null);
+    }, WARM_MS);
+  }
+
+  remember(p) {
+    this.clip = p;
+    this.mine = { id: p.id, pn: this.model.current.getAttribute(A.pn) };
+    this.update();
+  }
+
+  // 상자로 다룰 복사·붙여 넣기인가 — 글을 고치는 중·입력 칸(덱의 것, 노트·찾기 등)·창 안이 아니고, 편집기 화면에 고른 글이
+  // 없을 때. 아니면 브라우저가 하던 대로(글 복사·글 붙여 넣기).
+  boxMode(t) {
+    if (this.canvas.editing || document.querySelector('dialog[open]')) return false;
+    const el = t && t.nodeType === 1 ? t : (t && t.parentElement) || null;
+    if (!el) return true;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return false;
+    if (el.ownerDocument === this.doc) return !this.canvas.hostOf(el);
+    if (el.isContentEditable || el.closest('dialog')) return false;
+    return !String(document.getSelection() || '').trim();
+  }
 
   copy() {
-    const boxes = this.pick.boxes.filter((b) => this.pick.movable(b));
-    if (!boxes.length) return false;
-    const slide = this.model.current;
-    const whole = this.wholeGroups(boxes);
-    const items = inOrder(boxes).map((b) => {
-      const c = b.cloneNode(true);
-      unmark(c);
-      asNew(c);
-      if (c.hasAttribute(GROUP) && !whole.has(c.getAttribute(GROUP))) c.removeAttribute(GROUP);
-      return c.outerHTML;
-    });
-    this.clip = { items, pn: slide.getAttribute(A.pn), id: slide.getAttribute(A.id) };
-    this.update();
-    this.msg(`${items.length > 1 ? `상자 ${items.length}개를` : '상자를'} 복사했습니다 — 다른 장으로 가서 붙여 넣기(Ctrl+V)를 누르면 `
-      + '같은 자리에 들어갑니다.');
+    const sel = this.pick.boxes;
+    if (!sel.length) return false;
+    const p = this.payload(sel);
+    if (!p) return false;
+    this.remember(p);
+    const ok = DeckClip.copyNow(p, document);   // 막대 단추 — 누름 처리 안이라 브라우저가 복사 이벤트를 내 준다
+    this.msg(copyMsg(p.items.length, ok), ok ? '' : 'warn', ok ? 6000 : 9000);
     return true;
   }
 
-  // 복사한 상자(옮길 수 있는 것)만 지운다 — 함께 고른 흐름 덱의 그림처럼 복사하지 않은 것은 그대로
-  cut() {
-    const sel = this.pick.boxes;
+  // 복사한 것 가운데 옮길 수 있는 상자만 지운다 — 덱 흐름에 든 것(흐름 덱의 그림 등)은 복사만 하고 그대로
+  eraseCut(sel) {
     const boxes = sel.filter((b) => this.pick.movable(b));
-    if (!this.copy()) return false;
+    if (!boxes.length) {
+      this.msg('덱 흐름에 든 것이라 잘라 내지 않고 복사만 했습니다 — 지우려면 Delete 를 누르세요.', 'warn');
+      return;
+    }
     if (this.pick.drag) this.pick.end();
     const n = this.erase(boxes, sel);
     const left = boxes.length - n;
-    this.msg(n ? `잘라 냈습니다 — 다른 장으로 가서 붙여 넣기(Ctrl+V)를 누르세요.${left ? ` 잠근 상자 ${left}개는 복사만 하고 두었습니다.` : ''}`
-      : '잠근 상자라 복사만 했습니다 — 다른 장으로 가서 붙여 넣기(Ctrl+V)를 누르세요.', n ? '' : 'warn');
-    return true;
+    this.msg(n ? `잘라 냈습니다 — 다른 장·다른 덱에서 붙여 넣기(Ctrl+V)를 누르세요.${left ? ` 잠근 상자 ${left}개는 복사만 하고 두었습니다.` : ''}`
+      : '잠근 상자라 복사만 했습니다 — 다른 장·다른 덱에서 붙여 넣기(Ctrl+V)를 누르세요.', n ? '' : 'warn');
   }
 
+  // 복사·잘라내기 이벤트(Ctrl+C·X, 브라우저 메뉴) — 고른 상자를 시스템 클립보드에
+  onClip(e, cut) {
+    if (!e.clipboardData || !this.boxMode(e.target)) return;
+    const sel = this.pick.boxes;
+    if (!sel.length) return;
+    const p = this.payload(sel);
+    if (!p) return;
+    DeckClip.write(e.clipboardData, p);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    this.remember(p);
+    if (cut) this.eraseCut(sel);
+    else this.msg(copyMsg(p.items.length, true));
+  }
+
+  // 붙여 넣기 이벤트(Ctrl+V) — 덱 공통 꼴이면 상자로. 글을 고치는 중이면 글로(canvas.js), 덱 꼴이 아니면 하지 않는다.
+  onPasteEv(e) {
+    if (!this.boxMode(e.target)) return;
+    const p = DeckClip.read(e.clipboardData);
+    if (!p) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    this.insert(p);
+  }
+
+  // 막대의 ‘붙여 넣기’ — 이 편집기에서 마지막으로 복사한 것(다른 덱·편집기의 것은 Ctrl+V 로)
   paste() {
-    if (!this.clip) return false;
+    return !!this.clip && this.insert(this.clip);
+  }
+
+  // 받은 항목 → 이 덱의 상자(거른 것) 또는 null
+  nodeOf(it, k) {
+    const fam = this.model.family;
+    const d = this.doc;
+    if (it.native && it.native.fmt === NATIVE[fam]) {
+      // 같은 꼴이면 상자 그대로 — 거르기에서 빠지는 것이 하나라도 있으면(링크·모르는 태그·주소로 든 그림 등) 혼자 서는 꼴로
+      const f = DeckClip.clean(it.native.html, d, { keep: KEEP, strict: true });
+      const n = f && f.childElementCount === 1 ? f.firstElementChild : null;
+      const fits = n && (fam === 'builder' ? n.classList.contains('el') && !n.classList.contains('wg') : n.hasAttribute(FREE_BOX));
+      if (fits) return DeckClip.scaleNode(n, k);
+    }
+    if (fam === 'builder') {
+      const sanitize = (h) => {
+        const f = DeckClip.clean(h, d, { keep: KEEP });
+        return f.childElementCount === 1 ? f.firstElementChild : null;
+      };
+      const h = DeckClip.toBuilder(it, k, sanitize);
+      return h ? sanitize(h) : null;
+    }
+    return flowNode(d, it, k);
+  }
+
+  // 놓을 자리(덱 px) — 빌더 덱 상자는 덱의 자리 꼴 그대로, 흐름 덱은 장 위에 절대 배치
+  put(el, s) {
+    const px = (v) => `${Math.round(v)}px`;
+    if (this.model.family !== 'builder') Object.assign(el.style, { position: 'absolute', margin: '0', zIndex: '30' });
+    Object.assign(el.style, { left: px(s.x), top: px(s.y), width: px(s.w), height: px(s.h) });
+    return el;
+  }
+
+  // 페이로드를 지금 장에 — 복사한 자리에(무대 크기가 다르면 비율대로, 같은 자리에 이미 있으면 비켜서). 되돌리기 한 칸.
+  insert(p) {
     if (this.pick.drag) this.pick.end();
     this.canvas.stop();
-    const slide = this.model.current;
+    const m = this.model;
+    const slide = m.current;
+    const taken = Array.from(slide.children, (c) => ({ x: num(c.style.left), y: num(c.style.top) }))
+      .filter((q) => q.x !== null && q.y !== null);
+    const spots = DeckClip.place(p, { w: m.size.w, h: m.size.h, taken });
     const els = [];
-    for (const html of this.clip.items) {
-      const t = this.doc.createElement('template');
-      t.innerHTML = html;                       // 템플릿 안은 실행되지 않는다(스크립트·그림 불러오기 없음)
-      if (t.content.firstElementChild) els.push(t.content.firstElementChild);
+    for (const s of spots) {
+      const el = this.nodeOf(s.item, s.k);
+      if (el) els.push(this.put(el, s));
     }
-    if (!els.length) return false;
+    if (!els.length) {
+      this.msg('붙여 넣을 수 있는 것이 없습니다 — 이 덱에서 받지 않는 꼴입니다.', 'warn');
+      return false;
+    }
+    // 이 편집기에서 복사한 것이면 쪽 번호('k / N')를 이 장의 번호표로
+    const from = this.mine && this.mine.id === p.id ? this.mine.pn : null;
     this.canvas.change(() => {
-      // 같은 장(또는 같은 자리에 상자가 이미 있는 장)이면 비켜 놓는다 — 여럿이면 함께 같은 만큼
-      const taken = new Set(Array.from(slide.children, (c) => `${num(c.style.left)}|${num(c.style.top)}`));
-      const at = (el, d) => {
-        const l = num(el.style.left);
-        const tp = num(el.style.top);
-        return `${l === null ? null : l + d}|${tp === null ? null : tp + d}`;
-      };
-      let d = 0;
-      while (els.some((el) => taken.has(at(el, d))) && d < 40 * OFFSET) d += OFFSET;
       for (const el of els) {
-        if (d) {
-          el.style.left = `${Math.round((num(el.style.left) || 0) + d)}px`;
-          el.style.top = `${Math.round((num(el.style.top) || 0) + d)}px`;
-        }
-        this.model.renameIds(el);
-        retagPages(el, this.clip.pn, slide.getAttribute(A.pn));
-        if (el.hasAttribute(FREE_BOX)) anchorSlide(this.model, slide);
+        asNew(el);                               // 빌더 덱의 편집 기록에는 새 상자(edits.js)
+        m.renameIds(el);
+        if (from !== null) retagPages(el, from, slide.getAttribute(A.pn));
+        if (el.hasAttribute(FREE_BOX)) anchorSlide(m, slide);
       }
-      regroup(els, null, this.model.slides);   // 붙일 때마다 새 묶음 — 두 번 붙인 것끼리 한 묶음이 되지 않게
+      regroup(els, null, m.slides);              // 붙일 때마다 새 묶음 — 두 번 붙인 것끼리 한 묶음이 되지 않게
       for (const el of els) slide.append(el);
     });
     this.canvas.arm();
     this.pick.selectMany(els);
     this.update();
-    this.msg(els.length > 1 ? `상자 ${els.length}개를 붙여 넣었습니다.` : '상자를 붙여 넣었습니다.');
+    const miss = spots.length - els.length;
+    this.msg(`${els.length > 1 ? `상자 ${els.length}개를` : '상자를'} 붙여 넣었습니다${miss ? ` (받지 않는 꼴 ${miss}개는 건너뜀)` : ''}.`,
+      miss ? 'warn' : '');
     return true;
   }
 
-  /* ---------- 단축키 — 글을 고치는 중이 아닐 때. 썼으면 true */
+  /* ---------- 단축키 — 글을 고치는 중이 아닐 때. 썼으면 true, 복사·잘라내기·붙여 넣기는 'event'(키를 막지 않는다 —
+     브라우저가 이어서 내는 copy·cut·paste 이벤트에서 시스템 클립보드에 쓰고 읽는다) */
 
   key(e) {
     if (e.altKey || e.shiftKey || !(e.ctrlKey || e.metaKey)) return false;
     const k = (e.key || '').toLowerCase();
-    if (k === 'c') return this.copy();
-    if (k === 'x') return this.cut();
-    if (k === 'v') return this.paste();
+    if (k === 'c' || k === 'x') return this.pick.boxes.length ? 'event' : false;
+    if (k === 'v') return 'event';
     if (k === 'd') return this.duplicate();
     return false;
   }

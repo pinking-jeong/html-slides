@@ -34,7 +34,7 @@ const BOOT_WAIT = 1500;          // 시작할 때 임시 저장본을 알리려�
 const VERSION_KEYS = { draft: '임시 저장본', ref: '저장소의 판', backup: '저장 전 판' };
 const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
   + '크기를 바꿉니다(Shift+누르기·빈 곳에서 끌기로 여럿을 골라 ‘배치 ▾’로 맞추기) · Esc 로 글 고치기를 마치면 Ctrl+C·V 로 상자를 '
-  + '다른 장에 붙여 넣습니다 · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · '
+  + '다른 장·다른 덱에 붙여 넣습니다(PowerPoint·Word·한글에도 붙습니다) · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · '
   + 'Ctrl+S 저장';
 const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 
@@ -831,8 +831,11 @@ function onKey(e, inText, fromFrame, field = false) {
     e.preventDefault();
     return;
   }
-  // 고른 상자 복사·잘라내기·붙여 넣기(Ctrl+C·X·V) — 글을 고치는 중이 아닐 때
-  if (boxes.key(e)) {
+  // 고른 상자 복사·잘라내기·붙여 넣기(Ctrl+C·X·V) — 글을 고치는 중이 아닐 때. 이 셋은 키를 막지 않고 브라우저가 이어서 내는
+  // copy·cut·paste 이벤트에서 시스템 클립보드에 쓰고 읽는다(boxes.js) — 다른 덱·PowerPoint 등에도 붙게.
+  const boxKey = boxes.key(e);
+  if (boxKey === 'event') return;
+  if (boxKey) {
     e.preventDefault();
     return;
   }
