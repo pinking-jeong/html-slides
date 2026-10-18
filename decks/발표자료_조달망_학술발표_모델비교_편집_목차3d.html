@@ -4065,10 +4065,14 @@ MW.register("scenario-bars", function (el, opts) {
    자기 허용 목록으로 거른다(clean() 은 그런 거르기가 없는 편집기를 위한 것).
 
    페이로드 v2: {app:"deckclip", v:2, id, src:{editor, title, session}, stage:{w,h}, items:[{type, x, y, w, h, html, text, name,
-   alt?, src?, png?, office?, native?:{fmt, html}}], blobs:{b0:"data:…"}, text, t}
+   alt?, src?, png?, office?, rot?, flip?, line?, look?, native?:{fmt, html}}], blobs:{b0:"data:…"}, text, t}
    · type: text(글상자) · image(그림) · table(표) · graphic(차트·선·도형 — SVG) · box(섞인 것)
    · html: 덱과 상관없이 혼자 서는 꼴(계산된 서식을 인라인으로, 클래스 없음) · native: 같은 계열 편집기가 그대로 쓰는 꼴
    · png: graphic·box 를 그림으로 뽑은 것(다른 프로그램용) · office: image 가 PNG·JPEG·GIF 가 아닐 때 PNG 로 바꾼 것
+   · rot·flip: 돌림(시계 방향 도)·대칭("h" 좌우·"v" 상하·"hv") — 이때 x·y·w·h 는 돌리기 전 상자(가운데를 축으로 돈다 —
+     PowerPoint 와 같다). html·png 는 돌리지 않은 꼴이고, 받는 편집기가 자기 요소에 다시 입힌다(모르는 편집기는 건너뛴다).
+   · line: 덱 편집기가 그린 선·화살표 {x1, y1, x2, y2(돌리기 전 상자 안 px), w, color, dash, arrow} — 다른 프로그램에 선 도형으로
+   · look: 돌림·대칭을 구운 그림(다른 프로그램용 — 그림은 돌림 값을 실어 보낼 길이가 없다), 크기는 둘레 상자
    · 큰 data URI 는 blobs 에 한 번만 두고 문자열 안에서는 "deckclip:b0" 처럼 가리킨다. */
 
 var DeckClip = (function () {
@@ -4082,6 +4086,7 @@ var DeckClip = (function () {
   const BLOB_RE = /^data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/;
   const INLINE_DATA = /data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}/g;
   const OFFICE_OK = /^data:image\/(?:png|jpeg|gif)[;,]/i;
+  const BLOB_FIELDS = ["html", "src", "png", "office", "look"];   // 큰 data URI 를 blobs 로 빼 두는 칸
   const TYPES = new Set(["text", "image", "table", "graphic", "box"]);
   const LABEL = { text: "글상자", image: "그림", table: "표", graphic: "도형", box: "요소" };
   const MAX_ITEMS = 200;
@@ -4347,16 +4352,126 @@ var DeckClip = (function () {
     return { x: (e.left - f.left) * f.k, y: (e.top - f.top) * f.k, w: e.width * f.k, h: e.height * f.k };
   }
 
-  function sigOf(el, b) {
-    return hash(el.localName + "|" + (el.getAttribute("src") || "") + "|" + el.innerHTML) + "|" + Math.round(b.w) + "x" + Math.round(b.h);
+  /* ── 돌림·대칭 — 편집기 셋은 CSS 개별 속성(rotate·scale)으로 적는다. 손으로 쓴 덱의 transform 도 읽는다 ─────────── */
+  const ROT_MIN = 0.05;                                   // 이보다 작은 각(도)은 돌리지 않은 것으로
+  const ANGLE_K = { deg: 1, rad: 180 / Math.PI, turn: 360, grad: 0.9 };
+  const LINE_NAME = /^deckops:(line|arrow)$/;             // 덱 편집기(deckops)가 그린 선·화살표
+
+  function degOf(v) {
+    const m = /^(-?\d*\.?\d+(?:e[+-]?\d+)?)(deg|rad|turn|grad)$/i.exec(String(v || "").trim());
+    return m ? parseFloat(m[1]) * ANGLE_K[m[2].toLowerCase()] : 0;
+  }
+
+  // CSS rotate 계산값 → 도. 화면에 수직인 축(z)으로 도는 것만 — "30deg"·"z 30deg"·"0 0 1 30deg"
+  function rotateOf(v) {
+    const t = String(v || "").trim().split(/\s+/);
+    if (t.length === 1) return degOf(t[0]);
+    if (t.length === 2 && t[0] === "z") return degOf(t[1]);
+    const z = +t[2];
+    if (t.length === 4 && +t[0] === 0 && +t[1] === 0 && Number.isFinite(z) && z !== 0) return degOf(t[3]) * Math.sign(z);
+    return 0;
+  }
+
+  const normDeg = (d) => { const x = ((d % 360) + 360) % 360; return x > 180 ? x - 360 : x; };
+
+  // 돌림·대칭 {rot: 시계 방향 도(-180, 180], fh·fv: 제자리에서 먼저 뒤집음, kx·ky: 크기 배율}. CSS 도 PowerPoint 도 뒤집은
+  // 다음 돌린다(rotate·scale 의 순서). transform 은 행렬을 돌림 + 좌우 뒤집기로 나눠 보탠다(기울임은 버린다).
+  function turnOf(el) {
+    const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+    let rot = rotateOf(cs.getPropertyValue("rotate")), fh = false, fv = false, kx = 1, ky = 1;
+    const sc = String(cs.getPropertyValue("scale") || "").trim();
+    if (sc && sc !== "none") {
+      const v = sc.split(/\s+/).map(Number), sx = Number.isFinite(v[0]) ? v[0] : 1;
+      const sy = v.length > 1 && Number.isFinite(v[1]) ? v[1] : sx;
+      fh = sx < 0;
+      fv = sy < 0;
+      kx = Math.abs(sx) || 1;
+      ky = Math.abs(sy) || 1;
+    }
+    const tf = String(cs.getPropertyValue("transform") || "").trim();
+    if (tf && tf !== "none" && typeof DOMMatrixReadOnly === "function") {
+      try {
+        const m = new DOMMatrixReadOnly(tf), det = m.a * m.d - m.b * m.c, s = Math.hypot(m.a, m.b);
+        if (Math.abs(det) > 1e-9 && s > 1e-9) {
+          const neg = det < 0, t = Math.atan2(neg ? -m.b : m.b, neg ? -m.a : m.a) * 180 / Math.PI;
+          rot += fh !== fv ? -t : t;                    // 한 축만 뒤집혀 있으면 안쪽 돌림이 거꾸로 보인다
+          if (neg) fh = !fh;
+          kx *= s;
+          ky *= Math.abs(det) / s;
+        }
+      } catch (e) { /* 읽지 못하는 변형은 돌리지 않은 것으로 */ }
+    }
+    const r = normDeg(rot);
+    return { rot: Math.abs(r) < ROT_MIN ? 0 : r2(r), fh, fv, kx, ky };
+  }
+
+  const turned = (tn) => !!(tn && (tn.rot || tn.fh || tn.fv));
+
+  // 편집기가 돌림을 요소 바깥(감싼 상자)에 두면 opts.turn(el) → {rot, fh, fv} 로 알려 준다(편집기 C). 없으면 요소에서 읽는다
+  function turnFor(el, o) {
+    const t = typeof o.turn === "function" ? o.turn(el) : null;
+    if (!t || typeof t !== "object") return turnOf(el);
+    const r = normDeg(Number(t.rot) || 0);
+    return { rot: Math.abs(r) < ROT_MIN ? 0 : r2(r), fh: !!t.fh, fv: !!t.fv, kx: 1, ky: 1 };
+  }
+
+  // 돌리거나 뒤집은 요소의 상자 = 돌리기 전 상자. 화면 둘레 상자의 가운데(가운데를 축으로 도니 그대로다)에 레이아웃 크기
+  // (변형과 상관없는 무대 px)를 놓는다. transform-origin 을 옮긴 요소는 조금 어긋날 수 있다.
+  function turnedBox(el, f, tn) {
+    const e = el.getBoundingClientRect();
+    const cx = (e.left + e.width / 2 - f.left) * f.k, cy = (e.top + e.height / 2 - f.top) * f.k;
+    let w = el.offsetWidth, h = el.offsetHeight;
+    if (!(w > 0 && h > 0)) {                                       // SVG 처럼 offset 이 없는 요소
+      const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+      w = parseFloat(cs.width) || 0;
+      h = parseFloat(cs.height) || 0;
+    }
+    w *= tn.kx;
+    h *= tn.ky;
+    return { x: cx - w / 2, y: cy - h / 2, w, h };
+  }
+
+  function boxFor(el, o, f, tn) {
+    return (o.box && o.box(el)) || (turned(tn) ? turnedBox(el, f, tn) : boxIn(el, f));
+  }
+
+  // 덱 편집기(deckops)가 그린 선·화살표 → {x1, y1, x2, y2, w, color, dash, arrow} — 돌리기 전 상자 안 무대 px. 화살표의
+  // 끝은 화살촉 끝(다각형 첫 점). 다른 프로그램에는 선 도형으로 보내고, 받는 덱은 선으로 알아보게 한다.
+  function lineOf(el, b) {
+    if (el.localName !== "svg" || !LINE_NAME.test(el.getAttribute("data-name") || "")) return null;
+    const ln = el.querySelector("line"), hd = el.querySelector("polygon");
+    if (!ln) return null;
+    const vb = el.viewBox && el.viewBox.baseVal;
+    const sx = vb && vb.width > 0 ? b.w / vb.width : 1, sy = vb && vb.height > 0 ? b.h / vb.height : 1;
+    const at = (a) => parseFloat(ln.getAttribute(a)) || 0;
+    let x2 = at("x2"), y2 = at("y2");
+    const tip = hd ? String(hd.getAttribute("points") || "").trim().split(/[\s,]+/).slice(0, 2).map(Number) : [];
+    if (tip.length === 2 && tip.every(Number.isFinite)) [x2, y2] = tip;
+    const cs = el.ownerDocument.defaultView.getComputedStyle(ln), c = cssColor(cs.getPropertyValue("stroke"));
+    const d0 = parseFloat(cs.getPropertyValue("stroke-dasharray"));          // "none" 이면 NaN
+    return { x1: r2(at("x1") * sx), y1: r2(at("y1") * sy), x2: r2(x2 * sx), y2: r2(y2 * sy),
+      w: r2((parseFloat(cs.getPropertyValue("stroke-width")) || 1) * Math.min(sx, sy)), color: c ? c.hex : "#000000",
+      dash: !(d0 > 0) ? "solid" : d0 >= 4 ? "dashed" : "dotted", arrow: !!hd };
+  }
+
+  // 미리 뽑아 둔 그림이 아직 맞는지 — 요소 통째(뿌리의 서식·주소까지: 채우기·윤곽선을 바꾸면 다시 뽑는다)·크기·돌림.
+  // 자리(left·top)는 그림을 바꾸지 않으니 뺀다 — 옮길 때마다 다시 뽑지 않게
+  function sigOf(el, b, tn) {
+    const root = el.cloneNode(false);
+    if (root.style) { root.style.removeProperty("left"); root.style.removeProperty("top"); }
+    return hash(root.outerHTML + el.innerHTML) + "|" + Math.round(b.w) + "x" + Math.round(b.h) +
+      (turned(tn) ? "|" + tn.rot + (tn.fh ? "h" : "") + (tn.fv ? "v" : "") : "");
   }
 
   function itemOf(el, o, f) {
     const type = (o.type && o.type(el)) || guessType(el);
     if (!type || !TYPES.has(type)) return null;
-    const b = (o.box && o.box(el)) || boxIn(el, f);                 // 테두리까지 든 상자(무대 px)
+    const tn = turnFor(el, o);
+    const b = boxFor(el, o, f, tn);                                 // 테두리까지 든 상자(무대 px) — 돌렸으면 돌리기 전 상자
     if (!(b.w > 0 && b.h > 0)) return null;
     const it = { type, x: r2(b.x), y: r2(b.y), w: r2(b.w), h: r2(b.h) };
+    if (tn.rot) it.rot = tn.rot;
+    if (tn.fh || tn.fv) it.flip = (tn.fh ? "h" : "") + (tn.fv ? "v" : "");
     it.html = portableClone(el, b, o.clean).outerHTML;
     it.text = textOf(el, type);
     if (type === "image") {
@@ -4365,17 +4480,19 @@ var DeckClip = (function () {
       it.alt = (im && im.getAttribute("alt")) || "";
       if (conv.has(it.src)) it.office = conv.get(it.src);
     }
-    if (type === "graphic" || type === "box") {
-      const c = cache.get(el);
-      if (c && c.sig === sigOf(el, b) && c.png) it.png = c.png;
-    }
+    const c = cache.get(el), fresh = !!c && c.sig === sigOf(el, b, tn);
+    if ((type === "graphic" || type === "box") && fresh && c.png) it.png = c.png;
+    if (fresh && c.look && turned(tn)) it.look = c.look;
+    const ln = type === "graphic" ? lineOf(el, b) : null;
+    if (ln) it.line = ln;
     const nat = typeof o.native === "function" ? o.native(el) : null;
     if (nat && typeof nat.html === "string" && typeof nat.fmt === "string") it.native = { fmt: nat.fmt, html: nat.html };
     it.name = ((it.text || it.alt || "").split("\n")[0].replace(/\s+/g, " ").trim().slice(0, 24)) || LABEL[type];
     return it;
   }
 
-  /* opts: {stage, stageW, stageH, editor, title, type?(el), box?(el), native?(el), clean?(clone)} → 페이로드(동기) */
+  /* opts: {stage, stageW, stageH, editor, title, type?(el), box?(el), native?(el), clean?(clone), turn?(el)} → 페이로드(동기).
+     box 는 돌리기 전 상자(무대 px), turn 은 돌림이 요소 바깥에 있을 때 {rot, fh, fv} — warm() 도 같은 opts 를 받는다 */
   function capture(els, opts) {
     const o = Object.assign({}, opts);
     const f = frameOf(o);
@@ -4404,7 +4521,7 @@ var DeckClip = (function () {
     }));
     p.items = p.items.map((it) => {
       const o = copyItem(it);
-      for (const f of ["html", "src", "png", "office"]) if (o[f]) o[f] = sub(o[f]);
+      for (const f of BLOB_FIELDS) if (o[f]) o[f] = sub(o[f]);
       if (o.native) o.native = { fmt: o.native.fmt, html: sub(o.native.html) };
       return o;
     });
@@ -4428,6 +4545,60 @@ var DeckClip = (function () {
     cv.width = Math.max(1, Math.round(w * k));
     cv.height = Math.max(1, Math.round(h * k));
     cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height);
+    return cv.toDataURL("image/png");
+  }
+
+  // 돌린 상자를 덮는 똑바른 상자의 크기
+  function hull(w, h, rot) {
+    const a = (rot || 0) * Math.PI / 180, c = Math.abs(Math.cos(a)), s = Math.abs(Math.sin(a));
+    return { w: w * c + h * s, h: w * s + h * c };
+  }
+
+  // 돌린 항목이 실제로 차지하는 똑바른 상자(b = 돌리기 전 상자, 가운데는 같다) — 무대·슬라이드 안으로 들일 때 이것으로 잰다
+  function hullBox(b, rot) {
+    if (!rot) return b;
+    const s = hull(b.w, b.h, rot);
+    return { x: b.x + (b.w - s.w) / 2, y: b.y + (b.h - s.h) / 2, w: s.w, h: s.h };
+  }
+
+  // 묶음(lo~hi)을 옮길 거리 — 바라는 만큼(want) 옮기되 끝(lim)을 넘으면 당기고, 0 앞으로 나가면 민다(둘 다면 0 쪽이 이긴다)
+  function shiftInto(lo, hi, want, lim) {
+    const d = hi + want > lim ? lim - hi : want;
+    return lo + d < 0 ? -lo : d;
+  }
+
+  const span = (bs) => ({
+    x0: Math.min(...bs.map((b) => b.x)), y0: Math.min(...bs.map((b) => b.y)),
+    x1: Math.max(...bs.map((b) => b.x + b.w)), y1: Math.max(...bs.map((b) => b.y + b.h)),
+  });
+
+  // 그림을 상자(w×h)에 object-fit 대로 담은 크기
+  function fitSize(im, w, h, fit) {
+    const nw = im.naturalWidth || im.width || w, nh = im.naturalHeight || im.height || h;
+    if (fit === "none") return { w: nw, h: nh };
+    if (!/^(contain|cover|scale-down)$/.test(fit)) return { w, h };            // fill
+    const q = fit === "cover" ? Math.max(w / nw, h / nh) : Math.min(w / nw, h / nh);
+    const k = fit === "scale-down" ? Math.min(1, q) : q;
+    return { w: nw * k, h: nh * k };
+  }
+
+  // 돌림·대칭을 구운 그림(다른 프로그램용 — 그림은 돌림 값을 실어 보낼 길이가 없다). 크기는 둘레 상자, 바깥은 투명.
+  // 캔버스도 뒤집은 다음 돌린다(CSS 와 같은 순서).
+  function bake(im, w, h, tn, scale, fit) {
+    const H = hull(w, h, tn.rot), k = Math.min(scale, RASTER_EDGE / Math.max(H.w, H.h, 1));
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(H.w * k));
+    cv.height = Math.max(1, Math.round(H.h * k));
+    const g = cv.getContext("2d"), d = fitSize(im, w, h, fit);
+    g.translate(cv.width / 2, cv.height / 2);
+    g.rotate(tn.rot * Math.PI / 180);
+    g.scale(tn.fh ? -1 : 1, tn.fv ? -1 : 1);
+    if (d.w > w + 0.5 || d.h > h + 0.5) {                                     // cover·none — 상자 밖은 잘라 낸다
+      g.beginPath();
+      g.rect(-w * k / 2, -h * k / 2, w * k, h * k);
+      g.clip();
+    }
+    g.drawImage(im, -d.w * k / 2, -d.h * k / 2, d.w * k, d.h * k);
     return cv.toDataURL("image/png");
   }
 
@@ -4480,15 +4651,39 @@ var DeckClip = (function () {
         try { cacheSet(urlData, s, await fetchData(s)); } catch (e) { cacheSet(urlData, s, s); }   // 못 받으면 주소 그대로
       }
     }
-    if (type === "image") { try { await convert(srcOf(el)); } catch (e) { /* 다른 프로그램에는 원래 그림으로 */ } return; }
+    if (type === "image") {
+      const src = srcOf(el);
+      try { await convert(src); } catch (e) { /* 다른 프로그램에는 원래 그림으로 */ }
+      await warmLook(el, o, f, conv.get(src) || src);
+      return;
+    }
     if (type !== "graphic" && type !== "box") return;
-    const b = (o.box && o.box(el)) || boxIn(el, f);
+    const tn = turnFor(el, o), b = boxFor(el, o, f, tn);
     if (!(b.w > 0 && b.h > 0)) return;
-    const sig = sigOf(el, b), c = cache.get(el);
+    const sig = sigOf(el, b, tn), c = cache.get(el);
     if (c && c.sig === sig) return;
-    let png = "";
+    let png = "", look = "";
     try { png = await rasterize(el, b, o.clean); } catch (e) { png = ""; }
-    cache.set(el, { sig, png });
+    if (png && turned(tn)) { try { look = bake(await loadImage(png), b.w, b.h, tn, RASTER, "fill"); } catch (e) { look = ""; } }
+    cache.set(el, { sig, png, look });
+  }
+
+  // 돌리거나 뒤집은 그림 — 다른 프로그램용으로 구워 둔다(덱끼리는 원래 그림 + 돌림 값으로 넘긴다)
+  async function warmLook(el, o, f, src) {
+    const tn = turnFor(el, o);
+    if (!turned(tn) || !/^data:image\//i.test(src || "")) return;
+    const b = boxFor(el, o, f, tn);
+    if (!(b.w > 0 && b.h > 0)) return;
+    const sig = sigOf(el, b, tn), c = cache.get(el);
+    if (c && c.sig === sig) return;
+    const im = await loadImage(src).catch(() => null);
+    if (!im) return;
+    const one = el.localName === "img" ? el : el.querySelector("img");
+    const fit = one ? el.ownerDocument.defaultView.getComputedStyle(one).objectFit : "fill";
+    const scale = Math.max(1, Math.min(RASTER * 2, (im.naturalWidth || b.w) / b.w));        // 원본 해상도를 되도록 살린다
+    let look = "";
+    try { look = bake(im, b.w, b.h, tn, scale, fit); } catch (e) { look = ""; }
+    cache.set(el, { sig, png: "", look });
   }
 
   // 고르면 바로 불러 둔다 — 복사(Ctrl+C)는 이벤트 안에서 바로 써야 해서 기다릴 수 없다
@@ -4504,6 +4699,7 @@ var DeckClip = (function () {
   }
 
   function officePic(it) {
+    if (it.look) return it.look;                                    // 돌림·대칭을 구운 그림
     if (it.type === "image") return it.office || it.src || "";
     return it.type === "graphic" || it.type === "box" ? it.png || "" : "";
   }
@@ -4597,11 +4793,11 @@ var DeckClip = (function () {
 
   // VML 모양 하나(b = 슬라이드 pt 자리, n = 몇째 모양). 글에 맞춤은 바탕·테두리가 안 보이는 상자에만 — 색 면·테두리
   // 상자는 덱 크기 그대로 둔다.
-  function pptBox(pp, b, n) {
+  function pptBox(pp, b, n, it) {
     const sh = pp.sh, c = corner(sh.rad, b), tag = c.tag || (pp.text ? "shape" : "rect"), shown = !!(sh.fill || sh.line);
     const head = "<v:" + tag + ' id="_x0000_s' + (1025 + n) + '"' + (tag === "shape" ? ' type="#_x0000_t202"' : "") +
       (tag === "roundrect" ? ' arcsize="' + c.arc + '"' : "") + ' style="position:absolute;left:' + r1(b.x) + "pt;top:" + r1(b.y) +
-      "pt;width:" + r1(b.w) + "pt;height:" + r1(b.h) + "pt;v-text-anchor:" + sh.anchor + ';mso-wrap-style:square"' +
+      "pt;width:" + r1(b.w) + "pt;height:" + r1(b.h) + "pt" + turnStyle(it) + ";v-text-anchor:" + sh.anchor + ';mso-wrap-style:square"' +
       (sh.fill ? ' filled="t" fillcolor="' + sh.fill.hex + '"' : ' filled="f"') +
       (sh.line ? ' stroked="t" strokecolor="' + sh.line.hex + '" strokeweight="' + sh.lineW + 'pt"' : ' stroked="f"') + ">";
     const stroke = sh.line ? (sh.dash ? ' dashstyle="' + sh.dash + '"' : "") +
@@ -4613,43 +4809,75 @@ var DeckClip = (function () {
     return "<!--[if ppt]>" + head + inner + "</v:" + tag + "><![endif]-->";
   }
 
-  // 무대 → 슬라이드 pt 자리. 묶음째 한 번만 옮겨 슬라이드 안으로(항목마다 끌어올리면 겹친다).
+  // VML 은 돌린 다음 쪽 축으로 뒤집는다 — 한 축만 뒤집었으면 각을 거꾸로 적어야 PowerPoint 에서 덱과 같은 꼴·같은 각이 된다
+  // (2026-10-18 실측: rotation:-45;flip:x → PowerPoint 회전 45°·좌우 대칭, rotation:15;flip:y → 345°·상하 대칭)
+  function turnStyle(it) {
+    const fh = /h/.test(it.flip || ""), fv = /v/.test(it.flip || ""), r = (fh !== fv ? -1 : 1) * (it.rot || 0);
+    return (r ? ";rotation:" + r1(r) : "") + (fh || fv ? ";flip:" + (fh && fv ? "x y" : fh ? "x" : "y") : "");
+  }
+
+  // 선·화살표 → VML 선 — PowerPoint 가 선 도형으로 받는다(2026-10-18 실측: 화살촉·점선·굵기·색 그대로). 끝점 = 돌리기 전
+  // 상자 안 끝점을 뒤집고 돌려 슬라이드 pt 로(b = pptPlace 가 묶음째 옮긴 상자 — 그 가운데를 축으로).
+  // PowerPoint 는 from 이 왼쪽 위·to 가 오른쪽 아래일 때만 선을 받는다(거꾸로 적으면 길이 0 이 된다 — 같은 날 실측). 그래서
+  // 둘레 상자의 두 모서리를 적고 방향은 flip 으로: flip:x 면 오른쪽에서, flip:y 면 아래에서 시작한다(화살촉은 끝 쪽 그대로).
+  function pptLine(it, b, k, n) {
+    const ln = it.line, fh = /h/.test(it.flip || ""), fv = /v/.test(it.flip || ""), a = (it.rot || 0) * Math.PI / 180;
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2, cos = Math.cos(a), sin = Math.sin(a);
+    const pt = (x, y) => {
+      const dx = (x - it.w / 2) * k * (fh ? -1 : 1), dy = (y - it.h / 2) * k * (fv ? -1 : 1);
+      return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+    };
+    const p0 = pt(ln.x1, ln.y1), p1 = pt(ln.x2, ln.y2), fx = p0[0] > p1[0], fy = p0[1] > p1[1];
+    const xy = (x, y) => r1(x) + "pt," + r1(y) + "pt";
+    const flip = fx || fy ? "flip:" + (fx && fy ? "x y" : fx ? "x" : "y") + ";" : "";
+    const dash = ln.dash === "dashed" ? ' dashstyle="dash"' : ln.dash === "dotted" ? ' dashstyle="dot"' : "";
+    return '<!--[if ppt]><v:line id="_x0000_s' + (1025 + n) + '" from="' + xy(Math.min(p0[0], p1[0]), Math.min(p0[1], p1[1])) +
+      '" to="' + xy(Math.max(p0[0], p1[0]), Math.max(p0[1], p1[1])) + '" strokecolor="' + ln.color + '" strokeweight="' +
+      r1(Math.max(0.25, ln.w * k)) + 'pt" style="position:absolute;' + flip + 'mso-wrap-style:none"><v:stroke' + dash +
+      (ln.arrow ? ' endarrow="block"' : "") + ' endcap="round"/></v:line><![endif]-->';
+  }
+
+  // 무대 → 슬라이드 pt 자리. 묶음째 한 번만 옮겨 슬라이드 안으로(항목마다 끌어올리면 겹친다) — 돌린 항목은 실제로 차지하는
+  // 둘레 상자로 잰다. 슬라이드보다 넓은 글상자는 슬라이드 너비로 줄이지만(글이 줄 바꿈), 돌린 것·선은 줄이면 꼴이 바뀌어 그대로 둔다.
   function pptPlace(list, k) {
-    const bs = list.map((it) => ({ x: it.x * k, y: it.y * k, w: Math.min(SLIDE_W, it.w * k), h: it.h * k }));
+    const bs = list.map((it) => {
+      const free = !!(it.rot || it.line);
+      return { x: it.x * k, y: it.y * k, w: free ? it.w * k : Math.min(SLIDE_W, it.w * k), h: it.h * k, free };
+    });
     if (!bs.length) return bs;
-    const x0 = Math.min(...bs.map((b) => b.x)), y0 = Math.min(...bs.map((b) => b.y));
-    const x1 = Math.max(...bs.map((b) => b.x + b.w)), y1 = Math.max(...bs.map((b) => b.y + b.h));
-    let dx = x1 > SLIDE_W ? SLIDE_W - x1 : 0, dy = y1 > SLIDE_H ? SLIDE_H - y1 : 0;
-    if (x0 + dx < 0) dx = -x0;
-    if (y0 + dy < 0) dy = -y0;
-    return bs.map((b) => ({ x: Math.max(0, Math.min(b.x + dx, SLIDE_W - b.w)), y: b.y + dy, w: b.w, h: b.h }));
+    const g = span(bs.map((b, i) => hullBox(b, list[i].rot)));
+    const dx = shiftInto(g.x0, g.x1, 0, SLIDE_W), dy = shiftInto(g.y0, g.y1, 0, SLIDE_H);
+    return bs.map((b) => ({ x: b.free ? b.x + dx : Math.max(0, Math.min(b.x + dx, SLIDE_W - b.w)), y: b.y + dy, w: b.w, h: b.h }));
   }
 
   function officeHtml(p) {
     const used = new Set();
     const sw = p.stage && num(p.stage.w, 1, 1e5) ? p.stage.w : SLIDE_W / PX_PT, k = SLIDE_W / sw;
     const parts = p.items.map((it) => {                                     // 그림이면 주소, 아니면 걸러 낸 HTML
-      const pic = officePic(it), src = blobOf(p, pic);
-      if (src && /^(data:image\/|https?:)/i.test(src)) return { it, pic, src };
+      const pic = officePic(it), src = blobOf(p, pic), ln = validLine(it.line);   // 선은 PowerPoint 에 선 도형으로
+      if (src && /^(data:image\/|https?:)/i.test(src)) return { it, pic, src, ln };
       const html = safeHtml(blobOf(p, it.html));
-      const vml = !!html.trim() && !NOT_TEXT.test(html);                    // 표는 PowerPoint 도 표로 받는다
-      return { it, html, vml, pp: vml ? pptPrep(html, k / PX_PT) : null };
+      const vml = !ln && !!html.trim() && !NOT_TEXT.test(html);             // 표는 PowerPoint 도 표로 받는다
+      return { it, html, vml, ln, pp: vml ? pptPrep(html, k / PX_PT) : null };
     });
-    const vs = parts.filter((x) => x.pp);                                   // 항목 순서 = 겹침 순서
+    const vs = parts.filter((x) => x.pp || x.ln);                           // 항목 순서 = 겹침 순서
     const at = pptPlace(vs.map((x) => x.it), k);
-    const shapes = vs.map((x, i) => pptBox(x.pp, at[i], i)).join("");
+    const shapes = vs.map((x, i) => (x.ln ? pptLine(x.it, at[i], k, i) : pptBox(x.pp, at[i], i, x.it))).join("");
     let body = "";
     for (const x of parts.slice().sort((a, b) => (a.it.y - b.it.y) || (a.it.x - b.it.x))) {
+      let h;
       if (x.src) {
         const m = /^deckclip:(b\d+)$/.exec(x.pic);
         if (m) used.add(m[1]);
-        body += '<p style="margin:0 0 8px 0"><img ' + (m ? 'data-dc="' + m[1] + '" ' : "") + 'src="' + esc(x.src) + '" width="' +
-          Math.round(x.it.w) + '" height="' + Math.round(x.it.h) + '" alt="' + esc(x.it.alt || x.it.name || "") + '"></p>';
+        const sz = x.it.look && x.pic === x.it.look ? hull(x.it.w, x.it.h, x.it.rot) : x.it;   // 구운 그림은 둘레 상자
+        h = '<p style="margin:0 0 8px 0"><img ' + (m ? 'data-dc="' + m[1] + '" ' : "") + 'src="' + esc(x.src) + '" width="' +
+          Math.round(sz.w) + '" height="' + Math.round(sz.h) + '" alt="' + esc(x.it.alt || x.it.name || "") + '"></p>';
       } else if (!x.vml) {
-        body += x.html;
+        h = x.html;
       } else {
-        body += '<![if !ppt]><div style="vertical-align:top">' + x.html.replace(/<!\[/g, "&lt;![") + "</div><![endif]>";
+        h = '<![if !ppt]><div style="vertical-align:top">' + x.html.replace(/<!\[/g, "&lt;![") + "</div><![endif]>";
       }
+      body += x.ln ? "<![if !ppt]>" + h.replace(/<!\[/g, "&lt;![") + "<![endif]>" : h;   // 선 그림은 PowerPoint 밖에서만
     }
     const lite = Object.assign({}, p, { blobs: {} });
     for (const key of Object.keys(p.blobs || {})) if (!used.has(key)) lite.blobs[key] = p.blobs[key];
@@ -4686,12 +4914,22 @@ var DeckClip = (function () {
   const num = (v, lo, hi) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
   const str = (v, max) => typeof v === "string" && v.length <= max;
 
+  // 덱 편집기가 그린 선 — 값이 그대로 VML 속성에 들어가므로 꼴을 엄격하게
+  function validLine(l) {
+    return !!l && typeof l === "object" && ["x1", "y1", "x2", "y2"].every((k) => num(l[k], -1e5, 1e5)) && num(l.w, 0, 500) &&
+      str(l.color, 7) && /^#[0-9a-f]{6}$/i.test(l.color) && str(l.dash, 6) && /^(solid|dashed|dotted)$/.test(l.dash) &&
+      typeof l.arrow === "boolean";
+  }
+
   function validItem(it) {
     if (!it || typeof it !== "object" || !TYPES.has(it.type)) return false;
     if (!num(it.x, -1e5, 1e5) || !num(it.y, -1e5, 1e5) || !num(it.w, 0.5, 1e5) || !num(it.h, 0.5, 1e5)) return false;
     if (!str(it.html, MAX_STR) || (it.text != null && !str(it.text, MAX_STR))) return false;
-    for (const f of ["src", "png", "office", "alt", "name"]) if (it[f] != null && !str(it[f], MAX_STR)) return false;
+    for (const f of ["src", "png", "office", "alt", "name", "look"]) if (it[f] != null && !str(it[f], MAX_STR)) return false;
     if (it.native != null && !(it.native && str(it.native.fmt, 40) && str(it.native.html, MAX_STR))) return false;
+    if (it.rot != null && !num(it.rot, -360, 360)) return false;
+    if (it.flip != null && !(str(it.flip, 2) && /^(h|v|hv)$/.test(it.flip))) return false;
+    if (it.line != null && !validLine(it.line)) return false;
     return true;
   }
 
@@ -4722,13 +4960,18 @@ var DeckClip = (function () {
   }
 
   // 항목은 아는 칸만 옮긴다 — Object.assign 은 "__proto__" 칸을 프로토타입으로 받아 검사하지 않은 값이 물려 들어온다
-  const ITEM_FIELDS = ["type", "x", "y", "w", "h", "html", "text", "name", "alt", "src", "png", "office"];
+  const ITEM_FIELDS = ["type", "x", "y", "w", "h", "html", "text", "name", "alt", "src", "png", "office", "rot", "flip", "look"];
+  const LINE_FIELDS = ["x1", "y1", "x2", "y2", "w", "color", "dash", "arrow"];
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
   function copyItem(it) {
     const o = {};
     for (const f of ITEM_FIELDS) if (own(it, f) && it[f] != null) o[f] = it[f];
     if (own(it, "native") && it.native && own(it.native, "fmt") && own(it.native, "html")) o.native = { fmt: it.native.fmt, html: it.native.html };
+    if (own(it, "line") && it.line && typeof it.line === "object") {
+      o.line = {};
+      for (const f of LINE_FIELDS) if (own(it.line, f)) o.line[f] = it.line[f];
+    }
     return o;
   }
 
@@ -4766,28 +5009,32 @@ var DeckClip = (function () {
     const sub = (s) => (typeof s !== "string" ? s : s.replace(REF_RE, (m, k) => (own(ok, k) ? ok[k] : "")));
     return p.items.map((it) => {
       const o = copyItem(it);
-      for (const f of ["html", "src", "png", "office"]) if (o[f]) o[f] = sub(o[f]);
+      for (const f of BLOB_FIELDS) if (o[f]) o[f] = sub(o[f]);
       if (o.native) o.native = { fmt: o.native.fmt, html: sub(o.native.html) };
       return o;
     });
   }
 
-  /* ── 놓을 자리: 무대 크기가 다르면 비율대로, 같은 자리에 이미 있으면 비켜서, 무대 밖이면 묶음째 안으로 ─────────── */
+  /* ── 놓을 자리: 무대 크기가 다르면 비율대로, 같은 자리에 이미 있으면 비켜서, 무대 밖이면 묶음째 안으로 ───────────
+     t = {w, h, taken?: [{x, y}], at?: {x, y}} — at 은 끌어다 놓은 점(묶음 가운데를 거기에, 비켜서기는 안 함).
+     x/y/w/h 는 돌리기 전 상자, 무대 안으로 들일 때는 돌린 항목이 실제로 차지하는 둘레 상자로 잰다 */
   function place(p, t) {
     const list = items(p);
+    if (!list.length) return [];
     const sw = p.stage.w, sh = p.stage.h;
     const k = Math.abs(sw - t.w) < 1 && Math.abs(sh - t.h) < 1 ? 1 : Math.min(t.w / sw, t.h / sh);
     let bs = list.map((it) => ({ x: it.x * k, y: it.y * k, w: it.w * k, h: it.h * k }));
-    const taken = Array.isArray(t.taken) ? t.taken : [];
-    const hit = (d) => bs.some((b) => taken.some((q) => Math.abs(q.x - (b.x + d)) < 1 && Math.abs(q.y - (b.y + d)) < 1));
-    let d = 0;
-    while (hit(d) && d < 40 * OFFSET) d += OFFSET;
-    bs = bs.map((b) => ({ x: b.x + d, y: b.y + d, w: b.w, h: b.h }));
-    const x0 = Math.min(...bs.map((b) => b.x)), y0 = Math.min(...bs.map((b) => b.y));
-    const x1 = Math.max(...bs.map((b) => b.x + b.w)), y1 = Math.max(...bs.map((b) => b.y + b.h));
-    let dx = x1 > t.w ? t.w - x1 : 0, dy = y1 > t.h ? t.h - y1 : 0;
-    if (x0 + dx < 0) dx = -x0;
-    if (y0 + dy < 0) dy = -y0;
+    const at = t.at && num(t.at.x, -1e5, 1e5) && num(t.at.y, -1e5, 1e5) ? t.at : null;
+    if (!at) {
+      const taken = Array.isArray(t.taken) ? t.taken : [];
+      const hit = (d) => bs.some((b) => taken.some((q) => Math.abs(q.x - (b.x + d)) < 1 && Math.abs(q.y - (b.y + d)) < 1));
+      let d = 0;
+      while (hit(d) && d < 40 * OFFSET) d += OFFSET;
+      bs = bs.map((b) => ({ x: b.x + d, y: b.y + d, w: b.w, h: b.h }));
+    }
+    const g = span(bs.map((b, i) => hullBox(b, list[i].rot)));
+    const dx = shiftInto(g.x0, g.x1, at ? at.x - (g.x0 + g.x1) / 2 : 0, t.w);
+    const dy = shiftInto(g.y0, g.y1, at ? at.y - (g.y0 + g.y1) / 2 : 0, t.h);
     return list.map((it, i) => ({ item: it, k, x: r2(bs[i].x + dx), y: r2(bs[i].y + dy), w: r2(bs[i].w), h: r2(bs[i].h) }));
   }
 
@@ -5046,18 +5293,42 @@ var DeckClip = (function () {
     return [root, ...root.querySelectorAll("*")].map(one).join("|");
   }
 
+  // 받는 빌더 덱 요소에 돌림·대칭을 다시 입힌다(CSS rotate·scale — 편집기 셋이 쓰는 꼴). flip = 뒤집기도 입힐지 —
+  // 글상자는 돌리기만(덱 편집기는 글을 뒤집지 않는다), 표는 부르지 않는다(그대로).
+  function withTurn(h, it, flip) {
+    if (!h || !(it.rot || (flip && it.flip))) return h;
+    const t = document.createElement("template");
+    t.innerHTML = h;
+    const el = t.content.firstElementChild;
+    if (!el) return h;
+    if (it.rot) el.style.setProperty("rotate", r2(it.rot) + "deg");
+    if (flip && it.flip) el.style.setProperty("scale", (/h/.test(it.flip) ? "-1" : "1") + " " + (/v/.test(it.flip) ? "-1" : "1"));
+    return t.innerHTML;
+  }
+
+  // 덱 편집기가 그린 선 — 받는 덱도 선으로 알아보게(크기를 바꾸면 다시 그리고 리본의 선 서식이 먹게) 이름표를 되붙이고,
+  // 안쪽의 계산된 서식은 걷어 낸다(선 색·굵기·점선은 속성으로 적는다 — 서식이 남으면 속성을 가린다)
+  function asLine(root, it) {
+    const l = root.cloneNode(true);
+    l.setAttribute("class", "el");
+    l.setAttribute("data-name", it.line.arrow ? "deckops:arrow" : "deckops:line");
+    for (const n of l.querySelectorAll("[style]")) n.removeAttribute("style");
+    return l;
+  }
+
   /* 항목(items() 가 푼 것) → 빌더 덱 요소 꼴(문자열, 없으면 ""). sanitize(html) → Element|null 은 그 편집기의 거르기 —
-     차트(SVG)는 거르기에서 빠지는 것이 없을 때만 그대로 넣고, 아니면 그림으로. 결과도 넣기 전에 그 거르기로 다시 거른다. */
+     차트(SVG)는 거르기에서 빠지는 것이 없을 때만 그대로 넣고, 아니면 그림으로. 결과도 넣기 전에 그 거르기로 다시 거른다.
+     돌림·대칭(it.rot·it.flip)은 결과 요소에 다시 입힌다. */
   function toBuilder(it, k, sanitize) {
     const root = clean(it.html).firstElementChild;
-    if (it.type === "image") return pictureHtml(it.src || it.office || "", it.alt || it.name);
-    if (!root) return pictureHtml(it.png, it.name);
+    if (it.type === "image") return withTurn(pictureHtml(it.src || it.office || "", it.alt || it.name), it, true);
+    if (!root) return withTurn(pictureHtml(it.png, it.name), it, true);
     scaleNode(root, k);
     if (it.type === "text") {
       const t = textParas(root);
-      if (!t.paras.length) return pictureHtml(it.png, it.name);
-      return '<div class="el tx" style="' + esc(t.box) + '"><div class="tin">' +
-        t.paras.map((p) => '<p class="pp" style="' + esc(p.style) + '">' + p.html + "</p>").join("") + "</div></div>";
+      if (!t.paras.length) return withTurn(pictureHtml(it.png, it.name), it, true);
+      return withTurn('<div class="el tx" style="' + esc(t.box) + '"><div class="tin">' +
+        t.paras.map((p) => '<p class="pp" style="' + esc(p.style) + '">' + p.html + "</p>").join("") + "</div></div>", it, false);
     }
     if (it.type === "table") {
       const tb = root.localName === "table" ? root : root.querySelector("table");
@@ -5068,21 +5339,1595 @@ var DeckClip = (function () {
     if (it.type === "graphic" && root.localName === "svg") {
       markerIds(root);
       root.setAttribute("class", "el ch");
-      const before = shape(root);
-      const n = typeof sanitize === "function" ? sanitize(root.outerHTML) : null;
-      if (n && shape(n) === before) return n.outerHTML;     // 거르기에서 빠진 것(요소·속성·서식 선언)이 없을 때만 SVG 그대로
+      const tries = it.line ? [asLine(root, it), root] : [root];       // 선으로 못 받는 거르기면 차트 꼴로
+      for (const r of tries) {
+        const before = shape(r);
+        const n = typeof sanitize === "function" ? sanitize(r.outerHTML) : null;
+        if (n && shape(n) === before) return withTurn(n.outerHTML, it, true);   // 거르기에서 빠진 것이 없을 때만 SVG 그대로
+      }
     }
-    return pictureHtml(it.png, it.name) || (root.localName === "div" ? root.outerHTML.replace(/^<div/, '<div class="el"') : "");
+    return withTurn(pictureHtml(it.png, it.name) || (root.localName === "div" ? root.outerHTML.replace(/^<div/, '<div class="el"') : ""),
+      it, true);
   }
 
   return Object.freeze({
     MIME, VERSION: V, LABEL, session: SESSION,
-    capture, warm, write, copyNow, officeHtml, read, items, place, scaleNode, clean, guessType, textParas, toBuilder,
+    capture, warm, write, copyNow, officeHtml, read, items, place, scaleNode, clean, guessType, textParas, toBuilder, turnOf,
     isOwn: (p) => !!(p && p.src && p.src.session === SESSION),
   });
 })();
 
-const DECK_EDIT_CSS = "/* 편집판에만 붙는 모양 — 빌드(build_models.py edit)가 덱 CSS 뒤에 붙인다(덱 CSS 는 % 서식 문자열이라 빌드가 %를 %% 로 바꾼다).\n   슬라이드 위 표시(선택 틀·손잡이)는 슬라이드처럼 고정색, 바깥 도구 막대·초안 알림은 덱 틀의 밝음·어두움 토큰을 따른다.\n   무대는 transform 으로 줄어들므로 틀 굵기·손잡이 크기는 배율(--s)로 나눠 화면에서 같은 크기로 보이게 한다. */\n:root{--ed-acc:#008A73;--ed-warn:#8A5A00;--ed-err:#B8361F;--ed-ok:#00715E}\n@media (prefers-color-scheme: dark){\n  :root:not([data-theme=\"light\"]){--ed-warn:#E7B35A;--ed-err:#F08B78;--ed-ok:#4CC7AE}\n}\n:root[data-theme=\"dark\"]{--ed-warn:#E7B35A;--ed-err:#F08B78;--ed-ok:#4CC7AE}\n\n/* 도구 막대·초안 알림 */\n.ed-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;font-size:14px;color:var(--chrome)}\n.ed-bar[hidden]{display:none}\n.ed-bar button,.ed-banner button{font:inherit;color:var(--chrome);background:var(--btn);border:1px solid var(--line);border-radius:8px;\n  padding:5px 10px;cursor:pointer;min-height:32px}\n.ed-bar button:hover:not(:disabled),.ed-banner button:hover{background:var(--btn-h)}\n.ed-bar button:focus-visible,.ed-banner button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}\n.ed-bar button:disabled{opacity:.42;cursor:default}\n.ed-bar button[data-act=\"save\"]{border-color:var(--accent);color:var(--accent);font-weight:700}\n.ed-sep{width:1px;align-self:stretch;margin:3px 4px;background:var(--line)}\n.ed-grp{display:inline-flex;flex-wrap:wrap;justify-content:center;gap:6px;max-width:100%}\n@media (max-width:1040px){.ed-sep{display:none}.ed-bar{column-gap:14px}}   /* 막대가 한 줄(약 970 px)에 안 들면 줄 끝에 구분선이 남지 않게 — 묶음 사이는 넓은 틈으로 */\n.ed-msg{flex-basis:100%;min-height:1.45em;text-align:center;font-size:13px;line-height:1.45;color:var(--chrome2);\n  word-break:keep-all;overflow-wrap:break-word;line-break:strict}\n.ed-msg.warn{color:var(--ed-warn)}\n.ed-msg.err{color:var(--ed-err)}\n.ed-msg.ok{color:var(--ed-ok)}\n.ed-banner{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border:1px solid var(--accent);\n  border-radius:10px;background:var(--panel);color:var(--chrome);font-size:14px;line-height:1.5;\n  word-break:keep-all;overflow-wrap:break-word;line-break:strict}\n.notes.ed-notes{outline:2px dashed var(--accent);outline-offset:-2px;cursor:text}\n\n/* 편집 중 무대 */\nhtml.ed-on .stage{outline:calc(2px / var(--s,0.5)) solid var(--ed-acc)}\nhtml.ed-on .slide.on>.el{cursor:move;touch-action:none}\nhtml.ed-on .slide.on>.el:hover{outline:calc(1px / var(--s,0.5)) dashed rgba(0,138,115,.7)!important;outline-offset:0!important}\nhtml.ed-on .slide [contenteditable=\"true\"]{cursor:text;outline:none}\nhtml.ed-on .slide [contenteditable=\"false\"]{cursor:default}\nhtml.ed-on .slide .wg>*{pointer-events:none}\nhtml.ed-on .slide img.el{-webkit-user-drag:none;user-select:none}\n.slide>[data-ed-del]{display:none!important}\n.slide .tin{color:#12202A}\n\n/* 선택 틀 — 무대 좌표(1280×720) */\n.ed-layer{position:absolute;inset:0;pointer-events:none;z-index:20}\n.ed-frame{position:absolute;box-sizing:border-box;outline:calc(1.5px / var(--s,0.5)) solid var(--ed-acc);pointer-events:none}\n.ed-frame[hidden]{display:none}\n.ed-band{position:absolute;pointer-events:auto;cursor:move;touch-action:none}\n.ed-band.n,.ed-band.s{left:calc(-9px / var(--s,0.5));right:calc(-9px / var(--s,0.5));height:calc(9px / var(--s,0.5))}\n.ed-band.n{bottom:100%}\n.ed-band.s{top:100%}\n.ed-band.e,.ed-band.w{top:0;bottom:0;width:calc(9px / var(--s,0.5))}\n.ed-band.e{left:100%}\n.ed-band.w{right:100%}\n.ed-h{position:absolute;box-sizing:border-box;width:calc(11px / var(--s,0.5));height:calc(11px / var(--s,0.5));\n  margin:calc(-5.5px / var(--s,0.5)) 0 0 calc(-5.5px / var(--s,0.5));background:#fff;border:calc(1.5px / var(--s,0.5)) solid var(--ed-acc);\n  border-radius:calc(2px / var(--s,0.5));pointer-events:auto;touch-action:none}\n.ed-h[data-ed-h=\"nw\"]{left:0;top:0;cursor:nwse-resize}\n.ed-h[data-ed-h=\"n\"]{left:50%;top:0;cursor:ns-resize}\n.ed-h[data-ed-h=\"ne\"]{left:100%;top:0;cursor:nesw-resize}\n.ed-h[data-ed-h=\"e\"]{left:100%;top:50%;cursor:ew-resize}\n.ed-h[data-ed-h=\"se\"]{left:100%;top:100%;cursor:nwse-resize}\n.ed-h[data-ed-h=\"s\"]{left:50%;top:100%;cursor:ns-resize}\n.ed-h[data-ed-h=\"sw\"]{left:0;top:100%;cursor:nesw-resize}\n.ed-h[data-ed-h=\"w\"]{left:0;top:50%;cursor:ew-resize}\n.ed-frame.rs-none .ed-h,\n.ed-frame.rs-ratio .ed-h[data-ed-h=\"n\"],.ed-frame.rs-ratio .ed-h[data-ed-h=\"e\"],\n.ed-frame.rs-ratio .ed-h[data-ed-h=\"s\"],.ed-frame.rs-ratio .ed-h[data-ed-h=\"w\"]{display:none}\n.ed-grip{position:absolute;left:calc(-1.5px / var(--s,0.5));bottom:calc(100% + 11px / var(--s,0.5));padding:0 calc(7px / var(--s,0.5));\n  border-radius:calc(4px / var(--s,0.5));background:var(--ed-acc);color:#fff;font:600 calc(12px / var(--s,0.5))/1.7 var(--f-ko);\n  white-space:nowrap;pointer-events:auto;cursor:move;user-select:none;touch-action:none}\n.ed-frame.grip-below .ed-grip{bottom:auto;top:calc(100% + 11px / var(--s,0.5))}\n\n/* 클립아트 보관함 — 화면 오른쪽 아래에 뜨는 창(무대 배치에 영향 없음) */\n.ed-clip{position:fixed;right:12px;bottom:12px;z-index:60;width:min(480px,calc(100vw - 24px));max-height:min(72vh,580px);display:flex;\n  flex-direction:column;background:var(--panel);color:var(--chrome);border:1px solid var(--line);border-radius:12px;\n  box-shadow:0 10px 30px rgba(0,0,0,.24);font-size:13px}\n.ed-clip[hidden]{display:none}\n.ed-clip-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}\n.ed-clip-h b{font-size:15px}\n.ed-clip-n{flex:1;color:var(--chrome2)}\n.ed-clip button{font:inherit;color:var(--chrome);background:var(--btn);border:1px solid var(--line);border-radius:7px;padding:4px 8px;cursor:pointer;min-height:28px}\n.ed-clip button:hover{background:var(--btn-h)}\n.ed-clip button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}\n.ed-clip-tip{margin:0;padding:8px 12px 0;color:var(--chrome2);line-height:1.5}\n.ed-clip-grid{overflow:auto;padding:10px 12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:8px;min-height:60px}\n.ed-clip-t{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--btn)}\n.ed-clip button.ed-clip-pic{display:flex;align-items:center;justify-content:center;width:100%;height:88px;padding:4px;border:0;border-radius:0;\n  background:repeating-conic-gradient(#E3E8EB 0 25%,#FFFFFF 0 50%) 0 0/12px 12px}\n.ed-clip-pic img{max-width:100%;max-height:100%;object-fit:contain}\n.ed-clip-ph{font-size:12px;line-height:1.35;color:#22313B;text-align:left;overflow:hidden;max-height:100%}\n.ed-clip-nm{padding:5px 8px 2px;font-size:12px;color:var(--chrome2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n.ed-clip-ac{display:flex;flex-wrap:wrap;gap:4px;padding:4px 6px 7px}\n.ed-clip-ac button{flex:1 1 auto;padding:2px 6px;min-height:24px;font-size:12px}\n.ed-clip-f{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px 10px;border-top:1px solid var(--line)}\n";
+/* deckbox — 덱 편집기 공통 상자·도형 명령(deckops.js 의 짝 — 이 파일을 먼저 싣는다). 편집기는 DeckOps 로 이 이름들을
+   함께 부른다(DeckOps 가 다시 내보낸다).
+   · 색 읽기 — rgba·hex(캔버스가 읽으니 oklch·color-mix 도 된다).
+   · 배치 — 장에 맞추기(돌린 상자는 보이는 테두리 기준), 앞뒤 순서, 회전(CSS rotate 속성 — transform 함수를 막는 거르기도
+     지난다), 대칭(scale 속성), 돌린 상자의 크기 바꾸기(반대쪽 모서리 고정). 좌표는 편집기가 준다(boxOf 같은 것).
+   · 도형 — 사각형·둥근 사각형·타원은 '채운 글상자'(글을 쓸 수 있고 다른 덱·PowerPoint 로 도형째 옮겨진다), 선·화살표는 SVG
+     (크기를 바꾸면 fitLine 으로 다시 그려 화살촉이 찌그러지지 않게). 채우기·윤곽선·투명도, 서식 복사의 상자 몫.
+   DOM 만 바꾼다. 무엇을 골랐는지·되돌리기·저장은 편집기 몫이다. */
+
+var DeckBox = (function () {
+  "use strict";
+
+  const SHAPE_FILL = "#4472C4";       // PowerPoint 기본 도형(Office 테마 강조 1) — 채우기·윤곽선·글
+  const SHAPE_LINE = "#2F528F";
+  const SHAPE_TEXT = "#FFFFFF";
+  const LINE_NAME = { line: "deckops:line", arrow: "deckops:arrow" };
+
+  const win = (n) => ((n && n.ownerDocument) || document).defaultView || window;
+  const css = (el) => win(el).getComputedStyle(el);
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const isEl = (n) => !!n && n.nodeType === 1;
+
+  // 색 → #RRGGBB(+ 알파). 캔버스가 읽으니 oklch·color-mix 도 된다. 못 읽거나 투명하면 null
+  let ctx2d = null;
+  function rgba(c) {
+    if (!c || c === "transparent") return null;
+    const m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/.exec(c.trim());
+    let r, g, b, a;
+    if (m) {
+      r = +m[1]; g = +m[2]; b = +m[3];
+      a = m[4] == null ? 1 : m[4].slice(-1) === "%" ? parseFloat(m[4]) / 100 : +m[4];
+    } else {
+      if (!ctx2d) {
+        const cv = document.createElement("canvas");
+        cv.width = cv.height = 1;
+        ctx2d = cv.getContext("2d", { willReadFrequently: true });
+      }
+      if (!ctx2d) return null;
+      ctx2d.clearRect(0, 0, 1, 1);
+      ctx2d.fillStyle = "rgba(0,0,0,0)";
+      ctx2d.fillStyle = c;
+      ctx2d.fillRect(0, 0, 1, 1);
+      const d = ctx2d.getImageData(0, 0, 1, 1).data;
+      r = d[0]; g = d[1]; b = d[2]; a = d[3] / 255;
+    }
+    if (!(a > 0.01)) return null;
+    const h = (v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase();
+    return { hex: "#" + h(r) + h(g) + h(b), a: r2(a), r, g, b };
+  }
+  const hex = (c) => { const v = rgba(c); return v ? v.hex : null; };
+
+  /* ── 상자: 맞추기·순서·회전·대칭 ─────────────────────────────────────── */
+  function angle(el) {
+    const v = (el.style.rotate || "").trim();
+    if (!v || v === "none") return 0;
+    const m = /(-?[\d.]+)\s*(deg|turn|rad|grad)?\s*$/.exec(v);
+    if (!m) return 0;
+    const n = parseFloat(m[1]), u = m[2] || "deg";
+    return u === "turn" ? n * 360 : u === "rad" ? n * 180 / Math.PI : u === "grad" ? n * 0.9 : n;
+  }
+
+  function setAngle(el, deg) {
+    let d = ((Math.round(deg * 100) / 100) % 360 + 360) % 360;
+    if (d > 180) d -= 360;
+    if (Math.abs(d) < 0.005) el.style.removeProperty("rotate");
+    else el.style.setProperty("rotate", d + "deg");
+    return d;
+  }
+
+  function flipOf(el) {
+    const p = (el.style.scale || "").trim().split(/\s+/).filter(Boolean).map(parseFloat);
+    const x = p.length ? p[0] : 1, y = p.length > 1 ? p[1] : x;
+    return { h: x < 0, v: y < 0 };
+  }
+
+  function flip(el, axis) {
+    const f = flipOf(el);
+    if (axis === "h") f.h = !f.h; else f.v = !f.v;
+    if (!f.h && !f.v) el.style.removeProperty("scale");
+    else el.style.setProperty("scale", (f.h ? "-1" : "1") + " " + (f.v ? "-1" : "1"));
+    return f;
+  }
+
+  // 돌린 상자가 보이는 테두리(축 맞춘 상자)
+  function seen(b, deg) {
+    const t = deg * Math.PI / 180, c = Math.abs(Math.cos(t)), s = Math.abs(Math.sin(t));
+    const w = b.w * c + b.h * s, h = b.w * s + b.h * c;
+    return { x: b.x + (b.w - w) / 2, y: b.y + (b.h - h) / 2, w, h };
+  }
+
+  // 장(W×H)에 맞추기 — b: 돌리기 전 상자 {x,y,w,h}. 새 {x,y} 를 돌려준다
+  function alignBox(b, deg, mode, W, H) {
+    const v = seen(b, deg);
+    let dx = 0, dy = 0;
+    if (mode === "left") dx = -v.x;
+    else if (mode === "center") dx = (W - v.w) / 2 - v.x;
+    else if (mode === "right") dx = W - v.w - v.x;
+    else if (mode === "top") dy = -v.y;
+    else if (mode === "middle") dy = (H - v.h) / 2 - v.y;
+    else if (mode === "bottom") dy = H - v.h - v.y;
+    return { x: r2(b.x + dx), y: r2(b.y + dy) };
+  }
+
+  // 앞뒤 순서 — 같은 부모 안 상자(isBox)끼리의 문서 순서(뒤에 있을수록 위). 움직였으면 true
+  function order(el, how, isBox) {
+    const sibs = Array.from(el.parentNode.children).filter(isBox), i = sibs.indexOf(el);
+    if (i < 0) return false;
+    const last = sibs.length - 1;
+    let ref;
+    if (how === "front" || how === "forward") {
+      if (i === last) return false;
+      ref = sibs[how === "front" ? last : i + 1].nextSibling;
+    } else {
+      if (i === 0) return false;
+      ref = sibs[how === "back" ? 0 : i - 1];
+    }
+    el.parentNode.insertBefore(el, ref);
+    return true;
+  }
+
+  // 돌린 상자의 크기를 손잡이로 바꿀 때 — 화면 이동량을 상자 축으로 돌려 바꾼 뒤 반대쪽 모서리가 제자리에 남게 옮긴다.
+  // resize(b, dx, dy) 는 편집기의 '돌리지 않은 상자 크기 바꾸기'(손잡이 방향·최소 크기·비율 유지)
+  function resizeTurned(b, deg, dx, dy, resize) {
+    const t = deg * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
+    const nb = resize(b, dx * c + dy * s, -dx * s + dy * c);
+    const lx = nb.x + nb.w / 2 - (b.x + b.w / 2), ly = nb.y + nb.h / 2 - (b.y + b.h / 2);
+    const cx = b.x + b.w / 2 + lx * c - ly * s, cy = b.y + b.h / 2 + lx * s + ly * c;
+    return { x: cx - nb.w / 2, y: cy - nb.h / 2, w: nb.w, h: nb.h };
+  }
+
+  /* ── 도형 ─────────────────────────────────────────────────────── */
+  const SHAPES = [["rect", "사각형"], ["round", "모서리가 둥근 사각형"], ["oval", "타원"], ["line", "선"], ["arrow", "화살표"]];
+  // 선·화살표 표지 — data-name 의 'deckops:' 는 예약 값이다(빌더 덱에서 data-name 은 상자 이름이기도 하다 — 편집기 A 의
+  // '모든 장에'는 이 이름을 상자 이름으로 보지 않는다). 공통 클립보드(deckclip.js LINE_NAME)도 같은 표지를 읽는다
+  const isLine = (el) => isEl(el) && el.localName === "svg" && /^deckops:(line|arrow)$/.test(el.getAttribute("data-name") || "");
+
+  // 채운 글상자 꼴 도형의 상자 서식(편집기가 자리·크기를 덧붙인다)
+  function shapeStyle(kind, w, h) {
+    const rad = kind === "oval" ? "50%" : kind === "round" ? Math.round(Math.min(w, h) / 6) + "px" : "0px";
+    return "background-color:" + SHAPE_FILL + ";border:1.5px solid " + SHAPE_LINE + ";border-radius:" + rad;
+  }
+  const shapeText = () => "color:" + SHAPE_TEXT + ";text-align:center";
+
+  function lineSvg(kind, w, h, color, px) {
+    const ns = "http://www.w3.org/2000/svg";
+    const head = kind === "arrow" ? '<polygon fill="' + color + '" points="0,0 0,0 0,0"/>' : "";
+    return '<svg xmlns="' + ns + '" data-name="' + LINE_NAME[kind] + '" viewBox="0 0 ' + w + " " + h + '"><line x1="0" y1="0" x2="0" y2="0" stroke="' +
+      color + '" stroke-width="' + px + '" stroke-linecap="round"/>' + head + "</svg>";
+  }
+
+  // 크기를 안 주면 — px 로 적힌 크기, 아니면 지금 viewBox(지난번에 그린 크기). 상자를 채우는 SVG(width:100% — 편집기 C 의
+  // 붙인 상자)의 '100' 은 크기가 아니다
+  function drawnSize(svg, k, dflt) {
+    const v = svg.style[k] || "";
+    if (/^\s*\d*\.?\d+px\s*$/.test(v)) return parseFloat(v);
+    const vb = svg.viewBox && svg.viewBox.baseVal, n = vb ? (k === "width" ? vb.width : vb.height) : 0;
+    return n > 0 ? n : dflt;
+  }
+
+  // 선·화살표를 지금 크기로 다시 그린다(가운데 가로선, 끝에 화살촉) — 크기를 바꿀 때마다
+  function fitLine(svg, w, h) {
+    if (!isLine(svg)) return;
+    const W = r2(w || drawnSize(svg, "width", 200)), H = r2(h || drawnSize(svg, "height", 24));
+    const ln = svg.querySelector("line"), hd = svg.querySelector("polygon");
+    if (!ln) return;
+    const sw = parseFloat(ln.getAttribute("stroke-width")) || 2, pad = r2(sw / 2 + 1), y = r2(H / 2);
+    const hl = hd ? r2(Math.min(W * 0.45, sw * 3 + 8)) : 0, hw = r2(Math.min(H / 2, sw * 1.6 + 4));
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    ln.setAttribute("x1", pad);
+    ln.setAttribute("y1", y);
+    ln.setAttribute("x2", r2(Math.max(pad, W - pad - hl * 0.7)));
+    ln.setAttribute("y2", y);
+    if (hd) hd.setAttribute("points", r2(W - pad) + "," + y + " " + r2(W - pad - hl) + "," + r2(y - hw) + " " + r2(W - pad - hl) + "," + r2(y + hw));
+  }
+
+  function lineParts(svg) { return { ln: svg.querySelector("line"), hd: svg.querySelector("polygon") }; }
+
+  const DASH_SVG = { solid: null, dashed: "6 4", dotted: "1.5 3" };
+
+  // 도형 서식 읽기 — {kind:"line"|"box", fill, alpha, line, lineW, dash}
+  function boxFmt(el) {
+    if (isLine(el)) {
+      const { ln } = lineParts(el);
+      const da = (ln && ln.getAttribute("stroke-dasharray")) || "";
+      return { kind: "line", fill: null, alpha: 1, line: ln ? hex(ln.getAttribute("stroke")) : null,
+        lineW: ln ? parseFloat(ln.getAttribute("stroke-width")) || 0 : 0, dash: !da ? "solid" : /^1(\.\d+)?\s/.test(da) ? "dotted" : "dashed" };
+    }
+    // 두께는 적힌 값을 먼저 — 계산값은 Chrome 이 장치 픽셀로 내린다(1.5px → 1px)
+    const c = css(el), bg = rgba(c.backgroundColor), iw = parseFloat(el.style.borderTopWidth);
+    const bw = isNaN(iw) ? parseFloat(c.borderTopWidth) : iw;
+    const has = c.borderTopStyle !== "none" && bw > 0;
+    return { kind: "box", fill: bg ? bg.hex : null, alpha: bg ? bg.a : 1, line: has ? hex(c.borderTopColor) : null,
+      lineW: has ? r2(bw) : 0, dash: has ? c.borderTopStyle : "solid" };
+  }
+
+  function rgbaText(hx, a) {
+    const v = rgba(hx);
+    if (!v) return "transparent";
+    return a >= 0.995 ? v.hex : "rgba(" + v.r + ", " + v.g + ", " + v.b + ", " + r2(a) + ")";
+  }
+
+  function setFill(el, color) {
+    if (isLine(el)) return false;
+    const a = (boxFmt(el).fill && boxFmt(el).alpha) || 1;
+    el.style.setProperty("background-color", color ? rgbaText(color, a) : "transparent");
+    return true;
+  }
+
+  function setAlpha(el, a) {
+    const f = boxFmt(el);
+    if (f.kind !== "box" || !f.fill) return false;
+    el.style.setProperty("background-color", rgbaText(f.fill, Math.max(0, Math.min(1, a))));
+    return true;
+  }
+
+  // 윤곽선 — o: {color(null=없음), w(px), dash(solid|dashed|dotted)} 중 바꿀 것만
+  function setLine(el, o) {
+    const f = boxFmt(el);
+    const color = o.color === undefined ? f.line || SHAPE_LINE : o.color;
+    const w = o.w == null ? f.lineW || 1.5 : o.w, dash = o.dash || f.dash || "solid";
+    if (f.kind === "line") {
+      if (o.color === null) return false;                   // 선에 '윤곽선 없음'은 하지 않는다(검게 칠하지도 않는다) — 지우려면 Delete
+      const { ln, hd } = lineParts(el);
+      if (!ln) return false;
+      const c = color || SHAPE_LINE;
+      ln.setAttribute("stroke", c);
+      ln.setAttribute("stroke-width", r2(w));
+      if (DASH_SVG[dash]) ln.setAttribute("stroke-dasharray", DASH_SVG[dash]); else ln.removeAttribute("stroke-dasharray");
+      if (hd) hd.setAttribute("fill", c);
+      fitLine(el);
+      return true;
+    }
+    if (!color || !(w > 0)) el.style.setProperty("border", "0px none transparent");
+    else el.style.setProperty("border", r2(w) + "px " + dash + " " + color);
+    return true;
+  }
+
+  /* ── 서식 복사(상자 몫) ─────────────────────────────────────────────── */
+  // 채운 상자는 채우기·윤곽선, 선·화살표는 선 서식. 모양(둥근 모서리·타원)은 서식이 아니다 — PowerPoint 도 안 옮긴다
+  function pickBoxFmt(box) {
+    const f = boxFmt(box);
+    return {
+      box: f.kind === "box" && (f.fill || f.line) ? f : null,
+      line: f.kind === "line" ? f : null,
+    };
+  }
+
+  // 같은 꼴(상자↔상자)은 채우기·윤곽선, 다른 꼴(상자↔선)이면 윤곽선만. noFill: 채우기를 받지 않는 대상(그림 등)
+  function applyBoxFmt(box, fmt, noFill) {
+    const src = fmt.box || fmt.line;
+    if (!src) return false;
+    if (isLine(box)) {
+      if (!src.line) return false;                          // 윤곽선 없는 상자의 서식을 선에 — 선을 지우지 않는다
+      return setLine(box, { color: src.line, w: src.lineW, dash: src.dash });
+    }
+    if (fmt.box && !noFill) box.style.setProperty("background-color", fmt.box.fill ? rgbaText(fmt.box.fill, fmt.box.alpha) : "transparent");
+    return setLine(box, { color: src.line, w: src.lineW, dash: src.dash });
+  }
+
+  return Object.freeze({
+    SHAPES, SHAPE_FILL, SHAPE_LINE, SHAPE_TEXT, rgba, hex,
+    angle, setAngle, flipOf, flip, seen, alignBox, order, resizeTurned,
+    isLine, shapeStyle, shapeText, lineSvg, fitLine, boxFmt, setFill, setAlpha, setLine, pickBoxFmt, applyBoxFmt,
+  });
+})();
+
+/* deckops — 덱 편집기 공통 편집 명령. PowerPoint '홈' 탭의 글꼴·단락·그리기·배치·편집 명령을 세 편집기가 같은 뜻·같은
+   단축키로 쓰게 한다. 원본은 이 폴더(_deck_edit/deckops/)다 — deckbox.js(상자·도형·색)를 먼저 싣고 이 파일(글자·단락·
+   서식 복사·찾기·단축키 표)을 싣는다. DeckOps 가 DeckBox 의 이름도 함께 내보내므로 편집기는 DeckOps 하나만 부른다.
+   편집기 B(빌더 덱에 든 편집기, _deck_edit/editor/ — bundle.py 가 싣는다)·C(편집 모드 edit_module.html — inject_edit.py 가
+   @@deckops@@ 자리에 넣는다)·A(html-slides editor/js/ — sync_deckops.py 가 만든 ES 모듈 사본). 화면(리본·찾기 창)은
+   deckribbon.js 가 따로 맡는다.
+
+   DOM 만 바꾼다. 무엇을 골랐는지·되돌리기·저장은 편집기 몫이다(편집기가 명령 앞뒤로 자기 되돌리기를 찍는다).
+   · 글자 — 고른 글(없거나 캐럿뿐이면 글 칸 전체)에 굵게·기울임·밑줄·취소선·위/아래 첨자·글꼴·크기·색·형광펜·서식 지우기·
+     대소문자. 고른 범위 경계에서 텍스트와 감싼 요소를 쪼개 문단(블록) 바로 아래 자식으로 만든 뒤 span 의 인라인 서식을 입힌다
+     (편집기마다 다른 허용 목록을 모두 지나는 꼴 — span+style, sup/sub). 끝나면 같은 꼴의 이웃 span 을 합치고, 고른 범위를
+     글자 수로 되살린다(쪼개고 합치면 텍스트 노드가 바뀌므로).
+     밑줄·취소선은 상속이 아니라 '전파'라 자식이 끌 수 없다 — 범위 안의 선을 모두 걷고 글마다 원하는 선을 다시 긋는다.
+   · 단락 — 맞춤(왼·가운데·오른·양쪽), 줄 간격(PowerPoint 배수 — 1.0 = 글자 크기의 1.2배, 단위 없는 line-height 로).
+   · 서식 복사(pickFmt/applyFmt — 상자 몫은 DeckBox), 찾기·바꾸기(find/replaceChars), PowerPoint 단축키 표(keyCmd — e.code 로
+     읽어 한글 자판에서도). 배치·도형은 deckbox.js. */
+
+var DeckOps = (function (Box) {
+  "use strict";
+
+  const { hex } = Box;
+
+  const PX_PT = 0.75;                 // 덱 1280px = PowerPoint 960pt (deckclip 과 같은 비율)
+  const SIZES = [8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 66, 72, 80, 88, 96];   // PowerPoint 글꼴 크기 목록(pt)
+  const PT_MIN = 1;
+  const PT_MAX = 400;
+  const SPACING = [1, 1.15, 1.5, 2, 2.5, 3];
+  const LINE_K = 1.2;                 // 줄 간격 1.0 = 글자 크기의 약 1.2배(PowerPoint '한 줄')
+  const SEP = String.fromCharCode(1); // 찾기 — 문단 사이(입력에 나올 수 없는 글자)
+  const BLOCKS = new Set(["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "td", "th", "blockquote", "figcaption",
+    "dd", "dt", "pre", "section", "article", "ul", "ol", "table", "tr", "tbody", "thead"]);
+  const STRIP_TAGS = { "font-weight": ["b", "strong"], "font-style": ["i", "em"], "font-family": ["font"],
+    "font-size": ["font", "small", "big"], color: ["font"], "background-color": ["mark"] };
+  const LINE_TAGS = ["u", "s", "strike", "del", "ins"];
+  const CLEAR_TAGS = ["span", "b", "strong", "i", "em", "u", "s", "strike", "del", "ins", "sup", "sub", "font", "mark", "small", "big"];
+  const INHERITED = new Set(["font-weight", "font-style", "font-family", "font-size", "color"]);
+
+  /* 명령 표 — [이름, 단축키, 무리]. 무리: text(글자) · para(단락) · box(상자) · edit(편집). 화면·도움말이 이 표를 쓴다. */
+  const CMD = {
+    font: ["글꼴", "", "text"], size: ["글자 크기", "", "text"],
+    grow: ["글자 크게", "Ctrl+Shift+>", "text"], shrink: ["글자 작게", "Ctrl+Shift+<", "text"],
+    grow1: ["글자 1pt 크게", "Ctrl+]", "text"], shrink1: ["글자 1pt 작게", "Ctrl+[", "text"],
+    bold: ["굵게", "Ctrl+B", "text"], italic: ["기울임꼴", "Ctrl+I", "text"], underline: ["밑줄", "Ctrl+U", "text"],
+    strike: ["취소선", "", "text"], sup: ["위 첨자", "Ctrl+Shift++", "text"], sub: ["아래 첨자", "Ctrl+=", "text"],
+    case: ["대/소문자 바꾸기", "Shift+F3", "text"], color: ["글자색", "", "text"], highlight: ["형광펜", "", "text"],
+    clear: ["서식 지우기", "Ctrl+Space", "text"],
+    alignLeft: ["왼쪽 맞춤", "Ctrl+L", "para"], alignCenter: ["가운데 맞춤", "Ctrl+E", "para"],
+    alignRight: ["오른쪽 맞춤", "Ctrl+R", "para"], alignJustify: ["양쪽 맞춤", "Ctrl+J", "para"], spacing: ["줄 간격", "", "para"],
+    shape: ["도형 넣기", "", "edit"], fill: ["도형 채우기", "", "box"], line: ["도형 윤곽선", "", "box"], alpha: ["채우기 투명도", "", "box"],
+    front: ["맨 앞으로 가져오기", "", "box"], forward: ["앞으로 가져오기", "Ctrl+Shift+]", "box"],
+    backward: ["뒤로 보내기", "Ctrl+Shift+[", "box"], back: ["맨 뒤로 보내기", "", "box"],
+    alignSlide: ["장에 맞추기", "", "box"], rotR90: ["오른쪽으로 90° 회전", "", "box"], rotL90: ["왼쪽으로 90° 회전", "", "box"],
+    rotR15: ["오른쪽으로 15° 회전", "Alt+→", "box"], rotL15: ["왼쪽으로 15° 회전", "Alt+←", "box"], rot0: ["회전 없애기", "", "box"],
+    flipH: ["좌우 대칭", "", "box"], flipV: ["상하 대칭", "", "box"], dup: ["복제", "Ctrl+D", "box"],
+    fmtCopy: ["서식 복사", "Ctrl+Shift+C", "edit"], fmtPaste: ["서식 붙여넣기", "Ctrl+Shift+V", "edit"],
+    find: ["찾기", "Ctrl+F", "edit"], replace: ["바꾸기", "Ctrl+H", "edit"],
+  };
+  const PARA = { alignLeft: "left", alignCenter: "center", alignRight: "right", alignJustify: "justify" };
+
+  const FONTS = [
+    ["맑은 고딕", "\"Malgun Gothic\", \"맑은 고딕\", sans-serif"], ["Noto Sans KR", "\"Noto Sans KR\", sans-serif"],
+    ["나눔고딕", "NanumGothic, \"나눔고딕\", sans-serif"], ["바탕", "Batang, \"바탕\", serif"], ["굴림", "Gulim, \"굴림\", sans-serif"],
+    ["돋움", "Dotum, \"돋움\", sans-serif"], ["Arial", "Arial, sans-serif"], ["Calibri", "Calibri, sans-serif"],
+    ["Georgia", "Georgia, serif"], ["Times New Roman", "\"Times New Roman\", serif"], ["Consolas", "Consolas, monospace"],
+  ];
+  const COLORS = ["#000000", "#404040", "#7F7F7F", "#BFBFBF", "#FFFFFF", "#12202A", "#C00000", "#FF0000", "#FFC000", "#FFFF00",
+    "#92D050", "#00B050", "#008A73", "#00B0F0", "#0070C0", "#4472C4", "#002060", "#7030A0", "#ED7D31", "#A5A5A5"];
+  const HIGHLIGHTS = ["#FFFF00", "#00FF00", "#00FFFF", "#FF00FF", "#FFC000", "#FCE4D6", "#E2EFDA", "#DDEBF7"];
+
+  /* ── 바탕 ───────────────────────────────────────────────────────── */
+  const win = (n) => ((n && n.ownerDocument) || document).defaultView || window;
+  const css = (el) => win(el).getComputedStyle(el);
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const isEl = (n) => !!n && n.nodeType === 1;
+  const fixed = (n) => isEl(n) && n.getAttribute("contenteditable") === "false";
+
+  // 덱이 걸어 둔 칸 — 서식 태그·span 가운데 id 나 data-* 를 단 것(편집기 C 덱의 살아 있는 값 span[data-v]·span#axesExpl 등).
+  // 덱 스크립트가 그 걸이로 찾아 값을 채우므로 서식 지우기는 벗기지 않고(clearOne), 일부만 골라도 쪼개지 않는다(wholeMarked·cut*)
+  const hasHook = (el) => el.hasAttribute("id") || Array.from(el.attributes).some((at) => at.name.startsWith("data-"));
+  const marked = (el) => isEl(el) && CLEAR_TAGS.indexOf(el.localName) >= 0 && !fixed(el) && hasHook(el);
+
+  // 글이 아닌 곳 — 글머리표(.bu)처럼 고칠 수 없는 칸, SVG·스크립트 안
+  function locked(n, root) {
+    for (let p = n.parentNode; p && p !== root; p = p.parentNode) {
+      if (!isEl(p)) continue;
+      if (fixed(p)) return true;
+      const t = p.localName;
+      if (t === "svg" || t === "script" || t === "style" || t === "template") return true;
+    }
+    return false;
+  }
+
+  // 문단 사이의 들여쓰기 공백(블록 자식과 나란한 공백뿐인 글) — 글로 세지 않는다(서식 span 으로 감싸지 않게)
+  function blockGap(t) {
+    if (/\S/.test(t.data)) return false;
+    for (const c of t.parentNode.childNodes) if (isEl(c) && isBlock(c)) return true;
+    return false;
+  }
+
+  function texts(root) {
+    const out = [];
+    const tw = root.ownerDocument.createTreeWalker(root, 4);
+    while (tw.nextNode()) {
+      const t = tw.currentNode;
+      if (!locked(t, root) && !blockGap(t)) out.push(t);
+    }
+    return out;
+  }
+
+  function total(root) { return texts(root).reduce((n, t) => n + t.length, 0); }
+
+  function isBlock(el) {
+    if (BLOCKS.has(el.localName)) return true;
+    const d = css(el).display;
+    return !(d === "inline" || d === "contents" || d === "none" || d.indexOf("inline") === 0 || d.indexOf("ruby") === 0);
+  }
+
+  function blockOf(n, root) {
+    for (let p = n.parentNode; p && p !== root; p = p.parentNode) if (isEl(p) && isBlock(p)) return p;
+    return root;
+  }
+
+
+  /* ── 글자 위치(글자 수) — 쪼개고 합쳐도 변하지 않는 좌표 ─────────────────── */
+  function charIndex(root, node, off) {
+    const probe = root.ownerDocument.createRange();
+    try { probe.setStart(node, off); } catch (e) { return 0; }
+    probe.collapse(true);
+    let n = 0;
+    for (const t of texts(root)) {
+      if (t === node) return n + Math.min(off, t.length);
+      if (probe.comparePoint(t, t.length) <= 0) n += t.length;
+      else return n;
+    }
+    return n;
+  }
+
+  function rangeIn(root) {
+    const s = win(root).getSelection();
+    if (!s || !s.rangeCount) return null;
+    const r = s.getRangeAt(0);
+    return root.contains(r.startContainer) && root.contains(r.endContainer) ? r : null;
+  }
+
+  function rangeChars(root, range) {
+    const a = charIndex(root, range.startContainer, range.startOffset), b = charIndex(root, range.endContainer, range.endOffset);
+    return a <= b ? [a, b] : [b, a];
+  }
+
+  // after: 경계에서 다음 텍스트의 앞을(시작점), 아니면 앞 텍스트의 끝을(끝점)
+  function pointAt(root, idx, after) {
+    let n = 0;
+    const ts = texts(root);
+    for (const t of ts) {
+      const L = t.length;
+      if (idx < n + L || (idx === n + L && !after && L)) return { node: t, off: idx - n };
+      n += L;
+    }
+    const last = ts[ts.length - 1];
+    return last ? { node: last, off: last.length } : { node: root, off: root.childNodes.length };
+  }
+
+  // [a, b) 의 범위 — 고르기는 바꾸지 않는다(찾은 곳 강조처럼 포커스를 옮기지 않을 때)
+  function rangeOf(root, a, b) {
+    const s = pointAt(root, a, true), e = b > a ? pointAt(root, b, false) : s;
+    const r = root.ownerDocument.createRange();
+    r.setStart(s.node, s.off);
+    r.setEnd(e.node, e.off);
+    return r;
+  }
+
+  function selectChars(root, a, b) {
+    const r = rangeOf(root, a, b);
+    const sel = win(root).getSelection();
+    if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+    return r;
+  }
+
+  /* ── 고른 글을 문단 바로 아래 자식으로 떼어 내기 ───────────────────────────── */
+  function splitAt(root, idx) {
+    let n = 0;
+    for (const t of texts(root)) {
+      const L = t.length;
+      if (idx > n && idx < n + L) { t.splitText(idx - n); return; }
+      n += L;
+      if (n >= idx) return;
+    }
+  }
+
+  function pick(root, a, b) {
+    splitAt(root, b);
+    splitAt(root, a);
+    const out = [];
+    let n = 0;
+    for (const t of texts(root)) {
+      const L = t.length;
+      if (L && n >= a && n + L <= b) out.push(t);
+      n += L;
+    }
+    return out;
+  }
+
+  function top(n, block) { while (n.parentNode && n.parentNode !== block) n = n.parentNode; return n; }
+
+  // n 앞에서 감싼 요소를 둘로 — n 이 든 갈래가 block 아래 새 자식에서 시작하게. 덱이 걸어 둔 칸(marked)은 쪼개지 않고 통째로
+  // 올라간다(범위는 wholeMarked 가 칸 전체로 넓혔으니 남는 것은 <br>·잠근 칸처럼 글자로 세지 않는 것뿐). 복제본에는 id 를 두지
+  // 않는다(같은 id 가 둘이 되지 않게)
+  function cutBefore(n, block) {
+    let cur = n;
+    while (cur.parentNode && cur.parentNode !== block) {
+      const p = cur.parentNode;
+      if (cur.previousSibling && !marked(p)) {
+        const q = p.cloneNode(false);
+        q.removeAttribute("id");
+        for (let x = cur; x;) { const nx = x.nextSibling; q.appendChild(x); x = nx; }
+        p.parentNode.insertBefore(q, p.nextSibling);
+        cur = q;
+      } else cur = p;
+    }
+  }
+
+  function cutAfter(n, block) {
+    let cur = n;
+    while (cur.parentNode && cur.parentNode !== block) {
+      const p = cur.parentNode;
+      if (cur.nextSibling && !marked(p)) {
+        const q = p.cloneNode(false);
+        q.removeAttribute("id");
+        while (cur.nextSibling) q.appendChild(cur.nextSibling);
+        p.parentNode.insertBefore(q, p.nextSibling);
+      }
+      cur = p;
+    }
+  }
+
+  function between(g) {
+    const s = top(g.texts[0], g.block), e = top(g.texts[g.texts.length - 1], g.block), out = [];
+    for (let x = s; x; x = x.nextSibling) {
+      if (!fixed(x) && x.nodeType !== 8) out.push(x);
+      if (x === e) break;
+    }
+    return out;
+  }
+
+  function groups(root, a, b) {
+    const gs = [];
+    for (const t of pick(root, a, b)) {
+      const blk = blockOf(t, root);
+      let g = gs[gs.length - 1];
+      if (!g || g.block !== blk) gs.push((g = { block: blk, texts: [] }));
+      g.texts.push(t);
+    }
+    for (const g of gs) {
+      cutAfter(g.texts[g.texts.length - 1], g.block);
+      cutBefore(g.texts[0], g.block);
+      g.nodes = between(g);
+    }
+    return gs;
+  }
+
+  // [a, b) 의 끝이 덱이 걸어 둔 칸 안에 떨어지면 칸 전체로 넓힌다 — 쪼개면 같은 칸이 둘이 되어, 덱이 다시 열 때 두 칸 모두에
+  // 값을 채운다(숫자가 두 번). 칸 가장자리에 닿기만 한 끝(그 안의 글자를 고르지 않음)은 그대로. 편집기도 부른다(C 의 크게·작게)
+  function wholeMarked(root, a, b) {
+    if (a >= b) return [a, b];
+    const s = pointAt(root, a, true).node, e = pointAt(root, b, false).node;
+    if (s === root || e === root) return [a, b];
+    for (let p = s.parentNode; p && p !== root; p = p.parentNode) {
+      if (!marked(p)) continue;
+      const x = charIndex(root, p, 0);
+      if (x < a && a < charIndex(root, p, p.childNodes.length)) a = x;
+    }
+    for (let p = e.parentNode; p && p !== root; p = p.parentNode) {
+      if (!marked(p)) continue;
+      const y = charIndex(root, p, p.childNodes.length);
+      if (charIndex(root, p, 0) < b && b < y) b = y;
+    }
+    return [a, b];
+  }
+
+  /* ── 요소 다루기 ─────────────────────────────────────────────────── */
+  function unwrap(el) {
+    const p = el.parentNode;
+    if (!p) return;
+    while (el.firstChild) p.insertBefore(el.firstChild, el);
+    p.removeChild(el);
+  }
+
+  // 서식 태그(b·u·sup…)를 벗긴다 — 다른 속성(style 등)이 있으면 span 으로 바꿔 그 서식은 남긴다
+  function demote(el) {
+    if (!el.parentNode || fixed(el)) return;
+    if (!el.attributes.length) { unwrap(el); return; }
+    const s = el.ownerDocument.createElement("span");
+    for (const at of Array.from(el.attributes)) s.setAttribute(at.name, at.value);
+    while (el.firstChild) s.appendChild(el.firstChild);
+    el.parentNode.replaceChild(s, el);
+  }
+
+  function demoteIn(x, tags, self) {
+    if (!isEl(x) || !tags || !tags.length) return;
+    for (const el of Array.from(x.querySelectorAll(tags.join(",")))) demote(el);
+    if (self && tags.indexOf(x.localName) >= 0) demote(x);
+  }
+
+  function wrap(x) {
+    if (isEl(x) && x.localName === "span") return x;
+    const s = x.ownerDocument.createElement("span");
+    x.parentNode.insertBefore(s, x);
+    s.appendChild(x);
+    return s;
+  }
+
+  // 글 하나만 감싼 span — 이미 그런 span 이면 그것을(문단 자체는 아니게)
+  function textSpan(t, block) {
+    const p = t.parentNode;
+    if (p !== block && isEl(p) && p.localName === "span" && p.childNodes.length === 1 && !fixed(p)) return p;
+    const s = t.ownerDocument.createElement("span");
+    p.insertBefore(s, t);
+    s.appendChild(t);
+    return s;
+  }
+
+  /* ── 글자 서식 ─────────────────────────────────────────────────── */
+  function setProp(gs, prop, value) {
+    for (const g of gs) {
+      for (let k = 0; k < g.nodes.length; k++) {
+        const x = g.nodes[k];
+        if (!x.parentNode || (x.nodeType === 3 && !x.length)) continue;
+        const s = wrap(x);
+        g.nodes[k] = s;                         // 같은 묶음의 다음 속성도 이 span 에 — 겹 span 이 쌓이지 않게(서식 복사)
+        for (const d of Array.from(s.querySelectorAll("[style]"))) d.style.removeProperty(prop);
+        demoteIn(s, STRIP_TAGS[prop], false);
+        if (value == null || value === "") s.style.removeProperty(prop);
+        else s.style.setProperty(prop, value);
+      }
+    }
+  }
+
+  const weightOf = (t) => parseInt(css(t.parentNode).fontWeight, 10) || 400;
+  const italicOf = (t) => /italic|oblique/.test(css(t.parentNode).fontStyle);
+
+  function linesOf(t, root) {
+    const s = new Set();
+    for (let p = t.parentNode; isEl(p); p = p.parentNode) {
+      const v = css(p).textDecorationLine || "";
+      if (v.indexOf("underline") >= 0) s.add("underline");
+      if (v.indexOf("line-through") >= 0) s.add("line-through");
+      if (p === root) break;
+    }
+    return s;
+  }
+
+  function inTag(t, name, root) {
+    for (let p = t.parentNode; p && p !== root; p = p.parentNode) if (isEl(p) && p.localName === name) return true;
+    return false;
+  }
+
+  // 범위 안의 선을 모두 걷고 글마다 want(t) 의 선을 긋는다 — 문단·글 칸에서 오는 선은 그대로 둔다
+  function setLines(root, gs, want) {
+    for (const g of gs) {
+      const sets = g.texts.map(want);
+      for (const x of g.nodes) {
+        if (!isEl(x) || !x.parentNode) continue;
+        for (const el of [x, ...x.querySelectorAll("[style]")]) {
+          if (!el.style) continue;
+          el.style.removeProperty("text-decoration-line");
+          if (/underline|line-through/.test(el.style.getPropertyValue("text-decoration"))) el.style.removeProperty("text-decoration");
+        }
+        demoteIn(x, LINE_TAGS, true);
+      }
+      g.texts.forEach((t, k) => {
+        const base = linesOf(t, root);
+        const need = Array.from(sets[k]).filter((l) => !base.has(l));
+        if (need.length) textSpan(t, g.block).style.setProperty("text-decoration-line", need.join(" "));
+      });
+    }
+  }
+
+  function toggleLine(root, gs, line) {
+    const all = gs.every((g) => g.texts.every((t) => linesOf(t, root).has(line)));
+    setLines(root, gs, (t) => { const s = linesOf(t, root); if (all) s.delete(line); else s.add(line); return s; });
+    return !all;
+  }
+
+  function toggleScript(root, gs, tag) {
+    const other = tag === "sup" ? "sub" : "sup";
+    const all = gs.every((g) => g.texts.every((t) => inTag(t, tag, root)));
+    for (const g of gs) {
+      for (const x of g.nodes) demoteIn(x, [tag, other], true);
+      if (all) continue;
+      const nodes = between(g);
+      const el = root.ownerDocument.createElement(tag);
+      nodes[0].parentNode.insertBefore(el, nodes[0]);
+      for (const n of nodes) el.appendChild(n);
+    }
+    return !all;
+  }
+
+  // 서식 지우기 — 서식 태그·span 을 벗긴다. 덱이 걸어 둔 칸(id·data-* — 편집기 C 덱의 살아 있는 값 span[data-v] 등)은 글에
+  // 딸린 뜻이라 벗기지 않고 서식만 걷는다(style 을 지우고, b·sup 같은 서식 태그면 span 으로)
+  function clearOne(el) {
+    if (fixed(el) || !el.parentNode) return;
+    if (!hasHook(el)) { unwrap(el); return; }
+    el.removeAttribute("style");
+    if (el.localName !== "span") demote(el);
+  }
+
+  function clearAll(gs) {
+    for (const g of gs) {
+      for (const x of g.nodes) {
+        if (!isEl(x) || !x.parentNode) continue;
+        for (const el of Array.from(x.querySelectorAll(CLEAR_TAGS.join(",")))) clearOne(el);
+        if (CLEAR_TAGS.indexOf(x.localName) >= 0) clearOne(x);
+      }
+    }
+  }
+
+  // Shift+F3 — 소문자 → 단어 첫 글자만 대문자 → 대문자 → 소문자 … (한글은 그대로)
+  function changeCase(gs) {
+    const ts = [].concat(...gs.map((g) => g.texts));
+    const s = ts.map((t) => t.data).join(""), up = s.toUpperCase(), lo = s.toLowerCase();
+    const mode = s === up && s !== lo ? "lower" : s === lo && s !== up ? "title" : "upper";
+    let prev = false;
+    for (const t of ts) {
+      if (mode === "upper") t.data = t.data.toUpperCase();
+      else if (mode === "lower") t.data = t.data.toLowerCase();
+      else {
+        let o = "";
+        for (const ch of t.data) {
+          const w = /[\p{L}\p{N}]/u.test(ch);
+          o += w && !prev ? ch.toUpperCase() : ch.toLowerCase();
+          prev = w;
+        }
+        t.data = o;
+      }
+    }
+    return mode;
+  }
+
+  // PowerPoint 크기 목록에서 다음·앞 크기(pt) — 목록 밖이면 10pt 단위
+  function nextPt(pt, dir) {
+    if (dir > 0) {
+      for (const s of SIZES) if (s > pt + 0.01) return s;
+      return Math.min(PT_MAX, Math.floor(pt / 10) * 10 + 10);
+    }
+    for (let k = SIZES.length - 1; k >= 0; k--) if (SIZES[k] < pt - 0.01) return SIZES[k];
+    return Math.max(PT_MIN, pt - 1);
+  }
+
+  const ptOf = (t) => parseFloat(css(t.parentNode).fontSize) * PX_PT;
+  const pxOfPt = (pt) => r2(Math.min(PT_MAX, Math.max(PT_MIN, pt)) / PX_PT) + "px";
+
+  // 글마다 지금 크기에서 한 칸 — 범위 안의 크기를 걷고 글마다 다시 입힌다(겹친 span 이 쌓이지 않게)
+  function stepSize(gs, dir, one) {
+    for (const g of gs) {
+      const want = g.texts.map((t) => { const pt = ptOf(t); return one ? pt + dir : nextPt(pt, dir); });
+      for (const x of g.nodes) {
+        if (!isEl(x) || !x.parentNode) continue;
+        for (const el of [x, ...x.querySelectorAll("[style]")]) if (el.style) el.style.removeProperty("font-size");
+        demoteIn(x, STRIP_TAGS["font-size"], true);
+      }
+      g.texts.forEach((t, k) => { textSpan(t, g.block).style.setProperty("font-size", pxOfPt(want[k])); });
+    }
+  }
+
+  /* ── 정리: 물려받는 값과 같은 선언 지우기, 빈 span 벗기기, 같은 꼴 이웃 합치기 ─────── */
+  function sameAttrs(a, b) {
+    if (a.attributes.length !== b.attributes.length) return false;
+    for (const at of Array.from(a.attributes)) if (b.getAttribute(at.name) !== at.value) return false;
+    return true;
+  }
+
+  function merge(node) {
+    let x = node.firstChild;
+    while (x) {
+      const nx = x.nextSibling;
+      if (isEl(x)) merge(x);
+      if (nx && isEl(x) && isEl(nx) && x.localName === nx.localName && /^(span|sup|sub)$/.test(x.localName) &&
+          !fixed(x) && sameAttrs(x, nx)) {
+        while (nx.firstChild) x.appendChild(nx.firstChild);
+        nx.remove();
+        continue;
+      }
+      x = nx;
+    }
+  }
+
+  // 문단 줄 높이가 px 로 고정된 덱 — 크기를 바꾼 글 span 에 문단과 같은 비율의 단위 없는 줄 높이를 달아, 큰 글이 든 줄만
+  // 넓어지게 한다(그대로 두면 큰 글이 윗줄을 덮는다. PowerPoint 의 줄 간격도 줄에서 가장 큰 글 기준). 크기를 걷은 span 의 것은 걷는다.
+  function fitLines(block) {
+    const cb = css(block), fs = parseFloat(cb.fontSize);
+    const ratio = /px$/.test(cb.lineHeight) && fs > 0 ? String(r2(parseFloat(cb.lineHeight) / fs)) : "";
+    for (const s of Array.from(block.querySelectorAll("span[style]"))) {
+      if (fixed(s)) continue;
+      if (s.style.fontSize) { if (ratio) s.style.setProperty("line-height", ratio); }
+      else if (/^[\d.]+$/.test(s.style.lineHeight)) s.style.removeProperty("line-height");
+    }
+  }
+
+  function tidy(block, props) {
+    for (const s of Array.from(block.querySelectorAll("span[style]"))) {
+      for (const prop of props || []) {
+        if (!INHERITED.has(prop) || !s.style.getPropertyValue(prop)) continue;
+        if (css(s).getPropertyValue(prop) === css(s.parentNode).getPropertyValue(prop)) s.style.removeProperty(prop);
+      }
+    }
+    if (block !== block.ownerDocument.body) fitLines(block);
+    for (const s of Array.from(block.querySelectorAll("span, sup, sub"))) {
+      if (fixed(s) || !s.parentNode) continue;
+      if (s.hasAttribute("style") && !s.getAttribute("style").trim()) s.removeAttribute("style");
+      if (s.localName === "span" && !s.attributes.length) unwrap(s);
+      else if (!s.textContent && !s.querySelector("br, img")) s.remove();
+    }
+    merge(block);
+    block.normalize();
+  }
+
+  /* ── 단락 ─────────────────────────────────────────────────────── */
+  function blocksIn(root, range) {
+    const ts = texts(root);
+    if (!ts.length) return [root];
+    if (!range) {
+      const out = [];
+      for (const t of ts) { const b = blockOf(t, root); if (out.indexOf(b) < 0) out.push(b); }
+      return out;
+    }
+    if (range.collapsed) {
+      const c = range.startContainer;
+      const n = c.nodeType === 3 ? c : c.childNodes[range.startOffset] || c;
+      if (n === root) return [blockOf(ts[0], root)];
+      return [isEl(n) && n !== root && isBlock(n) ? n : blockOf(n.nodeType === 3 ? n : n.firstChild || n, root)];
+    }
+    const [a, b] = rangeChars(root, range), out = [];
+    let n = 0;
+    for (const t of ts) {
+      const s = n, e = n + t.length;
+      n = e;
+      if (e > a && s < b) { const bl = blockOf(t, root); if (out.indexOf(bl) < 0) out.push(bl); }
+    }
+    return out.length ? out : [blockOf(ts[0], root)];
+  }
+
+  function alignOf(v) {
+    if (v === "center" || v === "-webkit-center") return "center";
+    if (v === "right" || v === "end" || v === "-webkit-right") return "right";
+    if (v === "justify") return "justify";
+    return "left";
+  }
+
+  function spacingOf(c) {
+    const fs = parseFloat(c.fontSize) || 16;
+    const lh = c.lineHeight === "normal" ? fs * LINE_K : parseFloat(c.lineHeight) || fs * LINE_K;
+    const m = lh / fs / LINE_K;
+    for (const s of SPACING) if (Math.abs(s - m) < 0.06) return s;
+    return r2(m);
+  }
+
+  // 글 칸 전체(상자를 골랐을 때)의 물려받는 서식은 문단에 바로 — 글마다 span 을 만들지 않는다. 안쪽의 같은 서식은 걷고,
+  // 문단 바탕(클래스)과 같아지면 인라인 선언도 뺀다
+  const WHOLE = { bold: "font-weight", italic: "font-style", color: "color", font: "font-family" };
+  function wholeCmd(root, cmd, arg) {
+    const prop = WHOLE[cmd], ts = texts(root).filter((t) => t.length);
+    let value = arg || null, on;
+    if (cmd === "bold") { on = !ts.every((t) => weightOf(t) >= 600); value = on ? "700" : "400"; }
+    if (cmd === "italic") { on = !ts.every(italicOf); value = on ? "italic" : "normal"; }
+    for (const bl of blocksIn(root, null)) {
+      for (const el of Array.from(bl.querySelectorAll("[style]"))) if (!fixed(el)) el.style.removeProperty(prop);
+      demoteIn(bl, STRIP_TAGS[prop], false);
+      bl.style.removeProperty(prop);
+      if (value != null) {
+        const base = css(bl).getPropertyValue(prop);
+        bl.style.setProperty(prop, value);
+        if (css(bl).getPropertyValue(prop) === base) bl.style.removeProperty(prop);
+      }
+      if (bl.hasAttribute("style") && !bl.getAttribute("style").trim()) bl.removeAttribute("style");
+      tidy(bl, []);
+    }
+    return { ok: true, on, msg: CMD[cmd][0] + (on === false ? " 끔" : "") + " — 글 칸 전체" };
+  }
+
+  /* ── 글자·단락 명령 하나 ────────────────────────────────────────── */
+  // root: 글 칸(편집 가능한 요소) · range: 고른 글(접혔거나 null 이면 글 칸 전체 — 단락 명령은 캐럿의 문단)
+  // 돌려줌: { ok, msg?, on? } — 고른 범위·캐럿은 글자 수로 되살린다
+  function textCmd(root, range, cmd, arg) {
+    const whole = !range || range.collapsed;
+    const caret = range && range.collapsed ? charIndex(root, range.startContainer, range.startOffset) : -1;
+    if (PARA[cmd] || cmd === "spacing") {
+      const bs = blocksIn(root, range);
+      for (const bl of bs) {
+        if (cmd === "spacing") bl.style.setProperty("line-height", String(r2(LINE_K * (+arg || 1))));
+        else bl.style.setProperty("text-align", PARA[cmd]);
+      }
+      return { ok: true, msg: CMD[cmd][0] + (cmd === "spacing" ? " " + arg : "") + " — 문단 " + bs.length + "개" };
+    }
+    if (whole && cmd === "size") {
+      const r = sizeAll(root, +arg);
+      if (caret >= 0) selectChars(root, caret, caret);
+      return r;
+    }
+    const [a, b] = whole ? [0, total(root)] : wholeMarked(root, ...rangeChars(root, range));
+    if (a === b) return { ok: false, msg: "글이 없습니다." };
+    if (whole && WHOLE[cmd]) {
+      const r = wholeCmd(root, cmd, arg);
+      if (caret >= 0) selectChars(root, caret, caret);
+      return r;
+    }
+    const gs = groups(root, a, b);
+    if (!gs.length) return { ok: false, msg: "고칠 수 있는 글이 없습니다." };
+    let res = { ok: true }, props = [], len = b - a;
+    if (cmd === "bold") { const on = !gs.every((g) => g.texts.every((t) => weightOf(t) >= 600)); setProp(gs, "font-weight", on ? "700" : "400"); props = ["font-weight"]; res.on = on; }
+    else if (cmd === "italic") { const on = !gs.every((g) => g.texts.every(italicOf)); setProp(gs, "font-style", on ? "italic" : "normal"); props = ["font-style"]; res.on = on; }
+    else if (cmd === "underline") res.on = toggleLine(root, gs, "underline");
+    else if (cmd === "strike") res.on = toggleLine(root, gs, "line-through");
+    else if (cmd === "sup" || cmd === "sub") res.on = toggleScript(root, gs, cmd);
+    else if (cmd === "clear") clearAll(gs);
+    else if (cmd === "case") { res.mode = changeCase(gs); len = gs.reduce((n, g) => n + g.texts.reduce((m, t) => m + t.length, 0), 0); }
+    else if (cmd === "color") { setProp(gs, "color", arg || null); props = ["color"]; }
+    else if (cmd === "highlight") setProp(gs, "background-color", arg || null);
+    else if (cmd === "font") { setProp(gs, "font-family", arg || null); props = ["font-family"]; }
+    else if (cmd === "size") { setProp(gs, "font-size", pxOfPt(+arg)); props = ["font-size"]; }
+    else if (cmd === "grow" || cmd === "shrink") stepSize(gs, cmd === "grow" ? 1 : -1, false);
+    else if (cmd === "grow1" || cmd === "shrink1") stepSize(gs, cmd === "grow1" ? 1 : -1, true);
+    else return { ok: false, msg: "모르는 명령: " + cmd };
+    for (const g of gs) if (g.block.isConnected) tidy(g.block, props);
+    if (!whole) selectChars(root, a, a + len);
+    else if (caret >= 0) selectChars(root, caret, caret);
+    res.msg = CMD[cmd][0] + (res.on === false ? " 끔" : res.mode ? " (" + { upper: "대문자", lower: "소문자", title: "단어 첫 글자 대문자" }[res.mode] + ")" : "") +
+      (whole ? " — 글 칸 전체" : "");
+    return res;
+  }
+
+  // 지금 서식(리본의 눌림·값 표시용) — DOM 을 바꾸지 않는다
+  function textState(root, range) {
+    const ts = texts(root).filter((t) => t.length);
+    if (!ts.length) return null;
+    let sel = ts;
+    if (range && !range.collapsed) {
+      const [a, b] = rangeChars(root, range);
+      let n = 0;
+      sel = [];
+      for (const t of ts) { const s = n, e = n + t.length; n = e; if (e > a && s < b) sel.push(t); }
+    } else if (range && range.startContainer.nodeType === 3 && ts.indexOf(range.startContainer) >= 0) sel = [range.startContainer];
+    if (!sel.length) sel = ts;
+    const solid = sel.filter((t) => t.data.trim());
+    if (solid.length) sel = solid;
+    const t0 = sel[0], c0 = css(t0.parentNode), bl = blockOf(t0, root), cb = css(bl);
+    let mark = null;
+    for (let p = t0.parentNode; p && p !== bl && p !== root; p = p.parentNode) { const v = hex(css(p).backgroundColor); if (v) { mark = v; break; } }
+    return {
+      bold: sel.every((t) => weightOf(t) >= 600), italic: sel.every(italicOf),
+      underline: sel.every((t) => linesOf(t, root).has("underline")), strike: sel.every((t) => linesOf(t, root).has("line-through")),
+      sup: sel.every((t) => inTag(t, "sup", root)), sub: sel.every((t) => inTag(t, "sub", root)),
+      font: c0.fontFamily, pt: r2(parseFloat(c0.fontSize) * PX_PT), color: hex(c0.color), highlight: mark,
+      align: alignOf(cb.textAlign), spacing: spacingOf(cb),
+    };
+  }
+
+  // 글 칸 전체의 크기를 한 값으로(상자를 골랐을 때 크기 칸) — 문단 크기를 바꾸고 안쪽 크기는 걷는다. px 줄 간격은 같은 비로
+  function sizeAll(root, pt) {
+    const px = parseFloat(pxOfPt(pt));
+    for (const bl of blocksIn(root, null)) {
+      const fs = parseFloat(css(bl).fontSize) || px, k = px / fs;
+      const lh = bl.style.lineHeight;
+      if (/^[\d.]+px$/.test(lh)) bl.style.lineHeight = r2(parseFloat(lh) * k) + "px";
+      bl.style.fontSize = px + "px";
+      for (const el of Array.from(bl.querySelectorAll("[style]"))) if (!fixed(el)) el.style.removeProperty("font-size");
+      demoteIn(bl, STRIP_TAGS["font-size"], false);
+      tidy(bl, []);
+    }
+    return { ok: true, msg: "글자 크기 " + r2(pt) + "pt — 글 칸 전체" };
+  }
+
+  /* ── 서식 복사 ─────────────────────────────────────────────────── */
+  function pickFmt(root, range, box) {
+    const st = root ? textState(root, range) : null;
+    const bf = box ? Box.pickBoxFmt(box) : { box: null, line: null };
+    return {
+      text: st && { font: st.font, pt: st.pt, bold: st.bold, italic: st.italic, underline: st.underline, strike: st.strike,
+        color: st.color, highlight: st.highlight },
+      box: bf.box,
+      line: bf.line,
+    };
+  }
+
+  function applyFmt(fmt, root, range, box) {
+    let n = 0;
+    const T = fmt && fmt.text;
+    if (T && root && total(root)) {
+      const whole = !range || range.collapsed;
+      const [a, b] = whole ? [0, total(root)] : wholeMarked(root, ...rangeChars(root, range));
+      const gs = groups(root, a, b);
+      setProp(gs, "font-family", T.font);
+      setProp(gs, "font-size", pxOfPt(T.pt));
+      setProp(gs, "font-weight", T.bold ? "700" : "400");
+      setProp(gs, "font-style", T.italic ? "italic" : "normal");
+      setProp(gs, "color", T.color);
+      setProp(gs, "background-color", T.highlight);
+      const want = new Set([T.underline ? "underline" : "", T.strike ? "line-through" : ""].filter(Boolean));
+      setLines(root, gs, () => new Set(want));
+      for (const g of gs) if (g.block.isConnected) tidy(g.block, ["font-family", "font-size", "font-weight", "font-style", "color"]);
+      if (!whole) selectChars(root, a, b);
+      n++;
+    }
+    if (box && fmt && Box.applyBoxFmt(box, fmt)) n++;
+    return n > 0;
+  }
+
+  /* ── 찾기·바꾸기 ─────────────────────────────────────────────────── */
+  // 글 칸의 글을 한 문자열로(문단 사이에 SEP) — pos[문자열 자리] = 글자 위치(SEP 는 -1)
+  function flat(root) {
+    let s = "", prev = null, n = 0;
+    const pos = [];
+    for (const t of texts(root)) {
+      const bl = blockOf(t, root);
+      if (prev && bl !== prev) { s += SEP; pos.push(-1); }
+      prev = bl;
+      for (let k = 0; k < t.length; k++) pos.push(n + k);
+      s += t.data;
+      n += t.length;
+    }
+    return { s, pos };
+  }
+
+  // 캐럿 자리(글자 위치 idx)의 낱말 [a, b) — 오른쪽 글자, 없으면 왼쪽 글자가 든 낱말. 낱말이 아니면 null
+  // (서식 복사를 글 위에서 누를 때 PowerPoint 처럼 그 낱말에 입힌다)
+  function wordAt(root, idx) {
+    const { s, pos } = flat(root);
+    const seg = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter("ko", { granularity: "word" }) : null;
+    const word = /[\p{L}\p{N}_]/u;
+    for (const i of [pos.indexOf(idx), pos.indexOf(idx - 1)]) {
+      if (i < 0) continue;
+      if (seg) {
+        for (const g of seg.segment(s)) {
+          if (i < g.index || i >= g.index + g.segment.length) continue;
+          if (g.isWordLike) return [pos[g.index], pos[g.index + g.segment.length - 1] + 1];
+          break;
+        }
+        continue;
+      }
+      if (!word.test(s[i])) continue;
+      let a = i, b = i + 1;
+      while (a > 0 && word.test(s[a - 1])) a--;
+      while (b < s.length && word.test(s[b])) b++;
+      return [pos[a], pos[b - 1] + 1];
+    }
+    return null;
+  }
+
+  // root 안에서 q 를 찾는다(문단을 넘는 일치는 없다) — [{root, a, b}] (글자 수)
+  function find(root, q, matchCase) {
+    if (!q) return [];
+    const { s, pos } = flat(root);
+    let hay = s, needle = q;
+    if (!matchCase) {
+      const lo = s.toLowerCase();
+      if (lo.length === s.length) { hay = lo; needle = q.toLowerCase(); }
+    }
+    const out = [];
+    for (let from = 0; ;) {
+      const i = hay.indexOf(needle, from);
+      if (i < 0 || !needle.length) break;
+      out.push({ root, a: pos[i], b: pos[i + needle.length - 1] + 1 });
+      from = i + needle.length;
+    }
+    return out;
+  }
+
+  // [a, b) 를 text 로 — 첫 글의 서식을 이어받는다
+  function replaceChars(root, a, b, text) {
+    const ts = pick(root, a, b);
+    if (!ts.length) return false;
+    const bl = blockOf(ts[0], root);
+    ts[0].data = text;
+    for (let k = 1; k < ts.length; k++) ts[k].remove();
+    tidy(bl, []);
+    return true;
+  }
+
+  function replaceAll(root, q, text, matchCase) {
+    const ms = find(root, q, matchCase);
+    for (let k = ms.length - 1; k >= 0; k--) replaceChars(root, ms[k].a, ms[k].b, text);
+    return ms.length;
+  }
+
+  /* ── 단축키 — PowerPoint(Windows)와 같게. 한글 자판에서도 되게 e.code 로 ─────────────────
+     Microsoft 도움말 'Use keyboard shortcuts to create PowerPoint presentations'(Windows 표, 2026-10-18 확인) 기준:
+     Ctrl+Shift+] · [ 는 한 칸 앞으로 · 뒤로(맨 앞·맨 뒤는 Windows 단축키가 없어 리본으로). Ctrl+] · [(1pt 크게·작게)는 그 표에
+     없는 Word 의 키를 덧붙인 것이다. */
+  function keyCmd(e) {
+    const ctrl = e.ctrlKey || e.metaKey, sh = e.shiftKey, alt = e.altKey, c = e.code || "";
+    if (!ctrl && !alt && sh && c === "F3") return "case";
+    if (alt && !ctrl && !sh && (c === "ArrowLeft" || c === "ArrowRight")) return c === "ArrowRight" ? "rotR15" : "rotL15";
+    if (!ctrl || alt) return null;
+    if (!sh) {
+      return { KeyB: "bold", KeyI: "italic", KeyU: "underline", KeyL: "alignLeft", KeyE: "alignCenter", KeyR: "alignRight",
+        KeyJ: "alignJustify", KeyD: "dup", KeyF: "find", KeyH: "replace", Equal: "sub", BracketRight: "grow1",
+        BracketLeft: "shrink1", Space: "clear" }[c] || null;
+    }
+    return { Equal: "sup", NumpadAdd: "sup", Period: "grow", Comma: "shrink", BracketRight: "forward", BracketLeft: "backward",
+      KeyC: "fmtCopy", KeyV: "fmtPaste" }[c] || null;
+  }
+
+  // Mac 의 Option+←/→ 는 글에서 낱말 단위 이동 — 글을 쓰는 중이면 편집기가 이 키를 브라우저에 맡긴다. 다른 곳의 Alt+← 는
+  // 브라우저 '뒤로'라, 글을 쓰는 중에는 돌리지도 않고 막기만 한다(편집 중인 덱을 떠나지 않게)
+  const MAC = typeof navigator !== "undefined" &&
+    /Mac|iP(hone|ad|od)/.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "");
+
+  const groupOf = (cmd) => (CMD[cmd] ? CMD[cmd][2] : "");
+  const label = (cmd) => (CMD[cmd] ? CMD[cmd][0] + (CMD[cmd][1] ? " (" + CMD[cmd][1] + ")" : "") : cmd);
+
+  // DeckBox 의 이름(배치·도형·색)도 함께 내보낸다 — 편집기는 DeckOps 하나만 부른다
+  return Object.freeze(Object.assign({}, Box, {
+    PX_PT, SIZES, SPACING, LINE_K, CMD, FONTS, COLORS, HIGHLIGHTS, MAC,
+    keyCmd, groupOf, label,
+    rangeIn, charIndex, rangeOf, selectChars, wholeMarked, wordAt, textCmd, textState, sizeAll, nextPt, blocksIn,
+    pickFmt, applyFmt, find, replaceChars, replaceAll,
+  }));
+})(DeckBox);
+
+/* deckribbon — 덱 편집기 공통 리본(PowerPoint '홈' 탭 꼴): 글꼴 · 단락 · 그리기 · 배치 · 편집 묶음, 그리고 찾기·바꾸기 창.
+   편집기 B(빌더 덱 내장)·C(편집 모드)가 같은 화면을 쓴다(A 는 자기 도구 막대에 같은 명령을 붙인다). 원본은 이 파일 하나다.
+   명령은 DeckOps.CMD 이름 그대로 편집기의 onCmd(cmd, arg) 로 넘기고, 편집기의 state() 가 주는 지금 상태로 눌림·값·
+   쓸 수 없음을 고친다. 단추를 누를 때 글 칸의 고른 글이 풀리지 않게 mousedown 을 막고, 고르기 칸(글꼴·크기)·색 고르개처럼
+   포커스를 가져가는 것은 누르기 전에 keep() 을 불러 편집기가 고른 글을 적어 두게 한다.
+   펼침 메뉴는 문서 맨 끝(body)에 고정 위치로 띄운다 — 편집기 패널이 넘침을 잘라도 가려지지 않게. 색·글꼴은 편집기가 주는
+   CSS 변수(vars)를 따른다(밝은·어두운 화면). */
+
+var DeckRibbon = (function () {
+  "use strict";
+
+  const STYLE_ID = "deckribbon-css";
+  // 리본 안 규칙은 .dk-rb 를 앞에 — 주인 덱의 'X button' 규칙(덱 CSS 에 구워진 옛 편집기 CSS 등)이 덮지 않게
+  const CSS = [
+    ".dk-rb{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:4px 10px;font:13px/1.2 var(--dk-font,inherit);color:var(--dk-ink,#22313B)}",
+    ".dk-rb[hidden]{display:none}",
+    ".dk-g{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px}",
+    ".dk-gl{font-size:11px;color:var(--dk-ink2,#5A6873);margin-right:4px;letter-spacing:.02em}",
+    ".dk-rb.dk-col{justify-content:flex-start;gap:6px}",
+    ".dk-rb.dk-col .dk-g{width:100%}",
+    ".dk-rb.dk-col .dk-gl{flex-basis:100%;margin:2px 0 1px}",
+    ".dk-rb .dk-b,.dk-rb .dk-sel{font:inherit;color:inherit;background:var(--dk-btn,#fff);border:1px solid var(--dk-line,#C5CFD6);border-radius:6px;min-height:28px;cursor:pointer}",
+    ".dk-rb .dk-b{min-width:28px;padding:2px 6px;display:inline-flex;align-items:center;justify-content:center;gap:2px}",
+    ".dk-rb .dk-b:hover:not(:disabled),.dk-rb .dk-sel:hover:not(:disabled){background:var(--dk-btn-h,#F1F4F6)}",
+    ".dk-rb .dk-b:focus-visible,.dk-rb .dk-sel:focus-visible,.dk-menu button:focus-visible,.dk-find input:focus-visible,.dk-find button:focus-visible{outline:2px solid var(--dk-acc,#008A73);outline-offset:1px}",
+    ".dk-rb .dk-b:disabled,.dk-rb .dk-sel:disabled{opacity:.4;cursor:default}",
+    ".dk-rb .dk-b[aria-pressed=\"true\"]{border-color:var(--dk-acc,#008A73);color:var(--dk-acc,#008A73);background:var(--dk-on,rgba(0,138,115,.10))}",
+    ".dk-rb .dk-b svg{width:16px;height:16px;display:block}",
+    ".dk-rb .dk-sel{padding:2px 4px;max-width:9.5em}",
+    ".dk-rb .dk-sel.dk-size{width:4.6em}",
+    ".dk-split{display:inline-flex}",
+    ".dk-rb .dk-split .dk-b:first-child{border-top-right-radius:0;border-bottom-right-radius:0;border-right:0}",
+    ".dk-rb .dk-split .dk-b:last-child{border-top-left-radius:0;border-bottom-left-radius:0;min-width:16px;padding:2px 2px}",
+    ".dk-glyph{display:inline-flex;flex-direction:column;align-items:center;line-height:1}",
+    ".dk-glyph i{display:block;width:16px;height:4px;margin-top:2px;border-radius:1px;font-style:normal}",
+    ".dk-menu{position:fixed;z-index:2147483000;min-width:150px;max-width:300px;padding:6px;background:var(--dk-bg,#fff);color:var(--dk-ink,#22313B);",
+    "border:1px solid var(--dk-line,#C5CFD6);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.22);font:13px/1.3 var(--dk-font,sans-serif)}",
+    ".dk-menu[hidden]{display:none}",
+    ".dk-menu p{margin:6px 4px 4px;font-size:11px;color:var(--dk-ink2,#5A6873)}",
+    ".dk-menu p:first-child{margin-top:0}",
+    ".dk-menu button{font:inherit;color:inherit;background:var(--dk-btn,#fff);border:1px solid var(--dk-line,#C5CFD6);border-radius:6px;padding:4px 8px;cursor:pointer;min-height:26px}",
+    ".dk-menu button:hover:not(:disabled){background:var(--dk-btn-h,#F1F4F6)}",
+    ".dk-menu button[aria-pressed=\"true\"]{border-color:var(--dk-acc,#008A73);color:var(--dk-acc,#008A73)}",
+    ".dk-menu button:disabled{opacity:.4;cursor:default}",
+    ".dk-mrow{display:flex;flex-wrap:wrap;gap:4px}",
+    ".dk-mcol{display:flex;flex-direction:column;gap:3px}",
+    ".dk-mcol button{text-align:left}",
+    ".dk-sw{display:grid;grid-template-columns:repeat(10,20px);gap:3px}",
+    ".dk-sw button{width:20px;height:20px;min-height:0;padding:0;border-radius:4px;border:1px solid rgba(0,0,0,.25)}",
+    ".dk-sw button[aria-pressed=\"true\"]{outline:2px solid var(--dk-acc,#008A73);outline-offset:1px}",
+    ".dk-menu label.dk-more{display:inline-flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer}",
+    ".dk-menu input[type=color]{width:28px;height:22px;padding:0;border:1px solid var(--dk-line,#C5CFD6);background:none;cursor:pointer}",
+    ".dk-ico{display:grid;grid-template-columns:repeat(3,auto);gap:4px}",
+    ".dk-ico button{display:inline-flex;align-items:center;gap:4px}",
+    ".dk-ico svg{width:16px;height:16px}",
+    ".dk-find{position:fixed;z-index:2147482999;right:16px;top:72px;width:min(360px,calc(100vw - 32px));padding:10px 12px;background:var(--dk-bg,#fff);",
+    "color:var(--dk-ink,#22313B);border:1px solid var(--dk-line,#C5CFD6);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.22);",
+    "font:13px/1.35 var(--dk-font,sans-serif);display:flex;flex-direction:column;gap:6px}",
+    ".dk-find[hidden]{display:none}",
+    ".dk-find .dk-fr{display:flex;align-items:center;gap:6px}",
+    ".dk-find input[type=text]{flex:1;min-width:0;font:inherit;color:inherit;background:var(--dk-btn,#fff);border:1px solid var(--dk-line,#C5CFD6);border-radius:6px;padding:4px 6px}",
+    ".dk-find button{font:inherit;color:inherit;background:var(--dk-btn,#fff);border:1px solid var(--dk-line,#C5CFD6);border-radius:6px;padding:3px 8px;cursor:pointer;min-height:26px}",
+    ".dk-find button:hover:not(:disabled){background:var(--dk-btn-h,#F1F4F6)}",
+    ".dk-find button:disabled{opacity:.4;cursor:default}",
+    ".dk-find .dk-fh{display:flex;align-items:center;gap:6px}",
+    ".dk-find .dk-fh b{flex:1;font-size:14px}",
+    ".dk-find .dk-fs{color:var(--dk-ink2,#5A6873);font-size:12px;min-height:1.3em}",
+    ".dk-find label{display:inline-flex;align-items:center;gap:4px;color:var(--dk-ink2,#5A6873);font-size:12px}",
+  ].join("\n");
+
+  const SVG = (d) => '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  const BOX = (x, y, w, h) => '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx=".6" fill="currentColor"/>';
+  const ICON = {
+    alignLeft: SVG("M2 3h12M2 6.5h8M2 10h12M2 13.5h8"), alignCenter: SVG("M2 3h12M4 6.5h8M2 10h12M4 13.5h8"),
+    alignRight: SVG("M2 3h12M6 6.5h8M2 10h12M6 13.5h8"), alignJustify: SVG("M2 3h12M2 6.5h12M2 10h12M2 13.5h12"),
+    left: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 1.5v13" stroke="currentColor" stroke-width="1.4"/>' + BOX(4, 3.5, 9, 3) + BOX(4, 9.5, 6, 3) + "</svg>",
+    center: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v13" stroke="currentColor" stroke-width="1.4"/>' + BOX(3, 3.5, 10, 3) + BOX(5, 9.5, 6, 3) + "</svg>",
+    right: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 1.5v13" stroke="currentColor" stroke-width="1.4"/>' + BOX(3, 3.5, 9, 3) + BOX(6, 9.5, 6, 3) + "</svg>",
+    top: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 2h13" stroke="currentColor" stroke-width="1.4"/>' + BOX(3.5, 4, 3, 9) + BOX(9.5, 4, 3, 6) + "</svg>",
+    middle: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h13" stroke="currentColor" stroke-width="1.4"/>' + BOX(3.5, 3, 3, 10) + BOX(9.5, 5, 3, 6) + "</svg>",
+    bottom: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 14h13" stroke="currentColor" stroke-width="1.4"/>' + BOX(3.5, 3, 3, 9) + BOX(9.5, 6, 3, 6) + "</svg>",
+  };
+  const ALIGN6 = [["left", "왼쪽"], ["center", "가운데"], ["right", "오른쪽"], ["top", "위"], ["middle", "중간"], ["bottom", "아래"]];
+  const LINE_PT = [0.75, 1, 1.5, 2.25, 3, 4.5, 6];
+  const DASH = [["solid", "실선"], ["dashed", "파선"], ["dotted", "점선"]];
+  const ALPHA = [0, 25, 50, 75, 90];
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]); }
+  const tip = (cmd) => esc(DeckOps.label(cmd));
+  const firstFamily = (f) => String(f || "").split(",")[0].replace(/["']/g, "").trim().toLowerCase();
+
+  function injectCss(doc) {
+    if (doc.getElementById(STYLE_ID)) return;
+    const st = doc.createElement("style");
+    st.id = STYLE_ID;
+    st.textContent = CSS;
+    (doc.head || doc.documentElement).appendChild(st);
+  }
+
+  function btn(cmd, html, extra) {
+    return '<button type="button" class="dk-b" data-cmd="' + cmd + '" title="' + tip(cmd) + '" aria-label="' + esc(DeckOps.CMD[cmd][0]) + '"' +
+      (extra || "") + ">" + html + "</button>";
+  }
+  const menuBtn = (menu, html, title) => '<button type="button" class="dk-b" data-menu="' + menu + '" aria-haspopup="true" aria-expanded="false" title="' +
+    esc(title) + '">' + html + "</button>";
+
+  function ribbonHtml(o) {
+    const fonts = o.fonts.map((f, k) => '<option value="' + k + '">' + esc(f[0]) + "</option>").join("");
+    const lab = (t) => (o.labels ? '<span class="dk-gl">' + t + "</span>" : "");
+    return [
+      '<span class="dk-g" role="group" aria-label="글꼴">', lab("글꼴"),
+      '<select class="dk-sel" data-pick="font" title="글꼴" aria-label="글꼴"><option value="">글꼴</option>' + fonts + "</select>",
+      '<select class="dk-sel dk-size" data-pick="size" title="글자 크기(pt)" aria-label="글자 크기(pt)"></select>',
+      btn("grow", "가<sup>+</sup>"), btn("shrink", "가<sub>−</sub>"),
+      btn("bold", "<b>B</b>", ' aria-pressed="false"'), btn("italic", "<i>I</i>", ' aria-pressed="false"'),
+      btn("underline", "<u>U</u>", ' aria-pressed="false"'), btn("strike", "<s>S</s>", ' aria-pressed="false"'),
+      btn("sup", "x<sup>2</sup>", ' aria-pressed="false"'), btn("sub", "x<sub>2</sub>", ' aria-pressed="false"'), btn("case", "Aa"),
+      '<span class="dk-split">' + btn("color", '<span class="dk-glyph">가<i data-bar="color"></i></span>') + menuBtn("color", "▾", "글자색 고르기") + "</span>",
+      '<span class="dk-split">' + btn("highlight", '<span class="dk-glyph">가<i data-bar="highlight"></i></span>') + menuBtn("highlight", "▾", "형광펜 색 고르기") + "</span>",
+      btn("clear", "서식 지우기"), "</span>",
+      '<span class="dk-g" role="group" aria-label="단락">', lab("단락"),
+      btn("alignLeft", ICON.alignLeft, ' aria-pressed="false"'), btn("alignCenter", ICON.alignCenter, ' aria-pressed="false"'),
+      btn("alignRight", ICON.alignRight, ' aria-pressed="false"'), btn("alignJustify", ICON.alignJustify, ' aria-pressed="false"'),
+      menuBtn("spacing", "줄 간격 ▾", "줄 간격"), "</span>",
+      '<span class="dk-g" role="group" aria-label="그리기">', lab("그리기"),
+      menuBtn("shape", "＋ 도형 ▾", "도형 넣기 — 사각형·둥근 사각형·타원·선·화살표"),
+      menuBtn("fill", "채우기 ▾", "도형 채우기"), menuBtn("line", "윤곽선 ▾", "도형 윤곽선 — 색·두께·대시"),
+      menuBtn("alpha", "투명도 ▾", "채우기 투명도"), "</span>",
+      '<span class="dk-g" role="group" aria-label="배치">', lab("배치"),
+      menuBtn("arrange", "배치 ▾", "배치 — 장에 맞추기·앞뒤 순서·회전·대칭"), btn("dup", "복제"), "</span>",
+      '<span class="dk-g" role="group" aria-label="편집">', lab("편집"),
+      btn("fmtCopy", "서식 복사", ' aria-pressed="false"'), btn("find", "찾기·바꾸기"), "</span>",
+    ].join("");
+  }
+
+  function swatches(list, pick, none) {
+    return (none ? '<div class="dk-mrow" style="margin-bottom:6px"><button type="button" data-cmd="' + pick + '" data-arg="">' + esc(none) + "</button></div>" : "") +
+      '<div class="dk-sw">' + list.map((c) => '<button type="button" data-cmd="' + pick + '" data-arg="' + c + '" title="' + c + '" style="background:' + c +
+      '" aria-label="' + c + '"></button>').join("") + "</div>" +
+      '<label class="dk-more">다른 색 <input type="color" data-more="' + pick + '" aria-label="다른 색"></label>';
+  }
+
+  function menuHtml(kind, o) {
+    if (kind === "color") return "<p>글자색</p>" + swatches(o.colors, "color", "자동(문단 색)");
+    if (kind === "highlight") return "<p>형광펜(글자 바탕)</p>" + swatches(DeckOps.HIGHLIGHTS, "highlight", "형광펜 없음");
+    if (kind === "fill") return "<p>도형 채우기</p>" + swatches(o.colors, "fill", "채우기 없음");
+    if (kind === "spacing") {
+      return '<p>줄 간격(배수)</p><div class="dk-mcol">' + DeckOps.SPACING.map((m) => '<button type="button" data-cmd="spacing" data-arg="' + m + '">' +
+        (m % 1 ? String(m) : m.toFixed(1)) + "</button>").join("") + "</div>";
+    }
+    if (kind === "shape") {
+      return '<p>도형 넣기</p><div class="dk-mcol">' + DeckOps.SHAPES.map((s) => '<button type="button" data-cmd="shape" data-arg="' + s[0] + '">' + esc(s[1]) +
+        "</button>").join("") + "</div>";
+    }
+    if (kind === "line") {
+      return "<p>윤곽선 색</p>" + swatches(o.colors, "line", "윤곽선 없음") +
+        '<p>두께</p><div class="dk-mrow">' + LINE_PT.map((p) => '<button type="button" data-cmd="lineW" data-arg="' + (p / DeckOps.PX_PT) + '">' + p + "pt</button>").join("") +
+        '</div><p>대시</p><div class="dk-mrow">' + DASH.map((d) => '<button type="button" data-cmd="dash" data-arg="' + d[0] + '">' + d[1] + "</button>").join("") + "</div>";
+    }
+    if (kind === "alpha") {
+      return '<p>채우기 투명도</p><div class="dk-mrow">' + ALPHA.map((t) => '<button type="button" data-cmd="alpha" data-arg="' + (1 - t / 100) + '">' + t + "%</button>").join("") + "</div>";
+    }
+    if (kind === "arrange") {
+      return '<p>장에 맞추기</p><div class="dk-ico">' + ALIGN6.map((a) => '<button type="button" data-cmd="alignSlide" data-arg="' + a[0] + '" title="장의 ' + a[1] +
+        '에 맞춤">' + ICON[a[0]] + a[1] + "</button>").join("") + "</div>" +
+        '<p>앞뒤 순서</p><div class="dk-mrow">' + ["front", "forward", "backward", "back"].map((c) => btnMenu(c)).join("") + "</div>" +
+        '<p>회전</p><div class="dk-mrow">' + ["rotR90", "rotL90", "rot0"].map((c) => btnMenu(c)).join("") + "</div>" +
+        '<p>대칭</p><div class="dk-mrow">' + ["flipH", "flipV"].map((c) => btnMenu(c)).join("") + "</div>" +
+        '<p style="margin-top:8px">회전 손잡이를 끌거나 Alt+← / Alt+→ 로 15°씩 돌립니다(Shift 를 누르고 끌면 15° 단위).</p>';
+    }
+    return "";
+  }
+  const btnMenu = (cmd) => '<button type="button" data-cmd="' + cmd + '" title="' + tip(cmd) + '">' + esc(DeckOps.CMD[cmd][0]) + "</button>";
+
+  function parseArg(v) {
+    if (v == null) return undefined;
+    if (v === "") return null;
+    return /^-?[\d.]+$/.test(v) ? +v : v;
+  }
+
+  /* ── 리본 ──────────────────────────────────────────────────────── */
+  // o: { doc, onCmd(cmd, arg), state(), keep(), fonts, colors, vars, attrs, labels, col }
+  // state() → { text, canText, canBox, box, painter, canDup, canFind, canFill, canLine, canShape, canFlip, canRotate } (can… 이 false 면 끔,
+  // canRotate 가 "reset" 이면 '회전 없애기'만 — 예전에 돌려 둔 표처럼 더는 못 돌리지만 세울 수는 있는 것)
+  function build(o) {
+    const doc = o.doc || document;
+    injectCss(doc);
+    o.fonts = o.fonts || DeckOps.FONTS;
+    o.colors = o.colors || DeckOps.COLORS;
+    const el = doc.createElement("div");
+    el.className = "dk-rb" + (o.col ? " dk-col" : "");
+    el.setAttribute("role", "toolbar");
+    el.setAttribute("aria-label", "서식 — PowerPoint 홈 탭");
+    for (const [k, v] of Object.entries(o.attrs || {})) el.setAttribute(k, v);
+    for (const [k, v] of Object.entries(o.vars || {})) el.style.setProperty(k, v);
+    el.innerHTML = ribbonHtml(o);
+    const last = { color: "#C00000", highlight: "#FFFF00" };
+    const menus = {};
+    let open = null;
+
+    const size = el.querySelector('[data-pick="size"]');
+    const font = el.querySelector('[data-pick="font"]');
+
+    function closeMenu(refocus) {
+      if (!open) return;
+      const m = open;
+      open = null;
+      m.box.hidden = true;
+      m.opener.setAttribute("aria-expanded", "false");
+      if (refocus) m.opener.focus({ preventScroll: true });
+    }
+
+    function menuOf(kind) {
+      if (menus[kind]) return menus[kind];
+      const box = doc.createElement("div");
+      box.className = "dk-menu";
+      box.setAttribute("role", "menu");
+      box.hidden = true;
+      for (const [k, v] of Object.entries(o.attrs || {})) box.setAttribute(k, v);
+      for (const [k, v] of Object.entries(o.vars || {})) box.style.setProperty(k, v);
+      box.innerHTML = menuHtml(kind, o);
+      box.addEventListener("mousedown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
+      box.addEventListener("click", onClick);
+      box.addEventListener("keydown", (e) => menuKey(e, box));
+      box.addEventListener("pointerdown", (e) => { if (e.target.closest("input")) keep(); });
+      box.addEventListener("change", (e) => {
+        const inp = e.target.closest("input[data-more]");
+        if (!inp) return;
+        run(inp.getAttribute("data-more"), inp.value);
+        closeMenu(false);
+      });
+      (doc.body || doc.documentElement).appendChild(box);
+      return (menus[kind] = { box });
+    }
+
+    function place(box, opener) {
+      const r = opener.getBoundingClientRect(), vw = doc.documentElement.clientWidth, vh = doc.documentElement.clientHeight;
+      box.style.left = "0px";
+      box.style.top = "0px";
+      const w = box.offsetWidth, h = box.offsetHeight;
+      let x = Math.min(Math.max(8, r.left), vw - w - 8), y = r.bottom + 4;
+      if (y + h > vh - 8 && r.top - h - 4 > 8) y = r.top - h - 4;
+      box.style.left = Math.round(x) + "px";
+      box.style.top = Math.round(Math.max(8, y)) + "px";
+    }
+
+    function toggleMenu(opener) {
+      const kind = opener.getAttribute("data-menu");
+      if (open && open.kind === kind) { closeMenu(true); return; }
+      closeMenu(false);
+      const m = menuOf(kind);
+      m.box.hidden = false;
+      open = { kind, box: m.box, opener };
+      opener.setAttribute("aria-expanded", "true");
+      sync();
+      place(m.box, opener);
+    }
+
+    function menuKey(e, box) {
+      const items = Array.from(box.querySelectorAll("button:not(:disabled), input"));
+      const i = items.indexOf(doc.activeElement);
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); return; }
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      e.preventDefault();
+      e.stopPropagation();
+      const d = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : -1;
+      const n = items[(i + d + items.length) % items.length];
+      if (n) n.focus({ preventScroll: true });
+    }
+
+    function keep() { if (typeof o.keep === "function") o.keep(); }
+
+    function run(cmd, arg) {
+      if (cmd === "color" || cmd === "highlight") {
+        if (arg === undefined) arg = last[cmd];
+        else if (arg) last[cmd] = arg;
+      }
+      o.onCmd(cmd, arg);
+      sync();
+    }
+
+    function onClick(e) {
+      const b = e.target.closest("button");
+      if (!b || b.disabled) return;
+      const opener = b.getAttribute("data-menu");
+      if (opener) { toggleMenu(b); return; }
+      const cmd = b.getAttribute("data-cmd");
+      if (!cmd) return;
+      const inMenu = !!b.closest(".dk-menu");
+      if (inMenu) closeMenu(false);
+      if (cmd === "fmtCopy" && e.detail > 1) return;          // 두 번 누름은 dblclick 에서(계속 입히기)
+      run(cmd, parseArg(b.getAttribute("data-arg")));
+    }
+
+    // 마우스로 연 글꼴·크기 칸은 고른 뒤 포커스를 놓는다(PowerPoint 처럼 슬라이드로) — 남겨 두면 상자를 밀거나 장을 넘기려던
+    // 방향키가 그 칸의 다음 값을 골라 서식이 또 바뀐다. 키보드로 들어온 칸은 그대로 둔다
+    let byPointer = null;
+    el.addEventListener("mousedown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
+    el.addEventListener("pointerdown", (e) => { const s = e.target.closest("select"); if (s) { byPointer = s; keep(); } });
+    el.addEventListener("focusout", (e) => { if (e.target === byPointer) byPointer = null; });
+    el.addEventListener("click", onClick);
+    el.addEventListener("dblclick", (e) => {
+      const b = e.target.closest('button[data-cmd="fmtCopy"]');
+      if (b && !b.disabled) run("fmtCopy", "sticky");
+    });
+    el.addEventListener("change", (e) => {
+      const s = e.target.closest("select[data-pick]");
+      if (!s || s.value === "") return;
+      const mouse = s === byPointer;
+      if (s === font) run("font", o.fonts[+s.value][1]);
+      else run("size", +s.value);
+      if (mouse && doc.activeElement === s) s.blur();       // 편집기가 글로 포커스를 돌렸으면(backTo) 그대로
+    });
+    el.addEventListener("keydown", (e) => { if (e.key === "Escape" && open) { e.preventDefault(); closeMenu(true); } });
+    const outside = (e) => {
+      if (!open) return;
+      const t = e.target;
+      if (t instanceof Node && (open.box.contains(t) || open.opener.contains(t))) return;
+      closeMenu(false);
+    };
+    doc.addEventListener("pointerdown", outside, true);
+    const onScroll = () => closeMenu(false);
+    (doc.defaultView || window).addEventListener("resize", onScroll);
+
+    function setPressed(cmd, on) {
+      const b = el.querySelector('.dk-b[data-cmd="' + cmd + '"]');
+      if (b && b.hasAttribute("aria-pressed")) b.setAttribute("aria-pressed", String(!!on));
+    }
+
+    let shownPt = -1;
+    function fillSize(pt) {
+      if (pt === shownPt) return;                              // 같은 값이면 그대로(열린 목록을 닫지 않게)
+      shownPt = pt;
+      const opts = DeckOps.SIZES.slice();
+      if (pt && opts.indexOf(pt) < 0) opts.push(pt);
+      opts.sort((a, b) => a - b);
+      size.innerHTML = '<option value="">크기</option>' + opts.map((p) => '<option value="' + p + '">' + p + "</option>").join("");
+      size.value = pt ? String(pt) : "";
+    }
+
+    function sync() {
+      const s = (o.state && o.state()) || {};
+      const T = s.text || null, canT = !!s.canText, canB = !!s.canBox, F = s.box || null;
+      el.querySelectorAll(".dk-b[data-cmd], .dk-sel").forEach((b) => {
+        const cmd = b.getAttribute("data-cmd") || b.getAttribute("data-pick");
+        const g = DeckOps.groupOf(cmd);
+        let off = false;
+        if (g === "text" || g === "para") off = !canT;
+        else if (cmd === "dup") off = !canB || s.canDup === false;
+        else if (g === "box") off = !canB;
+        else if (cmd === "fmtCopy") off = !canT && !canB && !s.painter;
+        else if (cmd === "find") off = s.canFind === false;
+        b.disabled = off;
+      });
+      el.querySelectorAll('.dk-b[data-menu]').forEach((b) => {
+        const k = b.getAttribute("data-menu");
+        if (k === "color" || k === "highlight" || k === "spacing") b.disabled = !canT;
+        else if (k === "fill" || k === "alpha") b.disabled = !canB || !F || F.kind !== "box" || s.canFill === false;
+        else if (k === "line") b.disabled = !canB || !F || s.canLine === false;
+        else if (k === "arrange") b.disabled = !canB;
+        else if (k === "shape") b.disabled = s.canShape === false;
+      });
+      ["bold", "italic", "underline", "strike", "sup", "sub"].forEach((c) => setPressed(c, T && T[c]));
+      ["alignLeft", "alignCenter", "alignRight", "alignJustify"].forEach((c) => setPressed(c, T && T.align === c.slice(5).toLowerCase()));
+      setPressed("fmtCopy", !!s.painter);
+      fillSize(T ? T.pt : 0);
+      const fam = T ? firstFamily(T.font) : "";
+      const k = o.fonts.findIndex((f) => firstFamily(f[1]) === fam || (f[2] && firstFamily(f[2]) === fam));
+      font.value = k >= 0 ? String(k) : "";
+      font.options[0].textContent = k >= 0 || !T ? "글꼴" : String(T.font).split(",")[0].replace(/["']/g, "").trim() || "글꼴";
+      const cb = el.querySelector('[data-bar="color"]'), hb = el.querySelector('[data-bar="highlight"]');
+      if (cb) cb.style.background = last.color;
+      if (hb) hb.style.background = last.highlight;
+      if (open) {
+        const q = open.box;
+        q.querySelectorAll('button[data-cmd="spacing"]').forEach((b) => b.setAttribute("aria-pressed", String(!!T && +b.getAttribute("data-arg") === T.spacing)));
+        q.querySelectorAll('button[data-cmd="flipH"], button[data-cmd="flipV"]').forEach((b) => { b.disabled = s.canFlip === false; });
+        q.querySelectorAll('button[data-cmd^="rot"]').forEach((b) => {
+          b.disabled = s.canRotate === false || (s.canRotate === "reset" && b.getAttribute("data-cmd") !== "rot0");
+        });
+        q.querySelectorAll('button[data-cmd="lineW"]').forEach((b) => b.setAttribute("aria-pressed", String(!!F && Math.abs(+b.getAttribute("data-arg") - F.lineW) < 0.05)));
+        q.querySelectorAll('button[data-cmd="dash"]').forEach((b) => b.setAttribute("aria-pressed", String(!!F && F.line && b.getAttribute("data-arg") === F.dash)));
+        q.querySelectorAll('button[data-cmd="alpha"]').forEach((b) => b.setAttribute("aria-pressed", String(!!F && Math.abs(+b.getAttribute("data-arg") - F.alpha) < 0.03)));
+        const cur = open.kind === "color" ? T && T.color : open.kind === "highlight" ? T && T.highlight : open.kind === "fill" ? F && F.fill : open.kind === "line" ? F && F.line : null;
+        q.querySelectorAll(".dk-sw button").forEach((b) => b.setAttribute("aria-pressed", String(!!cur && b.getAttribute("data-arg") === cur)));
+      }
+    }
+
+    function destroy() {
+      closeMenu(false);
+      doc.removeEventListener("pointerdown", outside, true);
+      (doc.defaultView || window).removeEventListener("resize", onScroll);
+      Object.values(menus).forEach((m) => m.box.remove());
+      el.remove();
+    }
+
+    fillSize(0);
+    sync();
+    return { el, refresh: sync, closeMenus: () => closeMenu(false), isOpen: () => !!open, destroy };
+  }
+
+  /* ── 찾기·바꾸기 창 ─────────────────────────────────────────────── */
+  // o: { doc, vars, attrs, search(q, matchCase) → n, step(dir) → {i, n}, replace(text) → {i, n}, replaceAll(text) → k, onClose() }
+  function findPanel(o) {
+    const doc = o.doc || document;
+    injectCss(doc);
+    const el = doc.createElement("div");
+    el.className = "dk-find";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-label", "찾기·바꾸기");
+    el.hidden = true;
+    for (const [k, v] of Object.entries(o.attrs || {})) el.setAttribute(k, v);
+    for (const [k, v] of Object.entries(o.vars || {})) el.style.setProperty(k, v);
+    el.innerHTML = '<div class="dk-fh"><b>찾기·바꾸기</b><button type="button" data-f="close" aria-label="닫기" title="닫기 (Esc)">✕</button></div>' +
+      '<div class="dk-fr"><input type="text" data-f="q" placeholder="찾을 내용" aria-label="찾을 내용"><button type="button" data-f="prev" title="이전 (Shift+Enter)">이전</button>' +
+      '<button type="button" data-f="next" title="다음 (Enter)">다음</button></div>' +
+      '<div class="dk-fr" data-f="rrow"><input type="text" data-f="r" placeholder="바꿀 내용" aria-label="바꿀 내용"><button type="button" data-f="one">바꾸기</button>' +
+      '<button type="button" data-f="all">모두 바꾸기</button></div>' +
+      '<div class="dk-fr"><label><input type="checkbox" data-f="case"> 대/소문자 구분</label><span style="flex:1"></span><span class="dk-fs" data-f="st" role="status" aria-live="polite"></span></div>';
+    (doc.body || doc.documentElement).appendChild(el);
+    const $ = (k) => el.querySelector('[data-f="' + k + '"]');
+    const q = $("q"), r = $("r"), st = $("st"), mc = $("case");
+    let dirty = true, n = 0;
+
+    const show = (text) => { st.textContent = text; };
+    function search() {
+      n = o.search(q.value, mc.checked);
+      dirty = false;
+      show(!q.value ? "" : n ? n + "개" : "찾는 내용이 없습니다");
+      return n;
+    }
+    function step(d) {
+      if (dirty) search();
+      if (!n) return;
+      const res = o.step(d);
+      if (res) show((res.i + 1) + " / " + res.n);
+    }
+    q.addEventListener("input", () => { dirty = true; search(); });
+    mc.addEventListener("change", () => { dirty = true; search(); });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return; }
+      if (e.key === "Enter" && e.target === q) { e.preventDefault(); e.stopPropagation(); step(e.shiftKey ? -1 : 1); }
+      else if (e.key === "Enter" && e.target === r) { e.preventDefault(); e.stopPropagation(); one(); }
+      e.stopPropagation();                                  // 덱·편집기 단축키가 입력 칸 글자를 가로채지 않게
+    });
+    function one() {
+      if (dirty) search();
+      if (!n) return;
+      const res = o.replace(r.value);
+      n = res ? res.n : 0;
+      show(res && res.n ? (res.i + 1) + " / " + res.n : "더 바꿀 것이 없습니다");
+    }
+    el.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-f]");
+      if (!b) return;
+      const k = b.getAttribute("data-f");
+      if (k === "close") close();
+      else if (k === "prev" || k === "next") step(k === "next" ? 1 : -1);
+      else if (k === "one") one();
+      else if (k === "all") {
+        if (!q.value) return;
+        const c = o.replaceAll(r.value);
+        dirty = true;
+        show(c ? c + "개를 바꿨습니다" : "찾는 내용이 없습니다");
+        n = 0;
+      }
+    });
+    function open(mode, seed) {
+      el.hidden = false;
+      $("rrow").hidden = false;
+      if (seed) { q.value = seed; dirty = true; }
+      (mode === "replace" && q.value ? r : q).focus({ preventScroll: true });
+      if (mode !== "replace") q.select();
+      search();
+    }
+    function close() {
+      if (el.hidden) return;
+      el.hidden = true;
+      if (typeof o.onClose === "function") o.onClose();
+    }
+    return { el, open, close, isOpen: () => !el.hidden, refresh: () => { dirty = true; if (!el.hidden) search(); }, destroy: () => el.remove() };
+  }
+
+  return Object.freeze({ build, findPanel, CSS_ID: STYLE_ID });
+})();
+
+const DECK_EDIT_CSS = "/* 편집판에만 붙는 모양 — 빌드(build_models.py edit)가 덱 CSS 뒤에 붙인다(덱 CSS 는 % 서식 문자열이라 빌드가 %를 %% 로 바꾼다).\n   슬라이드 위 표시(선택 틀·손잡이)는 슬라이드처럼 고정색, 바깥 도구 막대·초안 알림은 덱 틀의 밝음·어두움 토큰을 따른다.\n   무대는 transform 으로 줄어들므로 틀 굵기·손잡이 크기는 배율(--s)로 나눠 화면에서 같은 크기로 보이게 한다. */\n:root{--ed-acc:#008A73;--ed-warn:#8A5A00;--ed-err:#B8361F;--ed-ok:#00715E}\n@media (prefers-color-scheme: dark){\n  :root:not([data-theme=\"light\"]){--ed-warn:#E7B35A;--ed-err:#F08B78;--ed-ok:#4CC7AE}\n}\n:root[data-theme=\"dark\"]{--ed-warn:#E7B35A;--ed-err:#F08B78;--ed-ok:#4CC7AE}\n\n/* 도구 막대·초안 알림 */\n.ed-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;font-size:14px;color:var(--chrome)}\n.ed-bar[hidden]{display:none}\n.ed-grp button,.ed-banner button{font:inherit;color:var(--chrome);background:var(--btn);border:1px solid var(--line);border-radius:8px;\n  padding:5px 10px;cursor:pointer;min-height:32px}\n.ed-grp button:hover:not(:disabled),.ed-banner button:hover{background:var(--btn-h)}\n.ed-grp button:focus-visible,.ed-banner button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}\n.ed-grp button:disabled{opacity:.42;cursor:default}\n.ed-grp button[data-act=\"save\"]{border-color:var(--accent);color:var(--accent);font-weight:700}\n.ed-sep{width:1px;align-self:stretch;margin:3px 4px;background:var(--line)}\n.ed-grp{display:inline-flex;flex-wrap:wrap;justify-content:center;gap:6px;max-width:100%}\n@media (max-width:1040px){.ed-sep{display:none}.ed-bar{column-gap:14px}}   /* 막대가 한 줄(약 970 px)에 안 들면 줄 끝에 구분선이 남지 않게 — 묶음 사이는 넓은 틈으로 */\n.ed-bar .ed-rb{flex-basis:100%}   /* 리본(공통 DeckRibbon — 제 모양은 deckribbon.js 가 넣는다)은 단추 줄 아래 한 줄 */\n.ed-msg{flex-basis:100%;min-height:1.45em;text-align:center;font-size:13px;line-height:1.45;color:var(--chrome2);\n  word-break:keep-all;overflow-wrap:break-word;line-break:strict}\n.ed-msg.warn{color:var(--ed-warn)}\n.ed-msg.err{color:var(--ed-err)}\n.ed-msg.ok{color:var(--ed-ok)}\n.ed-banner{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border:1px solid var(--accent);\n  border-radius:10px;background:var(--panel);color:var(--chrome);font-size:14px;line-height:1.5;\n  word-break:keep-all;overflow-wrap:break-word;line-break:strict}\n.notes.ed-notes{outline:2px dashed var(--accent);outline-offset:-2px;cursor:text}\n\n/* 편집 중 무대 */\nhtml.ed-on .stage{outline:calc(2px / var(--s,0.5)) solid var(--ed-acc)}\nhtml.ed-on .slide.on>.el{cursor:move;touch-action:none}\nhtml.ed-on .slide.on>.el:hover{outline:calc(1px / var(--s,0.5)) dashed rgba(0,138,115,.7)!important;outline-offset:0!important}\nhtml.ed-on .slide [contenteditable=\"true\"]{cursor:text;outline:none}\nhtml.ed-on .slide [contenteditable=\"false\"]{cursor:default}\nhtml.ed-on .slide .wg>*{pointer-events:none}\nhtml.ed-on .slide img.el{-webkit-user-drag:none;user-select:none}\n.slide>[data-ed-del]{display:none!important}\n.slide .tin{color:#12202A}\n\n/* 선택 틀 — 무대 좌표(1280×720) */\n.ed-layer{position:absolute;inset:0;pointer-events:none;z-index:20}\n.ed-frame{position:absolute;box-sizing:border-box;outline:calc(1.5px / var(--s,0.5)) solid var(--ed-acc);pointer-events:none}\n.ed-frame[hidden]{display:none}\n.ed-band{position:absolute;pointer-events:auto;cursor:move;touch-action:none}\n.ed-band.n,.ed-band.s{left:calc(-9px / var(--s,0.5));right:calc(-9px / var(--s,0.5));height:calc(9px / var(--s,0.5))}\n.ed-band.n{bottom:100%}\n.ed-band.s{top:100%}\n.ed-band.e,.ed-band.w{top:0;bottom:0;width:calc(9px / var(--s,0.5))}\n.ed-band.e{left:100%}\n.ed-band.w{right:100%}\n.ed-h{position:absolute;box-sizing:border-box;width:calc(11px / var(--s,0.5));height:calc(11px / var(--s,0.5));\n  margin:calc(-5.5px / var(--s,0.5)) 0 0 calc(-5.5px / var(--s,0.5));background:#fff;border:calc(1.5px / var(--s,0.5)) solid var(--ed-acc);\n  border-radius:calc(2px / var(--s,0.5));pointer-events:auto;touch-action:none}\n.ed-h[data-ed-h=\"nw\"]{left:0;top:0;cursor:nwse-resize}\n.ed-h[data-ed-h=\"n\"]{left:50%;top:0;cursor:ns-resize}\n.ed-h[data-ed-h=\"ne\"]{left:100%;top:0;cursor:nesw-resize}\n.ed-h[data-ed-h=\"e\"]{left:100%;top:50%;cursor:ew-resize}\n.ed-h[data-ed-h=\"se\"]{left:100%;top:100%;cursor:nwse-resize}\n.ed-h[data-ed-h=\"s\"]{left:50%;top:100%;cursor:ns-resize}\n.ed-h[data-ed-h=\"sw\"]{left:0;top:100%;cursor:nesw-resize}\n.ed-h[data-ed-h=\"w\"]{left:0;top:50%;cursor:ew-resize}\n.ed-frame.rs-none .ed-h,\n.ed-frame.rs-ratio .ed-h[data-ed-h=\"n\"],.ed-frame.rs-ratio .ed-h[data-ed-h=\"e\"],\n.ed-frame.rs-ratio .ed-h[data-ed-h=\"s\"],.ed-frame.rs-ratio .ed-h[data-ed-h=\"w\"]{display:none}\n.ed-grip{position:absolute;left:calc(-1.5px / var(--s,0.5));bottom:calc(100% + 11px / var(--s,0.5));padding:0 calc(7px / var(--s,0.5));\n  border-radius:calc(4px / var(--s,0.5));background:var(--ed-acc);color:#fff;font:600 calc(12px / var(--s,0.5))/1.7 var(--f-ko);\n  white-space:nowrap;pointer-events:auto;cursor:move;user-select:none;touch-action:none}\n.ed-frame.grip-below .ed-grip{bottom:auto;top:calc(100% + 11px / var(--s,0.5))}\n/* 회전 손잡이 — 위 가운데, '끌어서 옮기기' 띠보다 위(띠가 아래로 가면 손잡이도 아래로). 틀은 상자와 같은 각도로 돈다 */\n.ed-rot{position:absolute;left:50%;top:calc(-50px / var(--s,0.5));width:calc(13px / var(--s,0.5));height:calc(13px / var(--s,0.5));\n  margin-left:calc(-6.5px / var(--s,0.5));box-sizing:border-box;border-radius:50%;background:#fff;\n  border:calc(1.5px / var(--s,0.5)) solid var(--ed-acc);pointer-events:auto;cursor:grab;touch-action:none}\n.ed-rot::after{content:\"\";position:absolute;left:50%;top:100%;width:calc(1.5px / var(--s,0.5));height:calc(37px / var(--s,0.5));\n  margin-left:calc(-.75px / var(--s,0.5));background:var(--ed-acc);pointer-events:none}\n.ed-frame.grip-below .ed-rot{top:calc(100% + 37px / var(--s,0.5))}\n.ed-frame.grip-below .ed-rot::after{top:auto;bottom:100%}\n.ed-frame.rot-off .ed-rot{display:none}\n/* 서식 복사 중 — 붓 대신 복사 모양 손 */\nhtml.ed-paint .slide.on>.el,html.ed-paint .slide.on [contenteditable=\"true\"]{cursor:copy}\n/* 찾은 곳(찾기·바꾸기) — 포커스는 찾기 창에 두고 글만 칠한다 */\n::highlight(deck-find){background-color:#FFD54A;color:#12202A}\n\n/* 클립아트 보관함 — 화면 오른쪽 아래에 뜨는 창(무대 배치에 영향 없음) */\n.ed-clip{position:fixed;right:12px;bottom:12px;z-index:60;width:min(480px,calc(100vw - 24px));max-height:min(72vh,580px);display:flex;\n  flex-direction:column;background:var(--panel);color:var(--chrome);border:1px solid var(--line);border-radius:12px;\n  box-shadow:0 10px 30px rgba(0,0,0,.24);font-size:13px}\n.ed-clip[hidden]{display:none}\n.ed-clip-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}\n.ed-clip-h b{font-size:15px}\n.ed-clip-n{flex:1;color:var(--chrome2)}\n.ed-clip button{font:inherit;color:var(--chrome);background:var(--btn);border:1px solid var(--line);border-radius:7px;padding:4px 8px;cursor:pointer;min-height:28px}\n.ed-clip button:hover{background:var(--btn-h)}\n.ed-clip button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}\n.ed-clip-tip{margin:0;padding:8px 12px 0;color:var(--chrome2);line-height:1.5}\n.ed-clip-grid{overflow:auto;padding:10px 12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:8px;min-height:60px}\n.ed-clip-t{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--btn)}\n.ed-clip button.ed-clip-pic{display:flex;align-items:center;justify-content:center;width:100%;height:88px;padding:4px;border:0;border-radius:0;\n  background:repeating-conic-gradient(#E3E8EB 0 25%,#FFFFFF 0 50%) 0 0/12px 12px}\n.ed-clip-pic img{max-width:100%;max-height:100%;object-fit:contain}\n.ed-clip-ph{font-size:12px;line-height:1.35;color:#22313B;text-align:left;overflow:hidden;max-height:100%}\n.ed-clip-nm{padding:5px 8px 2px;font-size:12px;color:var(--chrome2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n.ed-clip-ac{display:flex;flex-wrap:wrap;gap:4px;padding:4px 6px 7px}\n.ed-clip-ac button{flex:1 1 auto;padding:2px 6px;min-height:24px;font-size:12px}\n.ed-clip-f{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px 10px;border-top:1px solid var(--line)}\n";
 /* 덱 편집기(1/5) — 상태: 요소 번호·그림 표·장 찍기/되살리기·되돌리기·이 브라우저 임시 저장(초안).
    빌드(build_models.py edit)가 ed-core → ed-save → ed-pointer → ed-text → ed-ui 순서로 이어 붙여 즉시실행 함수 하나에 넣는다.
    기준은 DOM 이다 — 장마다 '찍기'로 요소 목록을 문자열로 만들어 되돌리기·초안·원래대로에 쓴다.
@@ -5783,9 +7628,10 @@ function kindOf(el) {
   return "el";
 }
 
-/* 크기 바꾸기: 글상자는 여덟 손잡이, 그림·차트·선은 모서리만(비율 유지), 표·시연 화면은 옮기기만 */
-function resizeMode(k) {
-  if (k === "tx") return "all";
+/* 크기 바꾸기: 글상자는 여덟 손잡이, 그림·차트·선은 모서리만(비율 유지), 표·시연 화면은 옮기기만.
+   리본으로 넣은 선·화살표(DeckOps)는 크기마다 다시 그리므로 여덟 손잡이 */
+function resizeMode(k, el) {
+  if (k === "tx" || (el && DeckOps.isLine(el))) return "all";
   return k === "img" || k === "ch" || k === "ln" ? "ratio" : "none";
 }
 
@@ -5850,6 +7696,9 @@ function buildFrame() {
     d.setAttribute("data-ed-h", h);
     frame.appendChild(d);
   }
+  const rot = document.createElement("div");                         // 회전 손잡이(위 가운데) — 끌면 돌고 Shift 면 15° 단위
+  rot.className = "ed-rot";
+  frame.appendChild(rot);
   grip = document.createElement("div");
   grip.className = "ed-grip";
   frame.appendChild(grip);
@@ -5861,13 +7710,14 @@ function updateFrame() {
   const el = ED.sel;
   if (!frame) return;
   if (!ED.on || !el || !el.isConnected || el.hasAttribute("data-ed-del")) { frame.hidden = true; return; }
-  const b = rectOf(el);
+  const b = boxOf(el);                                               // 돌리기 전 상자 — 틀도 같은 각도로 돈다
   const k = kindOf(el);
   frame.style.left = b.x + "px";
   frame.style.top = b.y + "px";
   frame.style.width = b.w + "px";
   frame.style.height = b.h + "px";
-  frame.className = "ed-frame rs-" + resizeMode(k) + (b.y < 40 ? " grip-below" : "");
+  frame.style.rotate = el.style.rotate || "";
+  frame.className = "ed-frame rs-" + resizeMode(k, el) + (ROT_OFF.has(k) ? " rot-off" : "") + (b.y < 40 ? " grip-below" : "");
   grip.textContent = KIND_LABEL[k] + " · 끌어서 옮기기";
   frame.hidden = false;
 }
@@ -5875,6 +7725,7 @@ function updateFrame() {
 function select(el, keepFocus) {
   const ok = el && el.isConnected && el.parentNode === curSlide() && !el.hasAttribute("data-ed-del");
   const next = ok ? el : null;
+  if (next !== ED.sel) OPS.kept = null;                              // 다른 상자로 — 고르기 칸 앞에 적어 둔 글 범위는 버린다
   if (!keepFocus) {
     const a = document.activeElement;
     if (a && a.isContentEditable && ED.stage.contains(a) && !(next && next.contains(a))) a.blur();
@@ -5889,6 +7740,7 @@ function onDown(e) {
   if (!ED.on || drag || !(e.target instanceof Element)) return;
   if (e.pointerType === "mouse" && e.button !== 0) return;
   const t = e.target;
+  if (t.closest(".ed-rot") && ED.sel) { beginTurn(e, ED.sel); return; }
   const h = t.closest("[data-ed-h]");
   if (h && ED.sel) { begin(e, ED.sel, h.getAttribute("data-ed-h"), false); return; }
   if (t.closest(".ed-band, .ed-grip") && ED.sel) { begin(e, ED.sel, "move", false); return; }
@@ -5900,11 +7752,29 @@ function onDown(e) {
 }
 
 function begin(e, el, mode, clickEdits) {
-  const rm = resizeMode(kindOf(el));
+  const rm = resizeMode(kindOf(el), el);
   if (mode !== "move" && (rm === "none" || (rm === "ratio" && mode.length === 1))) return;
   e.preventDefault();
-  drag = { el, mode, rm, i: ED.cur, id: e.pointerId, x0: e.clientX, y0: e.clientY, s: scale(), b: boxOf(el), moved: false, clickEdits };
+  drag = { el, mode, rm, i: ED.cur, id: e.pointerId, x0: e.clientX, y0: e.clientY, s: scale(), b: boxOf(el), moved: false, clickEdits,
+    deg: DeckOps.angle(el) };
   try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* 붙잡지 못해도 문서에서 움직임을 받는다 */ }
+}
+
+// 회전 손잡이 — 상자 가운데를 축으로 누른 곳의 각도만큼 돈다
+function beginTurn(e, el) {
+  if (ROT_OFF.has(kindOf(el))) return;
+  e.preventDefault();
+  const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  drag = { el, mode: "rot", i: ED.cur, id: e.pointerId, x0: e.clientX, y0: e.clientY, cx, cy, a0: DeckOps.angle(el),
+    t0: Math.atan2(e.clientY - cy, e.clientX - cx), moved: false };
+  try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* 붙잡지 못해도 문서에서 움직임을 받는다 */ }
+}
+
+function turnTo(e) {
+  let a = drag.a0 + (Math.atan2(e.clientY - drag.cy, e.clientX - drag.cx) - drag.t0) * 180 / Math.PI;
+  a = e.shiftKey ? Math.round(a / 15) * 15 : Math.round(a * 10) / 10;
+  DeckOps.setAngle(drag.el, a);
+  updateFrame();
 }
 
 function resized(b, m, dx, dy, keep) {
@@ -5929,9 +7799,15 @@ function onMove(e) {
   if (!drag.moved && Math.hypot(dxs, dys) < DRAG_START) return;
   drag.moved = true;
   e.preventDefault();
+  if (drag.mode === "rot") { turnTo(e); return; }
   const dx = dxs / drag.s, dy = dys / drag.s, b = drag.b;
   if (drag.mode === "move") place(drag.el, { x: b.x + dx, y: b.y + dy });
-  else place(drag.el, resized(b, drag.mode, dx, dy, drag.rm === "ratio"));
+  else {                                              // 돌린 상자는 상자 축으로 — 반대쪽 모서리가 제자리에 남게(DeckOps.resizeTurned)
+    const fit = (bb, ldx, ldy) => resized(bb, drag.mode, ldx, ldy, drag.rm === "ratio");
+    const nb = drag.deg ? DeckOps.resizeTurned(b, drag.deg, dx, dy, fit) : fit(b, dx, dy);
+    place(drag.el, nb);
+    if (DeckOps.isLine(drag.el)) DeckOps.fitLine(drag.el, nb.w, nb.h);
+  }
   updateFrame();
 }
 
@@ -6158,10 +8034,9 @@ function onDrop(e) {
 }
 
 /* 덱 편집기(4/5) — 글 고치기: 글상자(.tin)·표 칸(td)을 편집 가능하게 하고, 다 지운 뒤 새로 쓴 글이 덱 문단(.pp)
-   밖으로 떨어지면 감싸 글꼴·색을 지킨다. 글자 크기·굵게, 그리고 발표자 노트 고치기. */
+   밖으로 떨어지면 감싸 글꼴·색을 지킨다. 글상자 전체의 글자 크기(리본·단축키 — ed-ops), 그리고 발표자 노트 고치기. */
 
 const HOSTS = ".tin, td";
-const SIZE_STEP = 1.1;
 const SIZE_MIN = 6;
 const SIZE_MAX = 160;
 
@@ -6280,40 +8155,37 @@ function onFocusIn(e) {
   select(hb.box, true);
 }
 
-/* ── 글자 크기·굵게(고른 상자) ─────────────────────────────────── */
+/* ── 글상자 전체의 글자 크기 — 문단마다. 이 덱 문단은 줄 높이·위 여백·들여쓰기·글머리표 자리가 px 라 같은 비로 함께 ── */
 function scalePx(st, prop, r) {
   const v = st[prop];
   if (v && /^-?[\d.]+px$/.test(v)) st[prop] = Math.round(parseFloat(v) * r * 100) / 100 + "px";
 }
 
-function scaleFont(box, f) {
-  let first = 0;
-  box.querySelectorAll(".pp").forEach((p) => {
-    const fs = parseFloat(p.style.fontSize) || parseFloat(getComputedStyle(p).fontSize);
-    if (!(fs > 0)) return;
-    const nf = Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(fs * f * 10) / 10));
-    const r = nf / fs;
-    if (!first) first = nf;
-    if (r === 1) return;
-    p.style.fontSize = nf + "px";
-    ["lineHeight", "marginTop", "paddingLeft"].forEach((k) => scalePx(p.style, k, r));
-    p.querySelectorAll(".bu").forEach((b) => { scalePx(b.style, "left", r); scalePx(b.style, "width", r); });
-    p.querySelectorAll("[style]").forEach((n) => { if (!n.classList.contains("bu")) scalePx(n.style, "fontSize", r); });
-  });
-  return first;
+function setParaPx(p, fs, nf) {
+  const r = nf / fs;
+  if (r === 1) return;
+  p.style.fontSize = nf + "px";
+  ["lineHeight", "marginTop", "paddingLeft"].forEach((k) => scalePx(p.style, k, r));
+  p.querySelectorAll(".bu").forEach((b) => { scalePx(b.style, "left", r); scalePx(b.style, "width", r); });
+  p.querySelectorAll("[style]").forEach((n) => { if (!n.classList.contains("bu")) scalePx(n.style, "fontSize", r); });
 }
 
-function toggleBold(box) {
-  const s = window.getSelection();
-  const inside = s.rangeCount && !s.isCollapsed && box.contains(s.anchorNode) && box.contains(s.focusNode);
-  if (inside) {
-    document.execCommand("bold");
-    return "고른 글을 굵게·보통으로 바꿨습니다.";
-  }
-  const pps = Array.from(box.querySelectorAll(".pp"));
-  const allBold = pps.length > 0 && pps.every((p) => (parseInt(getComputedStyle(p).fontWeight, 10) || 400) >= 600);
-  pps.forEach((p) => { p.style.fontWeight = allBold ? "400" : "700"; });
-  return allBold ? "상자 전체를 보통 굵기로 바꿨습니다." : "상자 전체를 굵게 바꿨습니다.";
+// cmd: size(arg = pt — 모든 글을 그 크기로) · grow/shrink(PowerPoint 크기 목록의 다음 값) · grow1/shrink1(1pt). 첫 문단의 새 pt
+function sizeBox(box, cmd, arg) {
+  let first = 0;
+  box.querySelectorAll(".pp").forEach((p) => {
+    const fs = parseFloat(getComputedStyle(p).fontSize);
+    if (!(fs > 0)) return;
+    const pt = fs * DeckOps.PX_PT;
+    const want = cmd === "size" ? +arg : cmd === "grow1" ? pt + 1 : cmd === "shrink1" ? pt - 1 : DeckOps.nextPt(pt, cmd === "grow" ? 1 : -1);
+    const nf = Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(want / DeckOps.PX_PT * 100) / 100));
+    setParaPx(p, fs, nf);
+    if (cmd === "size") {                              // 크기 칸은 글 전체를 한 크기로 — 안쪽 글의 크기를 걷는다(글머리표는 그대로)
+      p.querySelectorAll("[style]").forEach((n) => { if (!n.classList.contains("bu")) n.style.removeProperty("font-size"); });
+    }
+    if (!first) first = Math.round(nf * DeckOps.PX_PT * 100) / 100;
+  });
+  return first;
 }
 
 /* ── 발표자 노트 ─────────────────────────────────────────────── */
@@ -6525,13 +8397,7 @@ function insertPayload(p, at) {
   flushSlide();
   const slide = curSlide();
   const taken = Array.from(slide.children).filter((c) => c.classList.contains("el") && !c.hasAttribute("data-ed-del")).map(boxOf);
-  let spots = DeckClip.place(p, { w: STAGE_W, h: STAGE_H, taken });
-  if (at) {
-    const x0 = Math.min(...spots.map((s) => s.x)), y0 = Math.min(...spots.map((s) => s.y));
-    const x1 = Math.max(...spots.map((s) => s.x + s.w)), y1 = Math.max(...spots.map((s) => s.y + s.h));
-    const dx = Math.min(Math.max(at.x - (x0 + x1) / 2, -x0), STAGE_W - x1), dy = Math.min(Math.max(at.y - (y0 + y1) / 2, -y0), STAGE_H - y1);
-    spots = spots.map((s) => Object.assign({}, s, { x: s.x + dx, y: s.y + dy }));
-  }
+  const spots = DeckClip.place(p, { w: STAGE_W, h: STAGE_H, taken, at });   // 돌린 항목은 둘레 상자로 무대 안에
   const nodes = [];
   for (const s of spots) {
     const node = nodeOf(s.item, s.k);
@@ -6839,10 +8705,538 @@ function dropClip(e) {
   if (rec) insertPayload(rec.p, toSlide(e.clientX, e.clientY));
 }
 
-/* 덱 편집기(5/5) — 편집 단추·도구 막대·알림 줄·초안 알림, 키(되돌리기·저장·지우기·옮기기), 장 넘김 따라가기, 시작. */
+/* 덱 편집기(4¾/5) — PowerPoint '홈' 탭 명령. 리본(글꼴·단락·그리기·배치·편집)과 PowerPoint 단축키를 공통 모듈
+   DeckOps·DeckRibbon(_deck_edit/deckops/ — 편집기 C·A 도 같은 원본을 쓴다)으로 붙인다. 명령마다 되돌리기 한 칸.
+   · 글 명령은 고른 글에, 고른 글이 없으면(캐럿만·상자만 골랐을 때) 고른 상자의 글 전체에. 단락 명령은 캐럿이 든 문단에.
+     글상자 전체의 크기(크기 칸·크게·작게)는 문단마다 바꾼다 — 이 덱의 문단(.pp)은 줄 높이·여백·글머리표 자리가 px 라
+     같은 비로 함께(ed-text 의 sizeBox).
+   · 회전·대칭은 CSS rotate·scale 속성(거르기를 지나고 저장·복사에 그대로 간다). 표·시연 화면은 돌리지 않고(PowerPoint 도 표는
+     못 돌린다), 글이 든 상자는 대칭하지 않는다(글이 거울 글씨가 된다).
+   · 도형: 사각형·둥근 사각형·타원은 채운 글상자(.el.tx — 글을 쓸 수 있고 PowerPoint 로 도형째 간다), 선·화살표는 svg.el
+     (크기를 바꾸면 fitLine 으로 다시 그린다).
+   · 서식 복사: 단추 한 번 = 한 번, 두 번 = Esc 까지 계속. 글을 끌어 고르면 그 글에, 글 위를 누르면 그 낱말에, 상자 테두리를
+     누르면 상자(채우기·윤곽선)와 그 글 전체에. Ctrl+Shift+C / Ctrl+Shift+V 는 서식만 복사·붙여넣기(PowerPoint 와 같다).
+   · 찾기·바꾸기(Ctrl+F·Ctrl+H): 모든 장의 글상자·표 칸에서. 찾은 곳은 강조만 하고 포커스는 찾기 창에 둔다(CSS 강조 —
+     ::highlight(deck-find)). 모두 바꾸기는 되돌리기 한 칸. */
+
+const OPS = { rb: null, find: null, kept: null, painter: null, fmt: null, from: null, hits: [], hit: -1, q: "", mc: false, raf: 0 };
+const ROT_OFF = new Set(["tb", "wg"]);                  // 돌리지 않는 것
+const FLIP_ON = new Set(["img", "ch", "ln", "el"]);     // 대칭하는 것 — 글이 든 상자·표·시연 화면은 빼고
+const FILL_ON = new Set(["tx", "el"]);                  // 채우기·투명도
+const LINE_ON = new Set(["tx", "el", "img", "ln"]);     // 윤곽선
+const TOGGLE = new Set(["bold", "italic", "underline", "strike", "sup", "sub"]);
+const BOX_SIZE = new Set(["size", "grow", "shrink", "grow1", "shrink1"]);
+const ROT_STEP = { rotR90: 90, rotL90: -90, rotR15: 15, rotL15: -15 };
+const BOX_SAID = { fill: "채우기", alpha: "채우기 투명도", line: "윤곽선", lineW: "윤곽선 두께", dash: "윤곽선 대시" };
+const DUP_STEP = 24;                                     // 복제본을 비껴 놓는 거리(슬라이드 px)
+const SHAPE_BOX = { w: 200, h: 120 };
+const LINE_BOX = { w: 240, h: 24 };
+const LINE_PX = 2;                                       // 새 선 두께(1.5pt)
+const SHAPE_PP = "font-size:24px;line-height:33.6px;font-family:var(--f-ko);";
+const FIND_HL = "deck-find";
+const SEED_MAX = 80;                                     // 고른 글을 찾을 말로 넣는 길이 상한
+const UI_ATTRS = { "data-ed-ui": "" };
+const RIBBON_VARS = {
+  "--dk-ink": "var(--chrome)", "--dk-ink2": "var(--chrome2)", "--dk-bg": "var(--panel)", "--dk-btn": "var(--btn)",
+  "--dk-btn-h": "var(--btn-h)", "--dk-line": "var(--line)", "--dk-acc": "var(--accent)",
+  "--dk-on": "color-mix(in srgb, var(--accent) 14%, transparent)",
+};
+
+function josa(word, withFinal, without) {
+  const c = word.charCodeAt(word.length - 1) - 0xAC00;
+  return word + (c >= 0 && c < 11172 && c % 28 ? withFinal : without);
+}
+
+function stopKey(e) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+/* ── 대상 ───────────────────────────────────────────────────────── */
+// 상자 안 글 칸 — 글상자는 .tin, 표는 칸(td)마다
+function boxHosts(el) {
+  if (!el) return [];
+  const k = kindOf(el);
+  if (k === "tx") {
+    const tin = el.querySelector(":scope > .tin");
+    return tin ? [tin] : [];
+  }
+  return k === "tb" ? Array.from(el.querySelectorAll("td")) : [];
+}
+
+// 지금 고른 글(캐럿 포함)이 든 글 칸 — 이 장 상자의 글 칸 하나 안이고 그 칸에 포커스가 있을 때만
+// (Esc 로 글 고치기를 멈추면 남은 고르기는 '고른 글'이 아니다 — PowerPoint 처럼 상자를 고른 것)
+function liveRange() {
+  const s = window.getSelection();
+  if (!ED.on || !s || !s.rangeCount) return null;
+  const r = s.getRangeAt(0);
+  let n = r.commonAncestorContainer;
+  if (n.nodeType !== 1) n = n.parentElement;
+  const hb = n ? hostBox(n) : null;
+  if (!hb || document.activeElement !== hb.host || !hb.host.contains(r.startContainer) || !hb.host.contains(r.endContainer)) return null;
+  return { host: hb.host, box: hb.box, range: r };
+}
+
+// 고르기 칸(글꼴·크기)·색 고르개가 포커스를 가져가기 전에 — 고른 글을 글자 위치로 적어 둔다
+function keepSel() {
+  const t = liveRange();
+  OPS.kept = t ? { host: t.host, box: t.box, a: DeckOps.charIndex(t.host, t.range.startContainer, t.range.startOffset),
+    b: DeckOps.charIndex(t.host, t.range.endContainer, t.range.endOffset) } : null;
+}
+
+// 리본의 고르기 칸·색 고르개가 포커스를 가진 동안에만 — 고르기 칸을 열었다 닫고 다른 데로 가면 적어 둔 범위는 이미 낡았다
+function keptRange() {
+  const k = OPS.kept, a = document.activeElement;
+  if (!k || !k.host.isConnected || ED.sel !== k.box || !(a instanceof Element && a.closest("[data-ed-ui]"))) return null;
+  k.host.focus({ preventScroll: true });
+  return { host: k.host, box: k.box, range: DeckOps.selectChars(k.host, Math.min(k.a, k.b), Math.max(k.a, k.b)) };
+}
+
+// 리본의 고르기 칸에 포커스가 있는 동안 — 적어 둔 글 범위로 상태를 보인다(고르기·포커스는 그대로)
+function keptView() {
+  const k = OPS.kept, a = document.activeElement;
+  if (!k || !k.host.isConnected || ED.sel !== k.box || !(a instanceof Element && a.closest("[data-ed-ui]"))) return null;
+  return { host: k.host, box: k.box, range: DeckOps.rangeOf(k.host, Math.min(k.a, k.b), Math.max(k.a, k.b)) };
+}
+
+/* ── 글·단락 ────────────────────────────────────────────────────── */
+// 글 칸 여럿(표 칸들·글상자 전체)에 — 켜고 끄는 명령은 모두 켜져 있을 때만 끄고, 아니면 모두 켠다
+function wholeHosts(hosts, cmd, arg) {
+  let res = null, want = null;
+  if (TOGGLE.has(cmd)) want = !hosts.every((h) => { const s = DeckOps.textState(h, null); return !s || s[cmd]; });
+  for (const h of hosts) {
+    if (want !== null) {
+      const s = DeckOps.textState(h, null);
+      if (!s || s[cmd] === want) continue;
+    }
+    const r = DeckOps.textCmd(h, null, cmd, arg);
+    if (!res || r.ok) res = r;
+  }
+  return res || { ok: true, msg: DeckOps.label(cmd) + " — 글 칸 전체" };
+}
+
+function runText(cmd, arg) {
+  const t = liveRange() || keptRange();
+  OPS.kept = null;
+  const box = t ? t.box : ED.sel;
+  const hosts = t ? [t.host] : boxHosts(box);
+  if (!box || !hosts.length) return;
+  flushSlide();
+  let res;
+  if (BOX_SIZE.has(cmd) && (!t || t.range.collapsed) && kindOf(box) === "tx") {
+    const pt = sizeBox(box, cmd, arg);
+    res = pt ? { ok: true, msg: "글자 크기 " + pt + "pt — 글상자 전체" } : { ok: false, msg: "글이 없습니다." };
+  } else if (t) res = DeckOps.textCmd(t.host, t.range, cmd, arg);
+  else res = wholeHosts(hosts, cmd, arg);
+  fitNew(box);
+  updateFrame();
+  commit(ED.cur);
+  msg(res.msg, res.ok ? "" : "warn", 4000);
+  sync();
+}
+
+/* ── 상자: 배치·회전·대칭·채우기·윤곽선 ─────────────────────────────── */
+const isLiveEl = (n) => n.nodeType === 1 && n.classList.contains("el") && !n.hasAttribute("data-ed-del");
+
+// 윤곽선을 쓸 수 있는가 — svg(ln)는 리본으로 넣은 선·화살표(data-name)만. 빌더가 그린 화살표에 주면 둘레에 테두리 상자가 생긴다
+const lineOk = (el, k) => LINE_ON.has(k) && (k !== "ln" || DeckOps.isLine(el));
+
+function boxCmd(el, k, cmd, arg) {
+  if (cmd in ROT_STEP || cmd === "rot0") {
+    if (ROT_OFF.has(k)) return { ok: false, msg: josa(KIND_LABEL[k], "은", "는") + " 돌릴 수 없습니다." };
+    const d = DeckOps.setAngle(el, cmd === "rot0" ? 0 : DeckOps.angle(el) + ROT_STEP[cmd]);
+    return { ok: true, msg: d ? "회전 " + d + "°" : "회전을 없앴습니다." };
+  }
+  if (cmd === "flipH" || cmd === "flipV") {
+    if (!FLIP_ON.has(k)) return { ok: false, msg: "글이 든 상자·표·시연 화면은 대칭하지 않습니다 — 글이 거울 글씨가 됩니다." };
+    DeckOps.flip(el, cmd === "flipH" ? "h" : "v");
+    return { ok: true, msg: DeckOps.CMD[cmd][0] };
+  }
+  if (cmd === "alignSlide") {
+    place(el, DeckOps.alignBox(boxOf(el), DeckOps.angle(el), arg, STAGE_W, STAGE_H));
+    return { ok: true, msg: "장에 맞췄습니다." };
+  }
+  if (cmd === "front" || cmd === "forward" || cmd === "backward" || cmd === "back") {
+    const ok = DeckOps.order(el, cmd, isLiveEl);
+    return { ok, msg: ok ? DeckOps.CMD[cmd][0] : cmd === "front" || cmd === "forward" ? "이미 맨 앞입니다." : "이미 맨 뒤입니다." };
+  }
+  if (!(cmd in BOX_SAID)) return null;
+  const fillCmd = cmd === "fill" || cmd === "alpha";
+  if (!fillCmd && k === "ln" && !DeckOps.isLine(el)) return { ok: false, msg: "덱이 그린 선이라 윤곽선을 바꿀 수 없습니다 — 리본으로 넣은 선·화살표만 바꿉니다." };
+  if (!(fillCmd ? FILL_ON.has(k) : lineOk(el, k))) return { ok: false, msg: KIND_LABEL[k] + "에는 " + objParticle(BOX_SAID[cmd]) + " 쓸 수 없습니다." };
+  const ok = cmd === "fill" ? DeckOps.setFill(el, arg) : cmd === "alpha" ? DeckOps.setAlpha(el, arg)
+    : DeckOps.setLine(el, cmd === "line" ? { color: arg } : cmd === "lineW" ? { w: arg } : { dash: arg });
+  return { ok, msg: ok ? BOX_SAID[cmd] : cmd === "alpha" ? "채우기가 없어 투명도를 바꿀 수 없습니다 — 채우기 색을 먼저 고르세요."
+    : "선·화살표에는 '윤곽선 없음'을 쓰지 않습니다 — 지우려면 Delete 를 누르세요." };
+}
+
+function runBox(cmd, arg) {
+  const el = ED.sel;
+  if (!el) return;
+  flushSlide();
+  const res = boxCmd(el, kindOf(el), cmd, arg);
+  if (!res) return;
+  updateFrame();
+  if (res.ok) commit(ED.cur);
+  msg(res.msg, res.ok ? "" : "warn", 5000);
+  sync();
+}
+
+// 복제(Ctrl+D) — 같은 서식·회전으로 조금 비껴서 맨 앞에(PowerPoint 와 같다)
+function dupSel() {
+  const el = ED.sel;
+  if (!el) return;
+  if (kindOf(el) === "wg") { msg("시연 화면(위젯)은 복제할 수 없습니다 — 화면을 캡처해 그림으로 넣으세요.", "warn", 9000); return; }
+  flushSlide();
+  const n = fromHTML(nativeHtml(el));
+  if (!n) { msg("이 요소는 복제할 수 없습니다.", "warn", 6000); return; }
+  const b = boxOf(el);
+  adopt(n, { x: b.x + DUP_STEP, y: b.y + DUP_STEP, w: b.w, h: b.h });
+  const slide = curSlide();
+  slide.appendChild(n);
+  makeEditable(slide);
+  commit(ED.cur);
+  select(n);
+  msg(objParticle(KIND_LABEL[kindOf(n)]) + " 복제했습니다.", "ok", 5000);
+}
+
+/* ── 도형 넣기 ──────────────────────────────────────────────────── */
+function addShape(kind) {
+  if (!ED.on) return;
+  flushSlide();
+  const slide = curSlide();
+  const n = slide.querySelectorAll(':scope > [data-ed-id^="n"]').length % 6;     // 거듭 넣으면 조금씩 비껴 놓는다
+  const line = kind === "line" || kind === "arrow";
+  const W = line ? LINE_BOX.w : SHAPE_BOX.w, H = line ? LINE_BOX.h : SHAPE_BOX.h;
+  const pos = "left:" + ((STAGE_W - W) / 2 + 24 * n) + "px;top:" + ((STAGE_H - H) / 2 + 24 * n) + "px;width:" + W + "px;height:" + H + "px";
+  let el;
+  if (line) {
+    const t = document.createElement("template");
+    t.innerHTML = DeckOps.lineSvg(kind, W, H, DeckOps.SHAPE_FILL, LINE_PX);
+    el = t.content.firstElementChild;
+    el.removeAttribute("xmlns");                                                // 거르기가 받지 않는 속성 — 찍기와 같은 꼴로
+    el.setAttribute("class", "el");
+    el.setAttribute("style", pos);
+  } else {
+    el = document.createElement("div");
+    el.className = "el tx";
+    el.setAttribute("style", pos + ";padding:6px 10px;justify-content:center;" + DeckOps.shapeStyle(kind, W, H));
+    const tin = el.appendChild(document.createElement("div"));
+    tin.className = "tin";
+    const p = tin.appendChild(document.createElement("p"));
+    p.className = "pp";
+    p.setAttribute("style", SHAPE_PP + DeckOps.shapeText());
+    p.appendChild(document.createElement("br"));
+  }
+  el.setAttribute("data-ed-id", "n" + ++ED.nid);
+  slide.appendChild(el);
+  if (line) DeckOps.fitLine(el, W, H);
+  makeEditable(slide);
+  commit(ED.cur);
+  select(el);
+  const label = DeckOps.SHAPES.find((s) => s[0] === kind);
+  msg((label ? objParticle(label[1]) : "도형을") + " 넣었습니다 — " + (line ? "끝 손잡이로 길이를 바꿉니다." : "Enter 를 누르거나 두 번 눌러 글을 씁니다."), "ok", 7000);
+}
+
+/* ── 서식 복사 ──────────────────────────────────────────────────── */
+const boxy = (el) => !!el && (FILL_ON.has(kindOf(el)) || lineOk(el, kindOf(el)));
+
+// 지금 고른 것의 서식 — 고른 글(캐럿 포함)이면 글 서식, 상자면 상자 서식 + 그 글 서식
+function pickNow() {
+  const t = liveRange(), el = ED.sel;
+  if (t) return DeckOps.pickFmt(t.host, t.range, null);
+  if (!el || kindOf(el) === "wg") return null;
+  const f = DeckOps.pickFmt(boxHosts(el)[0] || null, null, boxy(el) ? el : null);
+  return f.text || f.box || f.line ? f : null;
+}
+
+// t: {host, range} 면 그 글에, 아니면 상자 el 과 그 글 전체에
+function paint(fmt, t, el) {
+  flushSlide();
+  let ok = false;
+  if (t) ok = DeckOps.applyFmt({ text: fmt.text }, t.host, t.range, null);
+  else {
+    if (boxy(el)) ok = DeckOps.applyBoxFmt(el, fmt, !FILL_ON.has(kindOf(el))) || ok;
+    if (fmt.text) for (const h of boxHosts(el)) ok = DeckOps.applyFmt({ text: fmt.text }, h, null, null) || ok;
+  }
+  const box = t ? t.box : el;
+  fitNew(box);
+  updateFrame();
+  if (ok) commit(ED.cur);
+  return ok;
+}
+
+function startPaint(sticky) {
+  if (OPS.painter && !sticky) { endPaint("서식 복사를 껐습니다."); return; }
+  if (!OPS.painter) {
+    const fmt = pickNow();
+    if (!fmt) { msg("복사할 서식이 없습니다 — 글이나 상자를 먼저 고르세요.", "warn", 6000); return; }
+    OPS.painter = { fmt, sticky: false };
+    OPS.fmt = fmt;
+  }
+  if (sticky) OPS.painter.sticky = true;
+  document.documentElement.classList.add("ed-paint");
+  msg(OPS.painter.sticky ? "서식 복사(계속) — 글을 끌어 고르거나 상자를 누를 때마다 입힙니다. Esc 로 끝냅니다."
+    : "서식 복사 — 입힐 글을 끌어 고르거나 글·상자를 누르세요 (Esc 로 취소).", "ok", 15000);
+  sync();
+}
+
+function endPaint(text) {
+  const was = !!OPS.painter;
+  OPS.painter = null;
+  OPS.from = null;
+  document.documentElement.classList.remove("ed-paint");
+  if (was && text) msg(text, "", 3000);
+  sync();
+}
+
+function onPaintDown(e) {                       // 무대 잡기 단계 — 글 위에서 눌렀는지, 상자 테두리에서 눌렀는지
+  if (!OPS.painter || !ED.on || !(e.target instanceof Element)) return;
+  const el = e.target.closest(".el");
+  OPS.from = el && el.parentNode === curSlide() ? { el, text: !!e.target.closest('[contenteditable="true"]') } : null;
+}
+
+function onPaintUp() {
+  const from = OPS.from;
+  OPS.from = null;
+  if (!OPS.painter || !from || !ED.on) return;
+  setTimeout(() => {                            // 브라우저가 고른 글을 정한 뒤
+    const P = OPS.painter;
+    if (!P || !from.el.isConnected) return;
+    let t = null;
+    if (from.text) {
+      t = liveRange();
+      if (t && t.box !== from.el) t = null;
+      if (t && t.range.collapsed) {             // 누르기만 — 그 낱말에
+        const w = DeckOps.wordAt(t.host, DeckOps.charIndex(t.host, t.range.startContainer, t.range.startOffset));
+        t = w ? { host: t.host, box: t.box, range: DeckOps.selectChars(t.host, w[0], w[1]) } : null;
+      }
+      if (!t) return;
+    }
+    const ok = paint(P.fmt, t, from.el);
+    if (!P.sticky) endPaint(ok ? "서식을 입혔습니다." : "입힐 수 있는 서식이 없습니다.");
+    else msg(ok ? "서식을 입혔습니다 — 계속 고르거나 Esc 로 끝냅니다." : "여기에는 입힐 서식이 없습니다.", ok ? "ok" : "warn", 6000);
+  }, 0);
+}
+
+// Ctrl+Shift+V — 복사해 둔 서식을 고른 글(없으면 고른 상자)에
+function pasteFmt() {
+  const t = liveRange();
+  if (t && !t.range.collapsed) return paint(OPS.fmt, t, null);
+  const el = (t && t.box) || ED.sel;
+  return el ? paint(OPS.fmt, null, el) : false;
+}
+
+/* ── 찾기·바꾸기 ─────────────────────────────────────────────────── */
+function findHosts() {
+  const out = [];
+  ED.slides.forEach((s, i) => {
+    for (const el of s.children) {
+      if (!isLiveEl(el) || kindOf(el) === "wg") continue;
+      for (const host of boxHosts(el)) out.push({ i, host, box: el });
+    }
+  });
+  return out;
+}
+
+function markHit(r) {
+  if (typeof CSS !== "undefined" && CSS.highlights && typeof Highlight === "function") CSS.highlights.set(FIND_HL, new Highlight(r));
+  else { const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }   // 강조를 못 쓰는 브라우저 — 고른 글로
+}
+
+function clearHit() {
+  if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete(FIND_HL);
+}
+
+function findSearch(q, mc) {
+  OPS.q = q;
+  OPS.mc = mc;
+  OPS.hits = [];
+  OPS.hit = -1;
+  if (q) findHosts().forEach((h, hi) => {
+    for (const m of DeckOps.find(h.host, q, mc)) OPS.hits.push({ i: h.i, hi, host: h.host, box: h.box, a: m.a, b: m.b });
+  });
+  clearHit();
+  return OPS.hits.length;
+}
+
+function showHit(h) {
+  const go = () => {
+    if (!h.host.isConnected) return;
+    select(h.box, true);
+    markHit(DeckOps.rangeOf(h.host, h.a, h.b));
+  };
+  if (h.i !== ED.cur && window.__deck) {
+    window.__deck.go(h.i);
+    setTimeout(go, 0);                          // 장 넘김을 따라가는 고르기 풀기(watchSlides) 뒤에
+  } else go();
+}
+
+function findStep(d) {
+  const hs = OPS.hits, n = hs.length;
+  if (!n) return null;
+  if (OPS.hit < 0) {                            // 처음에는 지금 장부터
+    let k = -1;
+    if (d > 0) k = hs.findIndex((h) => h.i >= ED.cur);
+    else for (let j = n - 1; j >= 0 && k < 0; j--) if (hs[j].i <= ED.cur) k = j;
+    OPS.hit = k >= 0 ? k : d > 0 ? 0 : n - 1;
+  } else OPS.hit = (OPS.hit + d + n) % n;
+  showHit(hs[OPS.hit]);
+  return { i: OPS.hit, n };
+}
+
+// 찾은 뒤 글을 고쳤으면 자리가 어긋났을 수 있다 — 그 자리 글이 아직 찾는 말인지
+function hitStill(h) {
+  if (!h.host.isConnected) return false;
+  const s = String(DeckOps.rangeOf(h.host, h.a, h.b));
+  return OPS.mc ? s === OPS.q : s.toLowerCase() === OPS.q.toLowerCase();
+}
+
+// 지금 찾은 곳을 바꾸고 그 뒤의 다음 곳으로(바꾼 글에 찾는 말이 들어 있어도 같은 자리를 다시 고르지 않는다)
+function findReplace(text) {
+  const h = OPS.hits[OPS.hit];
+  if (!h) return findStep(1);
+  if (!hitStill(h)) {                           // 다시 찾아 지금 장부터 보여 주기만 한다
+    findSearch(OPS.q, OPS.mc);
+    return findStep(1);
+  }
+  flushSlide();
+  DeckOps.replaceChars(h.host, h.a, h.b, text);
+  commit(h.i);
+  findSearch(OPS.q, OPS.mc);
+  const n = OPS.hits.length;
+  if (!n) { updateFrame(); return { i: 0, n: 0 }; }
+  const end = h.a + text.length;
+  const k = OPS.hits.findIndex((x) => x.hi > h.hi || (x.hi === h.hi && x.a >= end));
+  OPS.hit = (k >= 0 ? k : 0) - 1;
+  return findStep(1);
+}
+
+function findReplaceAll(text) {
+  if (!OPS.q) return 0;
+  flushAll();
+  const touched = new Set();
+  let c = 0;
+  for (const h of findHosts()) {
+    const k = DeckOps.replaceAll(h.host, OPS.q, text, OPS.mc);
+    if (k) { c += k; touched.add(h.i); }
+  }
+  const ops = [];
+  for (const i of touched) {                    // 모든 장의 바꿈을 되돌리기 한 칸으로
+    const a = ED.snap[i], b = snap(i);
+    if (a !== b) { ED.snap[i] = b; ops.push({ i, a, b }); }
+  }
+  pushUndo(ops);
+  findSearch(OPS.q, OPS.mc);
+  updateFrame();
+  return c;
+}
+
+// 찾기 창을 닫으면 찾은 곳을 고른 글로 남긴다(PowerPoint 와 같다)
+function findClosed() {
+  const h = OPS.hits[OPS.hit];
+  clearHit();
+  if (!h || !h.host.isConnected || h.i !== ED.cur) return;
+  h.host.focus({ preventScroll: true });
+  DeckOps.selectChars(h.host, h.a, h.b);
+}
+
+function openFind(mode) {
+  if (!OPS.find) return;
+  const t = liveRange();
+  const seed = t && !t.range.collapsed ? String(t.range).trim() : "";
+  OPS.find.open(mode, seed.length <= SEED_MAX && !/\n/.test(seed) ? seed : "");
+}
+
+/* ── 리본·단축키 ─────────────────────────────────────────────────── */
+function opsState() {
+  const el = ED.sel, k = el ? kindOf(el) : "", t = liveRange() || keptView();
+  let text = null, canText = false;
+  if (t && (!el || t.box === el)) { text = DeckOps.textState(t.host, t.range); canText = true; }
+  else {
+    const hs = boxHosts(el);
+    if (hs.length) { text = DeckOps.textState(hs[0], null); canText = true; }
+  }
+  const any = !!el && k !== "wg";
+  return { text, canText, canBox: !!el, box: boxy(el) ? DeckOps.boxFmt(el) : null, painter: !!OPS.painter, canDup: any,
+    canFind: true, canFill: FILL_ON.has(k), canLine: !!el && lineOk(el, k), canShape: true, canFlip: FLIP_ON.has(k), canRotate: !ROT_OFF.has(k) };
+}
+
+function onRibbon(cmd, arg) {
+  if (!ED.on) return;
+  const g = DeckOps.groupOf(cmd);
+  if (cmd === "shape") addShape(arg);
+  else if (cmd === "dup") dupSel();
+  else if (cmd === "fmtCopy") startPaint(arg === "sticky");
+  else if (cmd === "find" || cmd === "replace") openFind(cmd);
+  else if (g === "text" || g === "para") runText(cmd, arg);
+  else runBox(cmd, arg);
+}
+
+// PowerPoint 단축키(DeckOps.keyCmd). 처리했으면 true — 리본·찾기 창·노트의 입력 칸 키는 그 칸 몫
+function opsKey(e, t, typing) {
+  if (e.key === "Escape" && OPS.painter) { stopKey(e); endPaint("서식 복사를 껐습니다."); return true; }
+  const cmd = DeckOps.keyCmd(e);
+  if (!cmd || (t && (t.closest("[data-ed-ui]") || (ED.notesBox && ED.notesBox.contains(t))))) return false;
+  if (typing && !hostBox(t)) return false;
+  if (typing && (cmd === "rotL15" || cmd === "rotR15")) {        // 글을 쓰는 중에는 상자를 돌리지 않는다
+    if (DeckOps.MAC) return false;                                // Option+←/→ = 낱말 단위 이동
+    e.preventDefault();                                           // Alt+← = 브라우저 '뒤로' — 편집 중인 덱을 떠나지 않게
+    return true;
+  }
+  const g = DeckOps.groupOf(cmd);
+  if (cmd === "find" || cmd === "replace") openFind(cmd);
+  else if (cmd === "fmtCopy") {
+    const f = pickNow();
+    if (!f) return false;
+    OPS.fmt = f;
+    msg("서식을 복사했습니다 — 입힐 글이나 상자를 고르고 Ctrl+Shift+V.", "ok", 6000);
+  } else if (cmd === "fmtPaste") {
+    if (!OPS.fmt) return false;
+    if (!pasteFmt()) msg("여기에는 입힐 서식이 없습니다.", "warn", 5000);
+  } else if (g === "text" || g === "para") {
+    if (!typing && !boxHosts(ED.sel).length) return false;
+    runText(cmd);
+  } else if (!ED.sel) return false;
+  else if (cmd === "dup") dupSel();
+  else runBox(cmd);
+  stopKey(e);
+  return true;
+}
+
+function refreshSoon() {
+  if (!OPS.rb || OPS.raf) return;
+  OPS.raf = requestAnimationFrame(() => {
+    OPS.raf = 0;
+    if (ED.on) OPS.rb.refresh();
+  });
+}
+
+// 편집을 끌 때 — 열린 메뉴·찾기 창·서식 복사를 닫는다
+function opsOff() {
+  if (OPS.rb) OPS.rb.closeMenus();
+  if (OPS.find) OPS.find.close();
+  endPaint("");
+  clearHit();
+}
+
+function buildOps() {
+  if (typeof DeckRibbon === "undefined") return;
+  OPS.rb = DeckRibbon.build({ onCmd: onRibbon, state: opsState, keep: keepSel, vars: RIBBON_VARS, attrs: UI_ATTRS });
+  OPS.rb.el.classList.add("ed-rb");
+  UI.bar.insertBefore(OPS.rb.el, UI.msgEl);
+  OPS.find = DeckRibbon.findPanel({ vars: RIBBON_VARS, attrs: UI_ATTRS, search: findSearch, step: findStep, replace: findReplace,
+    replaceAll: findReplaceAll, onClose: findClosed });
+  document.addEventListener("selectionchange", refreshSoon);
+  ED.stage.addEventListener("pointerdown", onPaintDown, true);
+  document.addEventListener("pointerup", onPaintUp);
+}
+
+/* 덱 편집기(5/5) — 편집 단추·도구 막대(+ 리본, ed-ops)·알림 줄·초안 알림, 키(PowerPoint 단축키·되돌리기·저장·지우기·옮기기),
+   장 넘김 따라가기, 시작. */
 
 const UI = { btn: null, bar: null, msgEl: null, msgT: 0, file: null, banner: null, saving: false, b: {} };
-const HINT = "글은 눌러서 바로 고칩니다 · 테두리나 '끌어서 옮기기'를 끌면 옮겨집니다 · Ctrl+C 복사(다른 덱·PowerPoint 에도 붙음) · Delete 지우기 · Ctrl+Z 되돌리기 · Ctrl+S 저장";
+const HINT = "글은 눌러서 바로 고칩니다 · 테두리나 '끌어서 옮기기'를 끌면 옮겨집니다 · 서식은 리본이나 PowerPoint 단축키로 · Ctrl+C 복사(다른 덱·PowerPoint 에도 붙음) · Delete 지우기 · Ctrl+Z 되돌리기 · Ctrl+S 저장";
 const HINT_TOUCH = "글은 눌러서 바로 고치고, 테두리나 '끌어서 옮기기'를 끌어 옮깁니다";   // 자판이 없는 터치 화면 — 단축키 안내를 빼고
 const TOOLS = [
   ["addText", "글상자 넣기", "새 글상자를 이 장 가운데에 넣습니다"],
@@ -6851,10 +9245,6 @@ const TOOLS = [
   "|",
   ["copy", "복사", "고른 요소를 복사합니다 — 다른 덱이나 PowerPoint·Word·한글에 붙여 넣을 수 있고 클립아트에도 담깁니다 (Ctrl+C)"],
   ["clip", "클립아트", "복사해 둔 글·그림 보관함을 열고 닫습니다 — 다른 장·다른 덱에 다시 넣거나 다른 프로그램으로 복사합니다"],
-  "|",
-  ["smaller", "글자 −", "고른 상자의 글자를 줄입니다"],
-  ["bigger", "글자 +", "고른 상자의 글자를 키웁니다"],
-  ["bold", "굵게", "고른 글(고른 글이 없으면 상자 전체)을 굵게·보통으로"],
   "|",
   ["undo", "되돌리기", "Ctrl+Z"],
   ["redo", "다시 하기", "Ctrl+Y · Ctrl+Shift+Z"],
@@ -6884,16 +9274,15 @@ function notesSame(i) { return !ED.notes || (ED.notes[i] || "") === (ED.origNote
 function sync() {
   if (!UI.bar) return;
   const b = UI.b, sel = ED.sel, k = sel ? kindOf(sel) : "";
-  const texty = !!sel && (k === "tx" || k === "tb") && !!sel.querySelector(".pp");
   b.del.disabled = !sel;
   b.copy.disabled = !sel || k === "wg";
   b.clip.setAttribute("aria-pressed", String(CLIP.open));
-  b.smaller.disabled = b.bigger.disabled = b.bold.disabled = !texty;
   b.undo.disabled = !ED.undo.length && !ED.pend && !ED.pendN;
   b.redo.disabled = !ED.redo.length;
   b.reset.disabled = ED.snap[ED.cur] === ED.orig[ED.cur] && !ED.pend && !ED.pendN && notesSame(ED.cur);
   b.save.disabled = UI.saving;
   clipWarmSoon();
+  refreshSoon();
 }
 
 function buildBar() {
@@ -6921,27 +9310,15 @@ function buildBar() {
   return bar;
 }
 
-function fontTool(sel, f) {
-  flushSlide();
-  const fs = scaleFont(sel, f);
-  fitNew(sel);
-  updateFrame();
-  commit(ED.cur);
-  if (fs) msg("글자 크기 " + fs + "px (상자의 첫 문단 기준)");
-}
-
 function onTool(e) {
   const btn = e.target.closest("button[data-act]");
   if (!btn || btn.disabled) return;
   const act = btn.getAttribute("data-act");
-  const sel = ED.sel;
   if (act === "addText") addText();
   else if (act === "addImage") UI.file.click();
   else if (act === "del") removeSel();
   else if (act === "copy") copySel(false);
   else if (act === "clip") clipToggle();
-  else if ((act === "smaller" || act === "bigger") && sel) fontTool(sel, act === "bigger" ? SIZE_STEP : 1 / SIZE_STEP);
-  else if (act === "bold" && sel) { flushSlide(); msg(toggleBold(sel)); commit(ED.cur); }
   else if (act === "undo") undo();
   else if (act === "redo") redo();
   else if (act === "reset") resetSlide();
@@ -6985,6 +9362,7 @@ function setMode(on) {
     endDrag();
     flushAll();
     clipToggle(false);
+    opsOff();
   }
   ED.on = want;
   document.documentElement.classList.toggle("ed-on", want);
@@ -7036,6 +9414,7 @@ function wrapWgKey() {
     const t = e.target instanceof Element ? e.target : null;
     if (ED.on && t) {
       if (t.isContentEditable) return !/^Page(Up|Down)$/.test(e.key);
+      if (t.closest("[data-ed-ui]") && t.matches("input:not([type=checkbox]), select, textarea")) return true;   // 찾기 칸·고르기 칸의 키는 그 칸 몫
       if (t.closest("[data-ed-ui]") && t.matches("button, input")) return e.key === " " || e.key === "Enter";
     }
     return typeof prev === "function" ? prev(e) : false;
@@ -7075,7 +9454,12 @@ function onKey(e) {
     if (isE && !typing) { e.preventDefault(); setMode(true); }
     return;
   }
-  if (mod && !e.altKey) { modKey(e); return; }
+  if (opsKey(e, t, typing)) return;                              // PowerPoint 단축키(리본 명령) — ed-ops
+  if (mod && !e.altKey) {
+    const uiInput = t && t.closest("[data-ed-ui]") && t.matches("input, select, textarea");
+    if (!(uiInput && /^[zy]$/i.test(e.key))) modKey(e);          // 찾기 칸 안의 Ctrl+Z 는 그 칸의 되돌리기
+    return;
+  }
   if (typing) {
     if (e.key === "Escape" && t.isContentEditable) {           // 글 고치기를 멈추고 상자 고르기로
       e.preventDefault();
@@ -7157,6 +9541,7 @@ function init() {
   injectCss();
   buildFrame();
   UI.bar = buildBar();
+  buildOps();
   UI.btn = mk("button", { id: "bEdit", type: "button", "aria-pressed": "false", "data-ed-ui": "", title: "글·그림 고치기 (E)" }, "편집");
   nav.appendChild(UI.btn);
   nav.parentNode.insertBefore(UI.bar, nav.nextSibling);
