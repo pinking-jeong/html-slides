@@ -5,7 +5,7 @@ import { h } from './util.js';
 import { A, LOCK } from './deck.js';
 import { firstFamily } from './format.js';
 import {
-  applyLook, canCopy, colorHex, copyToAll, counterparts, deckStyles, matchAll, paintAll, removeAll, roleLook, roles,
+  applyLook, canCopy, colorHex, copyToAll, counterparts, deckStyles, matchAll, nameOf, paintAll, removeAll, roleLook, roles,
   roleTargets, sameBoxes, themeVars, withVar, ROLE_NAMES, FONTS,
 } from './master.js';
 
@@ -240,7 +240,7 @@ export class Master {
     $('mMatch').disabled = !cp || (!cp.pairs.length && !cp.skipped);
     $('mRemove').disabled = !b;
     $('mRemove').textContent = '같은 이름 상자 모두 지우기';
-    const name = b ? b.getAttribute('data-name') : '';
+    const name = b ? nameOf(b) : '';
     $('mBoxHelp').textContent = !b ? '장에서 상자(꼬리말·로고·쪽 번호 등)를 누른 뒤 여세요.'
       : `고른 상자: ${name ? `‘${ROLE_NAMES[name] || name}’ 상자` : b.localName} — 모든 장에 같은 상자 ${same}개가 더 있습니다.`
         + (copyable ? '' : ' 장 바로 아래 상자가 아니어서 모든 장에 넣지는 못합니다.');

@@ -418,6 +418,7 @@ export class Formatter {
       e.size.value = '';
       e.font.value = '';
       for (const b of [e.bold, e.italic, e.under, e.strike, e.left, e.center, e.right, e.justify]) b.setAttribute('aria-pressed', 'false');
+      if (this.after) this.after(null);
       return;
     }
     const { host, range } = parts[0];
@@ -444,6 +445,7 @@ export class Formatter {
     for (const [b, v] of [[e.left, 'left'], [e.center, 'center'], [e.right, 'right'], [e.justify, 'justify']]) {
       b.setAttribute('aria-pressed', String(align === v));
     }
+    if (this.after) this.after(parts[0]);    // 막대의 다른 칸(위·아래 첨자·줄 간격 — textops.js)도 지금 서식으로
   }
 }
 
@@ -853,13 +855,13 @@ function restoreAttr(el, style) {
 /* ---------- 명령 뒤 정리 — 이번 명령이 만들거나 바꾼 요소만 */
 
 // 글 칸의 덱 요소(서식 요소가 아닌 것) 가운데 바뀌기 전 style 을 아직 적어 두지 않은 것과 그 style
-function styled(host) {
+export function styled(host) {
   return [host, ...host.querySelectorAll('*')].filter((el) => !FORMAT.has(el.tagName) && !el.hasAttribute(A.st))
     .map((el) => [el, el.getAttribute('style')]);
 }
 
 // 명령이 style 을 바꾼 덱 요소에 바뀌기 전 값을 적어 둔다(data-hse-st — 저장할 때 뗀다)
-function remember(was, doc) {
+export function remember(was, doc) {
   for (const [el, style] of was) {
     if (!el.isConnected || el.getAttribute('style') === style) continue;
     // 브라우저가 고쳐 쓰기만 하고 값은 같으면(#222 → rgb(34, 34, 34) 등) 덱의 글자 그대로 둔다

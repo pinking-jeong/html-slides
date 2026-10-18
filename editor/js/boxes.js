@@ -7,7 +7,8 @@
    - 지우기·복제: 고른 상자가 없으면 흐름 덱에서 글을 고치던 칸(문단·제목 — 목록은 그 항목)을. 잠근 상자는 지우지 않는다.
    - 복사·잘라내기·붙여 넣기는 시스템 클립보드에 덱 공통 꼴(deckclip.js)로 쓰고 읽는다 — 다른 장·다른 덱·다른 편집기(빌더 덱
      안의 편집기 등)에는 상자로, PowerPoint·Word·한글에는 글·그림·표로 붙는다. 같은 꼴 덱(빌더 ↔ 빌더, 흐름 ↔ 흐름)이면
-     상자를 그대로, 아니면 혼자 서는 꼴(서식을 인라인으로 든 것)을 이 덱의 상자로 바꿔 넣는다. 받은 것은 늘 거른다.
+     상자를 그대로, 아니면 혼자 서는 꼴(서식을 인라인으로 든 것)을 이 덱의 상자로 바꿔 넣는다. 받은 것은 늘 거른다. 돌리거나
+     뒤집은 상자는 돌림·대칭째(글상자는 돌림만), 덱 편집기가 그린 선·화살표는 선째 옮긴다.
    - 그림 넣기도 여기서(insert.js 가 그림을 읽고 놓는다). */
 
 import { textHosts } from './canvas.js';
@@ -52,8 +53,17 @@ const copyMsg = (n, ok) => `${n > 1 ? `상자 ${n}개를` : '상자를'} 복사�
   ? '다른 장·다른 덱에서 Ctrl+V 로 붙이거나 PowerPoint·Word·한글에 붙여 넣을 수 있습니다.'
   : '이 편집기의 ‘붙여 넣기’로 붙습니다. 다른 덱·프로그램에 붙이려면 상자를 고른 채 Ctrl+C 를 누르세요.'}`;
 
+// 받은 항목의 돌림·대칭(rot·flip)을 상자에 다시 입힌다 — CSS rotate·scale(편집기 셋이 쓰는 꼴, 빌더 덱의 DeckClip.toBuilder 와
+// 같게). flip: 뒤집기도 입힐지 — 글상자는 돌리기만(글이 거울에 비쳐 보인다), 표는 부르지 않는다(그대로)
+function turnTo(el, it, flip) {
+  if (!el) return el;
+  if (it.rot) el.style.rotate = `${it.rot}deg`;
+  if (flip && it.flip) el.style.scale = `${/h/.test(it.flip) ? -1 : 1} ${/v/.test(it.flip) ? -1 : 1}`;
+  return el;
+}
+
 // 흐름 덱에 넣을 상자 — 장 위에 절대 배치한 글상자(div[data-hs-box] > p — 상자째 한 글 칸), 그림(img[data-hs-box]),
-// 표·차트·그 밖의 것을 든 상자. it 은 거르지 않은 바깥 자료라 공통 거르기를 먼저 지난다.
+// 선·화살표(svg[data-hs-box]), 표·차트·그 밖의 것을 든 상자. it 은 거르지 않은 바깥 자료라 공통 거르기를 먼저 지난다.
 function flowNode(d, it, k) {
   const pic = (src, alt) => {
     if (!src || !/^data:image\//.test(src)) return null;
@@ -64,9 +74,18 @@ function flowNode(d, it, k) {
     im.style.objectFit = 'contain';
     return im;
   };
-  if (it.type === 'image') return pic(it.src || it.office, it.alt || it.name);
+  if (it.type === 'image') return turnTo(pic(it.src || it.office, it.alt || it.name), it, true);
   const root = DeckClip.clean(it.html, d).firstElementChild;
   if (root) DeckClip.scaleNode(root, k);
+  // 덱 편집기가 그린 선·화살표 — 선 이름표를 되붙여 이 덱에서도 선으로(크기를 바꾸면 다시 그리고 ‘윤곽선 ▾’이 먹는다). 안쪽의
+  // 계산된 서식은 걷는다 — 선 색·굵기·대시는 속성으로 적혀 있고, 서식이 남으면 속성을 가린다(도형 넣기의 선과 같은 꼴)
+  if (root && it.line && root.localName === 'svg') {
+    root.setAttribute(FREE_BOX, '');
+    root.setAttribute('data-name', it.line.arrow ? 'deckops:arrow' : 'deckops:line');
+    for (const n of root.querySelectorAll('[style]')) n.removeAttribute('style');
+    root.style.overflow = 'visible';
+    return turnTo(root, it, true);
+  }
   const box = d.createElement('div');
   box.setAttribute(FREE_BOX, '');
   if (root && it.type === 'text') {
@@ -79,20 +98,20 @@ function flowNode(d, it, k) {
         p.innerHTML = para.html;               // 거른 뿌리에서 나온 글(스크립트·이벤트 속성 없음)
         box.append(p);
       }
-      return box;
+      return turnTo(box, it, false);
     }
   }
   if (root && (it.type === 'table' || (it.type === 'graphic' && root.localName === 'svg'))) {
     root.style.width = '100%';
     if (root.localName === 'svg') root.style.height = '100%';
     box.append(root);
-    return box;
+    return it.type === 'table' ? box : turnTo(box, it, true);
   }
   const im = pic(it.png, it.name);
-  if (im) return im;
+  if (im) return turnTo(im, it, true);
   if (!root) return null;
   box.append(root);
-  return box;
+  return turnTo(box, it, true);
 }
 
 // 색 글('#rgb'·'#rrggbb'·'rgb(…)'·'rgba(…)') → [r, g, b, a] 또는 null
@@ -429,14 +448,15 @@ export class Boxes {
     return DeckClip.capture(list, this.clipOpts(this.wholeGroups(list)));
   }
 
-  // 고르면 바로 그림을 준비해 둔다(차트·도형은 PNG 로, 주소로 든 그림은 data URI 로) — 복사 이벤트 안에서는 기다릴 수 없다
-  // 고른 것·크기가 그대로면 다시 하지 않는다(글을 고치는 동안 selectionchange 마다 불린다)
-  warmSoon() {
+  // 고르면 바로 그림을 준비해 둔다(차트·도형은 PNG 로, 주소로 든 그림은 data URI 로, 돌리거나 뒤집은 것은 다른 프로그램이 받을
+  // 돌린 그림도) — 복사 이벤트 안에서는 기다릴 수 없다. 고른 것·크기가 그대로면 다시 하지 않는다(글을 고치는 동안
+  // selectionchange 마다 불린다). force: 틀을 다시 맞출 때(크기·돌림·색을 바꾼 뒤) — 바뀐 것만 다시 뽑는 일은 공통 모듈이 가린다
+  warmSoon(force = false) {
     clearTimeout(this.warmT);
     const els = this.pick.boxes;
     if (!els.length) return;
     const key = els.map((b) => `${b.offsetWidth}x${b.offsetHeight}`).join(',');
-    if (this.warmKey === key && this.warmed.length === els.length && this.warmed.every((b, i) => b === els[i])) return;
+    if (!force && this.warmKey === key && this.warmed.length === els.length && this.warmed.every((b, i) => b === els[i])) return;
     this.warmT = setTimeout(() => {
       if (!els.every((b) => b.isConnected)) return;
       this.warmed = els.slice();

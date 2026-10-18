@@ -243,10 +243,14 @@ const homeOf = (model, el) => model.slides.find((s) => s.contains(el)) || null;
 // 정할 수 없다)
 export const canCopy = (model, box) => !!box.parentElement && model.slides.includes(box.parentElement);
 
+// 상자 이름 — 덱 공통 편집 명령이 선·화살표에 다는 꼴 표시(deckops:line·deckops:arrow)는 상자 이름이 아니다(같은 꼴로 찾는다
+// — 아니면 따로 넣은 선들이 모두 한 상자가 되어, 모든 장에서 지우기가 다른 장의 선까지 지운다)
+export const nameOf = (box) => { const n = box.getAttribute('data-name'); return n && !n.startsWith('deckops:') ? n : ''; };
+
 // 장 s 안에서 box 와 같은 상자 — 이름(data-name)이 있으면 같은 이름, 없으면 같은 꼴(sig). 장 바로 아래 상자는 장 바로
 // 아래에서만 찾는다(장 안 깊은 곳의 같은 이름 요소와 섞지 않게).
 function sameIn(model, s, box, sig) {
-  const name = box.getAttribute('data-name');
+  const name = nameOf(box);
   const scope = canCopy(model, box) ? ':scope > ' : '';
   if (name) return Array.from(s.querySelectorAll(`${scope}[data-name="${CSS.escape(name)}"]`));
   const cls = box.getAttribute('class') || '';
@@ -255,7 +259,7 @@ function sameIn(model, s, box, sig) {
     .filter((el) => (el.getAttribute('class') || '') === cls && el.textContent.trim() === text && signature(el) === sig);
 }
 
-const sigOf = (box) => (box.getAttribute('data-name') ? '' : signature(box));
+const sigOf = (box) => (nameOf(box) ? '' : signature(box));
 
 // 모든 장(이 장 포함)에서 box 와 같은 상자 — box 자신은 빼고
 export function sameBoxes(model, box) {

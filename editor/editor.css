@@ -467,6 +467,18 @@ a { color: var(--accent); }
 .menu [role="menuitem"].danger:not(:disabled) { color: var(--err); }
 .menu [role="menuitem"] svg { flex: none; width: 16px; height: 16px; }
 .menu-wide { margin-top: 8px; justify-content: center; }
+.menu-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.menu-grid [role="menuitem"].on { border-color: var(--accent); background: var(--accent-soft); }
+/* 도형 채우기·윤곽선의 색 칸 — 칸의 색은 --sw(누르거나 지나가도 그 색 그대로) */
+.menu-swatches { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px; margin: 0 2px 6px; }
+.menu .menu-swatches [role="menuitem"] {
+  min-height: 0; aspect-ratio: 1; padding: 0; border: 1px solid var(--line2); border-radius: 4px; background: var(--sw);
+}
+.menu .menu-swatches [role="menuitem"]:hover:not(:disabled), .menu .menu-swatches [role="menuitem"]:focus-visible {
+  border-color: var(--accent); background: var(--sw); outline: 1px solid var(--accent); outline-offset: 1px;
+}
+.menu .menu-swatches [role="menuitem"].on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fmt select.fspacing { max-width: 96px; }
 
 /* ---------- 좁은 화면: 차례를 위로 */
 @media (max-width: 760px) {

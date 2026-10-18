@@ -1,11 +1,16 @@
 /* 배치 — 고른 상자(여럿이면 함께)를 맞추고(왼쪽·가운데·오른쪽 끝, 위·가운데·아래 끝), 같은 간격으로 늘어놓고, 앞뒤 순서를
-   바꾸고, 묶고(묶음 — data-hs-group), 잠근다(data-hs-lock). 묶음·잠금은 덱 파일에 남아 다시 열어도 그대로다.
-   - 맞추기: 상자(또는 묶음) 하나는 장에, 여럿은 고른 것끼리. 잠근 상자는 기준으로만 쓰고 옮기지 않는다.
+   바꾸고, 돌리고 뒤집고, 묶고(묶음 — data-hs-group), 잠근다(data-hs-lock). 묶음·잠금은 덱 파일에 남아 다시 열어도 그대로다.
+   - 맞추기: 상자(또는 묶음) 하나는 장에, 여럿은 고른 것끼리. 잠근 상자는 기준으로만 쓰고 옮기지 않는다. 돌린 상자는 보이는
+     테두리로 잰다.
    - 같은 간격: 셋 이상 — 양 끝 상자는 두고 가운데 상자들을 옮겨 사이 간격을 같게.
    - 앞뒤 순서: 장 안의 옮길 수 있는 상자(빌더 상자·편집기가 넣은 글상자)끼리의 겹침 순서(문서 순서)를 바꾼다.
+   - 회전·대칭: 고른 상자마다 제 가운데를 두고(여럿이면 저마다) — 회전은 CSS rotate, 대칭은 scale 속성(덱 공통 편집 명령과
+     같게 — PPTX 받기는 PowerPoint 의 회전·대칭으로 옮긴다). 표·시연 화면은 돌리지도 뒤집지도 않고(PPTX 의 표는 돌지 않는다),
+     글이 든 상자는 대칭하지 않는다(글이 거울에 비쳐 보인다).
    묶음은 한 덩어리로 맞추고 늘어놓는다. 하나하나가 되돌리기 한 칸. */
 
 import { GROUP, LOCK, newGroupId } from './deck.js';
+import DeckOps from './deckops.js';
 import { Menu } from './menu.js';
 
 const LABEL = {
@@ -38,6 +43,8 @@ export class Arrange {
     else if (kind === 'lock') this.lock(true);
     else if (kind === 'unlock') this.lock(false);
     else if (kind === 'all') this.selectAll();
+    else if (kind === 'turn') this.turn(Number(arg) || 0);
+    else if (kind === 'flip') this.flip(arg);
   }
 
   /* ---------- 무엇을 */
@@ -47,7 +54,7 @@ export class Arrange {
   // 지금 장의 옮길 수 있는 상자들(문서 순서 = 겹침 순서)
   stack() { return Array.from(this.model.current.children).filter((c) => this.pick.movable(c)); }
 
-  // 고른 상자를 묶음째 단위로 — [{els, gs, g: 감싼 자리·크기, locked}]
+  // 고른 상자를 묶음째 단위로 — [{els, gs, g: 보이는 테두리(돌린 상자는 돌린 모양)를 감싼 자리·크기, locked}]
   units() {
     const out = [];
     const byGroup = new Map();
@@ -63,21 +70,24 @@ export class Arrange {
     }
     for (const u of out) {
       u.gs = u.els.map((b) => this.pick.geom(b));
-      const x = Math.min(...u.gs.map((g) => g.x));
-      const y = Math.min(...u.gs.map((g) => g.y));
-      const r = Math.max(...u.gs.map((g) => g.x + g.w));
-      const btm = Math.max(...u.gs.map((g) => g.y + g.h));
+      const vs = u.els.map((b) => this.pick.seen(b));
+      const x = Math.min(...vs.map((g) => g.x));
+      const y = Math.min(...vs.map((g) => g.y));
+      const r = Math.max(...vs.map((g) => g.x + g.w));
+      const btm = Math.max(...vs.map((g) => g.y + g.h));
       u.g = { x, y, w: r - x, h: btm - y };
       u.locked = u.els.some((b) => this.pick.locked(b));
     }
     return out;
   }
 
-  // 단위를 (dx, dy) 만큼 옮긴다 — 움직인 축만 적는다(다른 축의 소수 자리 값 116.88px 등을 반올림해 덮지 않게)
+  // 단위를 (dx, dy) 만큼 옮긴다 — 움직인 축만 적는다(다른 축의 소수 자리 값 116.88px 등을 반올림해 덮지 않게). 돌린 상자의
+  // 보이는 테두리는 소수 자리라 옮길 거리도 0.01px 까지만.
   shift(u, dx, dy) {
-    const keys = `${dx ? 'x' : ''}${dy ? 'y' : ''}`;
+    const [mx, my] = [dx, dy].map((v) => Math.round(v * 100) / 100);
+    const keys = `${mx ? 'x' : ''}${my ? 'y' : ''}`;
     if (!keys) return;
-    u.els.forEach((b, i) => this.pick.apply(b, { ...u.gs[i], x: u.gs[i].x + dx, y: u.gs[i].y + dy }, keys));
+    u.els.forEach((b, i) => this.pick.apply(b, { ...u.gs[i], x: u.gs[i].x + mx, y: u.gs[i].y + my }, keys));
   }
 
   // 지금 장을 고치는 한 번(되돌리기 한 칸) — 끌기·글 고치기를 마치고(남은 글 고르기도 푼다 — 서식이 고른 상자 모두에 가게),
@@ -94,6 +104,7 @@ export class Arrange {
     const boxes = this.movables();
     const us = this.units();
     const stack = this.stack();
+    const free = boxes.filter((b) => !this.pick.locked(b));
     return {
       units: us.length,
       free: us.filter((u) => !u.locked).length,
@@ -101,7 +112,10 @@ export class Arrange {
       others: stack.some((c) => !boxes.includes(c)),
       grouped: boxes.some((b) => b.hasAttribute(GROUP)),
       locked: boxes.some((b) => this.pick.locked(b)),
-      unlocked: boxes.some((b) => !this.pick.locked(b)),
+      unlocked: free.length > 0,
+      turnable: free.some((b) => this.pick.canTurn(b)),
+      turned: free.some((b) => this.pick.canTurn(b) && DeckOps.angle(b) !== 0),
+      flippable: free.some((b) => this.pick.canFlip(b)),
       any: stack.length > 0,
     };
   }
@@ -117,8 +131,14 @@ export class Arrange {
       lock: s.unlocked,
       unlock: s.locked,
       all: s.any,
+      turn: s.turnable,
+      'turn:0': s.turned,
+      flip: s.flippable,
     };
-    for (const b of menu.querySelectorAll('[role="menuitem"]')) b.disabled = !on[b.dataset.act.split(':')[0]];
+    for (const b of menu.querySelectorAll('[role="menuitem"]')) {
+      const act = b.dataset.act;
+      b.disabled = !(act in on ? on[act] : on[act.split(':')[0]]);
+    }
   }
 
   /* ---------- 맞추기 · 같은 간격 */
@@ -237,6 +257,44 @@ export class Arrange {
     this.canvas.arm();
     this.msg({ front: '맨 앞으로 옮겼습니다.', forward: '한 칸 앞으로 옮겼습니다.', backward: '한 칸 뒤로 옮겼습니다.',
       back: '맨 뒤로 옮겼습니다.' }[how], '', 3000);
+  }
+
+  /* ---------- 회전 · 대칭 — 고른 상자마다 제 가운데를 두고 */
+
+  // by° 만큼 더 돌린다(오른쪽이 +) — 0 이면 회전 없애기. 잠근 상자·표·시연 화면은 두고 알린다. 돌렸으면 true.
+  turn(by) {
+    const all = this.movables();
+    if (!all.length) {
+      this.msg('돌릴 상자를 고르세요 — Shift 를 누른 채 누르면 여럿을 고릅니다.', 'warn');
+      return false;
+    }
+    const free = all.filter((b) => !this.pick.locked(b) && this.pick.canTurn(b));
+    if (!free.length) {
+      this.msg(all.every((b) => this.pick.locked(b)) ? '잠근 상자는 돌리지 않습니다 — 배치 ▾ 의 ‘잠금 풀기’로 푼 뒤 돌리세요.'
+        : '표·시연 화면은 돌리지 않습니다(PowerPoint 의 표도 돌지 않습니다).', 'warn');
+      return true;
+    }
+    const changed = this.edit(() => { for (const b of free) DeckOps.setAngle(b, by ? DeckOps.angle(b) + by : 0); });
+    const kept = all.length - free.length;
+    const what = !by ? '회전을 없앴습니다' : `${by > 0 ? '오른쪽' : '왼쪽'}으로 ${Math.abs(by)}° 돌렸습니다`;
+    if (!changed) this.msg('돌린 상자가 없습니다.', '', 3000);
+    else this.msg(`${free.length > 1 ? `상자 ${free.length}개를 저마다 ` : ''}${what}${kept ? ` — 잠근 상자·표 ${kept}개는 그대로 두었습니다` : ''}.`, '', 3000);
+    return true;
+  }
+
+  // axis: 'h' 좌우 · 'v' 상하. 글이 든 상자·표·시연 화면·잠근 상자는 두고 알린다.
+  flip(axis) {
+    const all = this.movables();
+    const ok = all.filter((b) => !this.pick.locked(b) && this.pick.canFlip(b));
+    if (!ok.length) {
+      this.msg(all.length ? '글이 든 상자·표·잠근 상자는 뒤집지 않습니다(글이 거울에 비쳐 보입니다) — 그림·도형·선을 고르세요.'
+        : '뒤집을 상자를 고르세요.', 'warn');
+      return;
+    }
+    this.edit(() => { for (const b of ok) DeckOps.flip(b, axis); });
+    const kept = all.length - ok.length;
+    this.msg(`${axis === 'v' ? '상하' : '좌우'}로 뒤집었습니다${ok.length > 1 ? `(상자 ${ok.length}개)` : ''}`
+      + `${kept ? ` — 글이 든 상자·표·잠근 상자 ${kept}개는 그대로 두었습니다` : ''}.`, '', 3000);
   }
 
   /* ---------- 묶기 · 잠그기 · 모두 고르기 */

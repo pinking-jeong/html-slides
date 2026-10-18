@@ -1,16 +1,22 @@
-/* 서식 복사(서식 붓) — 고른 글(캐럿만 두었으면 그 자리 글)의 글자 모양을, 상자를 골랐으면 상자 모양(바탕·테두리·둥근 모서리·
-   안쪽 여백·글 세로 맞춤·그림자 등 — 자리·크기는 빼고)과 그 안 글의 모양을 집어 다음에 고르는 글·상자에 입힌다.
+/* 서식 복사(서식 붓) — 고른 글(캐럿만 두었으면 그 자리 글)의 글자 모양을, 상자를 골랐으면 상자 모양(바탕·테두리·안쪽 여백·
+   글 세로 맞춤·그림자 등 — 자리·크기와 꼴(둥근 모서리·타원)은 빼고 — PowerPoint 도 꼴은 옮기지 않는다)과 그 안 글의 모양을
+   집어 다음에 고르는 글·상자에 입힌다.
    - 단추를 한 번 누르면 한 번 입히고 꺼지고, 두 번 누르면(더블클릭) Esc 를 누르거나 단추를 다시 누를 때까지 여러 번.
    - 입힐 곳: 끌어 고른 글은 그 글에만, 글 칸을 누르면 그 글 칸 전체에, 상자 모양을 집었으면 누른 상자째(상자 모양 + 그 안의 글).
      상자를 끌어 옮기거나 고르기를 바꾼(Shift+누르기·빈 곳에서 끌어 감싸 고르기) 뗌에는 입히지 않는다.
    - 단축키: Ctrl+Shift+C 로 집고, 입힐 글·상자를 고른 뒤 Ctrl+Shift+V 로 입힌다(상자를 여럿 골랐으면 모두에).
+   - 선·화살표(도형 넣기)는 선 서식(색·두께·대시 — 덱 공통 편집 명령)으로 주고받는다: 선 ↔ 선은 선 서식, 상자 → 선은 그 상자의
+     윤곽선, 선 → 상자는 그 선을 윤곽선으로(PowerPoint 와 같게). 표·시연 화면·덱이 그린 SVG 에는 상자 모양을 입히지 않는다(글
+     모양은 입힌다).
    글자 모양은 먼저 입힐 글의 글자 서식을 걷은 뒤 집은 모양과 다른 것만 입힌다(format.js 의 paint). 한 번 입히기가 되돌리기 한 칸. */
 
 import { textHosts } from './canvas.js';
 import { A } from './deck.js';
+import DeckOps from './deckops.js';
 
-// 상자 모양으로 옮기지 않는 것 — 자리·크기·겹침·배치 방식
-const GEOMETRY = /^(left|top|right|bottom|width|height|min-|max-|position|z-index|inset|margin|transform|translate|rotate|scale|display|float|zoom)/;
+// 상자 모양으로 옮기지 않는 것 — 자리·크기·겹침·배치 방식과 꼴(둥근 모서리 — style 은 모서리마다의 border-*-radius 로 읽힌다).
+// 타원의 서식을 사각형에 입혀도 사각형 그대로(덱 공통 편집기들과 같게)
+const GEOMETRY = /^(left|top|right|bottom|width|height|min-|max-|position|z-index|inset|margin|transform|translate|rotate|scale|display|float|zoom|border-([a-z]+-)*radius)/;
 
 function boxLook(box) {
   return Array.from(box.style).filter((p) => !GEOMETRY.test(p))
@@ -21,6 +27,16 @@ function putBoxLook(box, props) {
   for (const p of Array.from(box.style)) if (!GEOMETRY.test(p)) box.style.removeProperty(p);
   for (const [p, v, pri] of props) box.style.setProperty(p, v, pri);
   if (!box.getAttribute('style')) box.removeAttribute('style');
+}
+
+// 집은 모양을 상자 하나에 — 선에는 선 서식만(상자에서 집었으면 그 윤곽선), 상자에는 집은 상자 모양(선에서 집었으면 그 선을
+// 윤곽선으로). 채우지도 윤곽선을 긋지도 않는 상자(표·시연 화면·덱이 그린 SVG — pick.canFill·canLine)에는 상자 모양을 입히지
+// 않는다(덱이 그린 화살표·차트 둘레에 테두리 상자가 생긴다 — 덱 공통 편집기들과 같게)
+function putShape(box, look, pick) {
+  if (DeckOps.isLine(box)) { if (look.shape) DeckOps.applyBoxFmt(box, look.shape); }
+  else if (!pick.canFill(box) && !pick.canLine(box)) return;
+  else if (look.box) putBoxLook(box, look.box);
+  else if (look.shape) DeckOps.applyBoxFmt(box, look.shape, !pick.canFill(box));
 }
 
 export class Painter {
@@ -57,7 +73,8 @@ export class Painter {
 
   /* ---------- 집기 */
 
-  // 지금 고른 글·상자의 모양 → {text, box} 또는 null(알린다)
+  // 지금 고른 글·상자의 모양 → {text, box, shape: 덱 공통 꼴의 채우기·윤곽선·선 서식} 또는 null(알린다). 선의 상자 모양(인라인
+  // style)은 집지 않는다 — 입히면 받는 상자의 바탕·테두리를 걷는다.
   capture() {
     const cur = this.fmt.current();
     const box = this.pick.box;
@@ -66,7 +83,12 @@ export class Painter {
     }
     if (box && this.pick.movable(box)) {
       const host = textHosts(this.model.current, this.model.family).find((h) => box.contains(h) && h.textContent.trim());
-      return { text: host ? this.fmt.lookAt(host, this.fmt.whole(host)) : null, box: boxLook(box) };
+      const shape = DeckOps.pickBoxFmt(box);
+      return {
+        text: host ? this.fmt.lookAt(host, this.fmt.whole(host)) : null,
+        box: DeckOps.isLine(box) ? null : boxLook(box),
+        shape: shape.box || shape.line ? shape : null,
+      };
     }
     this.msg('서식을 집을 글을 고르거나(캐럿만 두어도 됩니다) 상자를 누른 뒤 ‘서식 복사’를 누르세요.', 'warn', 5000);
     return null;
@@ -123,8 +145,8 @@ export class Painter {
     }
     // 상자 모양을 집었고 옮길 수 있는 상자를 골랐으면 → 상자째(상자 모양 + 그 안의 글)
     const shapes = boxes.filter((b) => this.pick.movable(b));
-    if (look.box && shapes.length) {
-      this.fmt.paint(look.text ? shapes.flatMap(hostsIn) : [], look.text, () => { for (const b of shapes) putBoxLook(b, look.box); });
+    if ((look.box || look.shape) && shapes.length) {
+      this.fmt.paint(look.text ? shapes.flatMap(hostsIn) : [], look.text, () => { for (const b of shapes) putShape(b, look, this.pick); });
       return true;
     }
     if (!look.text) return false;

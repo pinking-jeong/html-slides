@@ -1,7 +1,8 @@
 /* PPTX 받기 — 지금 편집한 덱을 PowerPoint 파일로. 덱 화면(스크립트 없는 iframe)에 그려진 대로 장마다 재어서
    - 글은 고칠 수 있는 글상자로(글자 서식·문단·글머리표·줄 간격·링크), 표는 표로(합친 칸·칸 색·테두리),
    - 그림은 그림으로(PNG·JPEG·GIF 는 원본 그대로), 도표(SVG)·그라데이션 배경은 화면의 두 배 해상도 그림으로,
-   - 배경색·테두리·둥근 모서리는 도형으로, 발표자 노트는 노트로 옮긴다.
+   - 배경색·테두리·둥근 모서리는 도형으로, 발표자 노트는 노트로 옮긴다. 돌리거나 뒤집은 것(배치 ▾ 의 회전·대칭 — CSS rotate·
+     scale 속성, transform)은 PowerPoint 의 회전·대칭으로, 도형 넣기의 선·화살표는 선 도형으로(pptxshape.js).
    덱 스크립트가 그리는 것(canvas·동영상·iframe)은 옮기지 못하고(동영상은 표지 그림만), 그림자·여러 겹 배경 같은 CSS 효과는
    단순하게 옮긴다 — 다 끝나면 무엇을 그림으로 바꿨거나 옮기지 못했는지와 쓴 글꼴을 알린다.
    만드는 도구: vendor/pptxgenjs(4.0.1, MIT, JSZip 포함) — 처음 누를 때만 불러온다. pptxgenjs 4.0.1 은 한 문단의 글 조각마다
@@ -9,6 +10,7 @@
 
 import { textHosts } from './canvas.js';
 import { A } from './deck.js';
+import { isLine, layoutSize, lineShape, pose } from './pptxshape.js';
 
 const LIB = new URL('../../vendor/pptxgenjs/pptxgen.bundle.js', import.meta.url).href;
 const MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
@@ -240,6 +242,7 @@ class Exporter {
     this.ox = 0;
     this.oy = 0;
     this.s = null;
+    this.stage = null;               // 지금 옮기는 장 — 돌림·뒤집음은 그 안의 것만 모은다(pose)
     this.hosts = new Set();
     this.inCell = false;
     this.cellScale = 1;              // 표 칸 글자의 배율 — 열 폭을 나눠도 모자란 표는 1 보다 작다
@@ -252,6 +255,7 @@ class Exporter {
     this.k = r.width > 1 ? this.size.w / r.width : 1;
     this.ox = r.left;
     this.oy = r.top;
+    this.stage = el;
     this.s = this.pptx.addSlide();
     this.hosts = new Set(textHosts(el, this.model.family));
     await this.background(el);
@@ -318,30 +322,28 @@ class Exporter {
 
   /* ---------- 자리 */
 
-  // 요소의 자리(장 안, CSS px) {x, y, w, h, rot} — 돌린 요소는 돌리기 전 크기와 가운데로. 크기가 없거나 장 밖이면 null.
+  // 요소의 자리(장 안, CSS px) {x, y, w, h, rot, flipH, flipV} — 돌리거나 뒤집은 요소(자기나 조상의 transform 과 CSS rotate·
+  // scale 속성 — 돌린 상자 안의 글 칸도 함께 돈다)는 돌리기 전 크기와 가운데로. 크기가 없거나 장 밖이면 null.
   geom(e, cs, rect) {
     const r = rect || e.getBoundingClientRect();
     if (!(r.width > 0.5 && r.height > 0.5)) return null;
     let w = r.width;
     let h = r.height;
     let rot = 0;
-    const t = cs && cs.transform;
-    if (!rect && t && t !== 'none' && typeof e.offsetWidth === 'number') {
-      try {
-        const m = new DOMMatrixReadOnly(t);
-        const a = (Math.atan2(m.b, m.a) * 180) / Math.PI;
-        if (Math.abs(a) > 0.5) {
-          rot = a;
-          w = e.offsetWidth * Math.hypot(m.a, m.b);
-          h = e.offsetHeight * Math.hypot(m.c, m.d);
-        }
-      } catch (x) { /* 읽지 못한 변형은 둔다 */ }
+    let flipH = false;
+    let flipV = false;
+    const p = rect ? null : pose(e, this.stage, this.win);
+    const size = p && (p.rot || p.flipH || p.flipV) ? layoutSize(e, cs || this.win.getComputedStyle(e)) : null;
+    if (size) {
+      ({ rot, flipH, flipV } = p);
+      w = size.w * p.sx;
+      h = size.h * p.sy;
     }
     const cx = (r.left + r.width / 2 - this.ox) * this.k;
     const cy = (r.top + r.height / 2 - this.oy) * this.k;
     w *= this.k;
     h *= this.k;
-    const g = { x: cx - w / 2, y: cy - h / 2, w, h, rot };
+    const g = { x: cx - w / 2, y: cy - h / 2, w, h, rot, flipH, flipV };
     if (g.x >= this.size.w || g.y >= this.size.h || g.x + g.w <= 0 || g.y + g.h <= 0) return null;
     return g;
   }
@@ -350,6 +352,8 @@ class Exporter {
   at(g) {
     const o = { x: inch(g.x), y: inch(g.y), w: inch(g.w), h: inch(g.h) };
     if (g.rot) o.rotate = Math.round(((g.rot % 360) + 360) % 360);
+    if (g.flipH) o.flipH = true;
+    if (g.flipV) o.flipV = true;
     return o;
   }
 
@@ -591,10 +595,13 @@ class Exporter {
       const first = String(v || '0').split(' ')[0];
       return first.endsWith('%') ? (px(first) / 100) * Math.min(g.w, g.h) : px(first) * this.k;
     };
-    const r = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => radius(cs[`border${c}Radius`])));
+    const corners = ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => cs[`border${c}Radius`]);
+    const r = Math.max(...corners.map(radius));
     if (rect || r < 0.5) return { name: 'rect', r: undefined };
     const half = Math.min(g.w, g.h) / 2;
-    if (r >= half - 0.5 && Math.abs(g.w - g.h) <= 1) return { name: 'ellipse', r: undefined };
+    // 네 모서리가 모두 50% 이상이면 타원 — CSS 의 % 반지름은 가로·세로를 따로 재어 긴 상자도 타원이다(도형 넣기의 타원)
+    const oval = corners.every((v) => String(v || '').split(' ').every((x) => x.endsWith('%') && px(x) >= 50));
+    if (oval || (r >= half - 0.5 && Math.abs(g.w - g.h) <= 1)) return { name: 'ellipse', r: undefined };
     return { name: 'roundRect', r: inch(Math.min(r, half)) };
   }
 
@@ -708,10 +715,14 @@ class Exporter {
     }
   }
 
-  // 도표(SVG) — 덱 CSS 를 계산된 값으로 적어 넣고 따로 떼어, 화면의 두 배 해상도 PNG 로
+  // 도표(SVG) — 덱 CSS 를 계산된 값으로 적어 넣고 따로 떼어, 화면의 두 배 해상도 PNG 로(돌린 도표는 돌리기 전 크기로 그려 함께
+  // 돌린다). 도형 넣기의 선·화살표는 그림이 아니라 PowerPoint 선으로.
   async svg(e, g, o) {
-    const r = e.getBoundingClientRect();
-    const markup = await this.svgMarkup(e, r.width, r.height);
+    if (isLine(e)) {
+      this.s.addShape('line', lineShape(e, g, o, (x) => this.at(x), transp));
+      return;
+    }
+    const markup = await this.svgMarkup(e, g.w / this.k, g.h / this.k);
     const data = markup ? await raster(markup, g.w * SCALE, g.h * SCALE) : null;
     if (!data) {
       this.count.lost += 1;

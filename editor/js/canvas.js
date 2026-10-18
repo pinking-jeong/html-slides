@@ -60,8 +60,8 @@ export function textHosts(slide, family) {
   const visit = (el) => {
     for (const c of el.children) {
       if (c.matches(SKIP)) continue;
-      // 편집기가 넣은 글상자는 상자째 한 칸(그 안의 문단을 Enter 로 나눈다)
-      if (c.hasAttribute(FREE_BOX) && c.parentElement === slide) { out.push(c); continue; }
+      // 편집기가 넣은 글상자는 상자째 한 칸(그 안의 문단을 Enter 로 나눈다). 선·화살표(svg)는 글 칸이 아니다
+      if (c.hasAttribute(FREE_BOX) && c.parentElement === slide) { if (c.localName !== 'svg') out.push(c); continue; }
       if (isList(c) || (hasText(c) && inlineOnly(c)) || emptyCell(c)) { out.push(c); continue; }
       visit(c);
     }

@@ -6,6 +6,7 @@ import { A, DeckModel, PLACE } from './deck.js';
 import { Arrange } from './arrange.js';
 import { Boxes } from './boxes.js';
 import { Canvas } from './canvas.js';
+import DeckOps from './deckops.js';
 import { deleteDraft, getDraft, listDrafts, putDraft } from './drafts.js';
 import { Edits } from './edits.js';
 import { Formatter } from './format.js';
@@ -19,9 +20,11 @@ import { Painter } from './painter.js';
 import { Pick } from './pick.js';
 import { exportPptx } from './pptx.js';
 import { Side } from './side.js';
+import { Shapes } from './shapes.js';
 import { openSource } from './source.js';
 import { Tables } from './tables.js';
 import { writeTermsRaw } from './terms.js';
+import { TextOps } from './textops.js';
 import { Toc } from './toc.js';
 import { Versions } from './verui.js';
 
@@ -35,7 +38,7 @@ const VERSION_KEYS = { draft: '임시 저장본', ref: '저장소의 판', backu
 const HINT = '글은 눌러서 바로 고칩니다(글을 고르지 않고 서식을 고르면 그 글 칸 전체에) · 상자는 테두리를 끌어 옮기고 손잡이로 '
   + '크기를 바꿉니다(Shift+누르기·빈 곳에서 끌기로 여럿을 골라 ‘배치 ▾’로 맞추기) · Esc 로 글 고치기를 마치면 Ctrl+C·V 로 상자를 '
   + '다른 장·다른 덱에 붙여 넣습니다(PowerPoint·Word·한글에도 붙습니다) · 차례에서 장을 끌어 순서를 바꿉니다 · PageUp/PageDown 장 넘기기 · Ctrl+F 찾기 · Ctrl+Z 되돌리기 · '
-  + 'Ctrl+S 저장';
+  + 'Ctrl+S 저장 · Alt+←/→ 고른 상자 15° 돌리기 · 글 단축키는 PowerPoint 와 같습니다(Ctrl+L·E·R·J 맞춤, Ctrl+Shift+>·< 크기, Ctrl+Shift++·Ctrl+= 첨자, Shift+F3 대/소문자)';
 const SHORTCUTS = { KeyB: 'bold', KeyI: 'italic', KeyU: 'underline' };
 
 const $ = (id) => document.getElementById(id);
@@ -59,6 +62,11 @@ const fmtEls = {
   bold: $('fBold'), italic: $('fItalic'), under: $('fUnder'), strike: $('fStrike'), color: $('fColor'), mark: $('fMark'),
   unmark: $('fUnmark'), left: $('fLeft'), center: $('fCenter'), right: $('fRight'), justify: $('fJustify'), clear: $('fClear'),
 };
+const textEls = { sup: $('fSup'), sub: $('fSub'), case: $('fCase'), spacing: $('fSpacing') };
+const shapeEls = {
+  shapeBtn: $('shapeBtn'), shapeMenu: $('shapeMenu'), fillBtn: $('fillBtn'), fillMenu: $('fillMenu'), lineBtn: $('lineBtn'),
+  lineMenu: $('lineMenu'), fillPick: $('fillPick'), linePick: $('linePick'),
+};
 
 let source = null;
 let model = null;
@@ -72,6 +80,8 @@ let layout = null;
 let boxes = null;
 let arrange = null;
 let painter = null;
+let textOps = null;
+let shapes = null;
 let side = null;
 let notesPending = null;
 let saving = false;
@@ -766,7 +776,8 @@ function findKey(e, fromDeck) {
 function arrangeKey(e, k) {
   if (k === 'a' && !e.shiftKey) arrange.selectAll();
   else if (k === 'g') { if (e.shiftKey) arrange.ungroup(); else arrange.group(); }
-  else if (e.shiftKey && (e.code === 'BracketRight' || e.code === 'BracketLeft')) arrange.order(e.code === 'BracketRight' ? 'front' : 'back');
+  // Ctrl+Shift+] · [ 는 한 칸 앞으로 · 뒤로 — PowerPoint(Windows) 단축키 표와 같게(맨 앞·맨 뒤는 단축키가 없어 ‘배치 ▾’에서)
+  else if (e.shiftKey && (e.code === 'BracketRight' || e.code === 'BracketLeft')) arrange.order(e.code === 'BracketRight' ? 'forward' : 'backward');
   else return false;
   return true;
 }
@@ -802,6 +813,11 @@ function onKey(e, inText, fromFrame, field = false) {
     else fmt.step(e.code === 'BracketRight' ? 1 : -1);
     return;
   }
+  // 그 밖의 PowerPoint 글자·단락 단축키(첨자·대/소문자·크게·작게·맞춤·서식 지우기 — textops.js). 입힐 글이 없으면 브라우저의 키
+  if (!(inText && (!fromFrame || field)) && textOps.key(e)) {
+    e.preventDefault();
+    return;
+  }
   // Ctrl+D 복제 — 글을 고치는 중에도(글에서는 쓸 일이 없는 키다). 노트·덱의 입력 칸에서는 쓰지 않는다.
   if (mod && !e.shiftKey && k === 'd' && !(inText && (!fromFrame || field))) {
     e.preventDefault();
@@ -823,10 +839,14 @@ function onKey(e, inText, fromFrame, field = false) {
       e.preventDefault();
       if (fromFrame && !field) canvas.stop();
       else e.target.blur();
+    } else if (fromFrame && !field && /^rot[LR]15$/.test(DeckOps.keyCmd(e) || '') && !DeckOps.MAC) {
+      // 덱의 글을 쓰는 중의 Alt+←/→ 는 상자를 돌리지 않는다. Mac 의 Option+←/→ 는 낱말 단위 이동이라 그대로, 다른 곳의 Alt+← 는
+      // 브라우저 ‘뒤로’라 막기만 한다 — 고치던 덱을 떠나지 않게(덱 공통 편집기들과 같게)
+      e.preventDefault();
     }
     return;
   }
-  // 배치 — 글을 고치는 중이 아닐 때: Ctrl+A 이 장의 상자 모두 · Ctrl+G 묶기 · Ctrl+Shift+G 묶음 풀기 · Ctrl+Shift+] 맨 앞 · [ 맨 뒤
+  // 배치 — 글을 고치는 중이 아닐 때: Ctrl+A 이 장의 상자 모두 · Ctrl+G 묶기 · Ctrl+Shift+G 묶음 풀기 · Ctrl+Shift+] 앞으로 · [ 뒤로
   if (mod && arrangeKey(e, k)) {
     e.preventDefault();
     return;
@@ -842,6 +862,13 @@ function onKey(e, inText, fromFrame, field = false) {
   // 고른 상자가 있으면 방향키는 상자를 옮기고 Delete 는 상자를 지운다
   if (pick.key(e)) {
     e.preventDefault();
+    return;
+  }
+  // Alt+→ · Alt+← — 고른 상자마다 15° 돌린다(PowerPoint 와 같게). 고른 상자가 없으면 브라우저의 앞으로·뒤로
+  const turn = DeckOps.keyCmd(e);
+  if ((turn === 'rotR15' || turn === 'rotL15') && arrange.movables().length) {
+    e.preventDefault();
+    arrange.turn(turn === 'rotR15' ? 15 : -15);
     return;
   }
   if (e.altKey || mod) return;
@@ -1013,8 +1040,17 @@ async function boot() {
   });
   pick = new Pick({
     layer: $('pickLayer'), bar: fmtEls.bar, canvas, model, msg,
-    onSelect: () => { showBox(); if (fmt) fmt.update(); if (boxes) boxes.update(); if (painter) painter.update(); },
-    onPlace: () => showBox(),
+    onSelect: () => {
+      showBox();
+      if (fmt) fmt.update();
+      if (boxes) boxes.update();
+      if (painter) painter.update();
+      if (shapes) shapes.update();
+    },
+    onPlace: () => {
+      showBox();
+      if (boxes) boxes.warmSoon(true);       // 크기·돌림·색을 바꾼 상자 — 다른 프로그램에 붙일 그림을 다시 준비
+    },
   });
   // 자리 칸(왼쪽·위)은 옮길 수 있는 상자(빌더 상자·흐름 덱에 넣은 글상자)를 골랐을 때만 보인다(showBox) — 칸은 늘 자리를
   // 차지해 서식 막대의 폭이 바뀌지 않는다
@@ -1022,11 +1058,17 @@ async function boot() {
   pick.attach();
   fmt = new Formatter({ els: fmtEls, canvas, model, pick, msg });
   fmt.attach();
+  // 서식 막대의 위·아래 첨자·대/소문자·줄 간격과 PowerPoint 글자·단락 단축키
+  textOps = new TextOps({ fmt, canvas, model, msg, els: textEls });
+  textOps.attach();
   boxes = new Boxes({ model, canvas, pick, fmt, msg, els: boxEls });
   boxes.attach();
   // 배치(맞추기·같은 간격·앞뒤 순서·묶기·잠그기) · 표의 행·열 · 서식 복사
   arrange = new Arrange({ model, canvas, pick, msg });
   arrange.attach({ button: $('arrBtn'), menu: $('arrMenu') });
+  // 도형 넣기 · 채우기 · 윤곽선
+  shapes = new Shapes({ model, canvas, pick, msg, els: shapeEls });
+  shapes.attach();
   const tables = new Tables({ model, canvas, fmt, msg });
   tables.attach({ button: $('tblBtn'), menu: $('tblMenu') });
   painter = new Painter({ model, canvas, pick, fmt, msg, button: $('fPaint') });
@@ -1082,6 +1124,7 @@ async function boot() {
   bind();
   go(0);
   els.hint.textContent = HINT;
+  els.hint.title = HINT;               // 한 줄에 다 보이지 않으면 끝이 잘린다 — 올려 두면 모두
   // 다시 연 판·임시 저장본 알림 — 편집기가 준비됐다고 알리기(ready) 전에. 다시 연 임시 저장본보다 나중에 남긴 것(이 창이
   // 멈추기 전에 더 고친 것 등)이 있으면 함께 알린다. 브라우저 저장소가 멈추면 알림만 건너뛴다(BOOT_WAIT).
   const drafts = () => Promise.race([listDrafts(source.draftKey), new Promise((r) => { setTimeout(() => r([]), BOOT_WAIT); })]);

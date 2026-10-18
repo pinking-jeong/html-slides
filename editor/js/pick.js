@@ -8,12 +8,16 @@
    - 묶은 상자(data-hs-group)는 하나를 누르면 묶음째 골라진다. 묶음째 고른 채 한 번 더 누르면 그 상자만.
    - 잠근 상자(data-hs-lock)는 고를 수 있지만 옮기거나 크기를 바꾸거나 지우지 않는다(글은 고친다).
    - 끌 때 장·다른 상자의 가장자리·가운데에 붙고 맞춤선을 보인다(Alt 를 누른 채면 붙지 않는다).
+   - 돌린 상자(CSS rotate — 배치 ▾ 의 회전)는 틀·손잡이도 같이 돌리고, 손잡이로 크기를 바꾸면 화면의 이동량을 상자 축으로 돌려
+     반대쪽 변이 제자리에 남게 한다(덱 공통 편집 명령의 resizeTurned — 그때는 맞춤선을 쓰지 않는다). 옮길 때 붙는 것은 보이는
+     테두리다. 선·화살표(덱 공통 꼴의 SVG)는 크기를 바꿀 때마다 다시 그려 화살촉이 찌그러지지 않게 한다.
    - 글을 고치는 중이 아니면 방향키로 1px(Shift 10px) 옮기고 Delete 로 지운다. 한 번 끈 것·잇달아 누른 방향키가 되돌리기 한 칸.
    끄는 동안은 화면 전체를 덮는 막을 깔아, 포인터가 덱 화면 밖으로 나가도 끌기가 이어진다. 끄는 동안 키는 쓰지 않는다(Esc 는
    끌기 취소) — 장을 넘기거나 되돌리면 끌던 상자와 되돌리기 기록이 엇갈린다. */
 
 import { textHosts } from './canvas.js';
 import { A, FREE_BOX, GROUP, LOCK } from './deck.js';
+import DeckOps from './deckops.js';
 import { nearest, SNAP_PX, snapLines, touching, union } from './snap.js';
 
 const MEDIA = 'img, svg, video, canvas, picture, [data-name="picture"]';   // 마지막은 새 장 레이아웃의 그림 자리
@@ -21,11 +25,34 @@ const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const MIN = 8;
 const LIMIT = 10000;
 const BAND_PX = 4;                          // 빈 곳을 이만큼(편집기 px) 끌어야 감싸 고르기
+// 손잡이 방향(북쪽부터 시계 방향 각) — 돌린 틀의 손잡이 포인터 모양을 가까운 45° 방향으로
+const HANDLE_DEG = { n: 0, ne: 45, e: 90, se: 135, s: 180, sw: 225, w: 270, nw: 315 };
+const CURSORS = ['ns-resize', 'nesw-resize', 'ew-resize', 'nwse-resize'];
 
 const rectOf = (el) => {
   const r = el.getBoundingClientRect();
   return { left: r.left, top: r.top, width: r.width, height: r.height };
 };
+const r2 = (v) => Math.round(v * 100) / 100;
+const cursorAt = (h, deg) => CURSORS[Math.round((((HANDLE_DEG[h] + deg) % 180) + 180) % 180 / 45) % 4];
+
+// 상자의 레이아웃 크기(돌리기 전 — CSS rotate 는 레이아웃을 바꾸지 않는다). SVG 에는 offsetWidth 가 없어 계산된 크기로.
+function sizeOf(el) {
+  if (typeof el.offsetWidth === 'number') return { w: el.offsetWidth, h: el.offsetHeight };
+  const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+  return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
+}
+
+// 틀을 놓을 자리(덱 화면 px)와 각 — 돌린 상자는 돌리기 전 크기의 틀을 같은 가운데(보이는 테두리의 가운데)에 두고 같이 돌린다
+function frameOf(el) {
+  const r = rectOf(el);
+  const deg = DeckOps.angle(el);
+  if (!deg) return { r, deg: 0 };
+  const { w, h } = sizeOf(el);
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  return { r: { left: cx - w / 2, top: cy - h / 2, width: w, height: h }, deg };
+}
 
 export class Pick {
   /* layer: 틀을 그릴 편집기 문서의 판(덱 화면과 같은 크기), bar: 서식 막대(숫자 칸), msg(글, 종류): 알림,
@@ -108,6 +135,15 @@ export class Pick {
   locked(box) { return !!box && this.movable(box) && box.hasAttribute(LOCK); }
   isMedia(box) { return !!box && box.matches(MEDIA); }
   hasText(box) { return textHosts(this.model.current, this.family).some((h) => box.contains(h)); }
+
+  // 상자 종류마다 쓰는 도형 명령 — 덱 공통 편집기들과 같은 규칙: 표·시연 화면(.wg)은 돌리지도 뒤집지도 꾸미지도 않고(PPTX 의
+  // 표는 돌지 않는다), 글이 든 상자는 뒤집지 않으며(거울 글씨), 그림·SVG 는 채우지 않고, SVG 의 윤곽선은 도형 넣기의
+  // 선·화살표에만(덱이 그린 SVG 에 주면 둘레에 테두리 상자가 생긴다)
+  fixedKind(box) { return box.localName === 'table' || box.classList.contains('wg') || !!box.querySelector(':scope > table'); }
+  canTurn(box) { return !this.fixedKind(box); }
+  canFlip(box) { return !this.fixedKind(box) && !this.hasText(box); }
+  canFill(box) { return !this.fixedKind(box) && !this.isMedia(box); }
+  canLine(box) { return !this.fixedKind(box) && (box.localName !== 'svg' || DeckOps.isLine(box)); }
 
   // box 가 든 묶음의 상자들(지금 장의 것, 문서 순서) — 묶음이 없으면 [box]
   members(box) {
@@ -218,12 +254,14 @@ export class Pick {
       if (this.onSelect) this.onSelect(this.box);
     }
     const s = this.canvas.scale;
-    const show = (el, r) => {
+    const show = (el, r, deg = 0) => {
       el.hidden = false;
       el.style.left = `${r.left * s}px`;
       el.style.top = `${r.top * s}px`;
       el.style.width = `${Math.max(1, r.width * s)}px`;
       el.style.height = `${Math.max(1, r.height * s)}px`;
+      if (deg) el.style.rotate = `${deg}deg`;
+      else el.style.removeProperty('rotate');
     };
     if (!live.length) {
       f.hidden = true;
@@ -233,7 +271,12 @@ export class Pick {
     if (live.length === 1) {
       const box = live[0];
       const lock = this.locked(box);
-      show(f, rectOf(box));
+      const { r, deg } = frameOf(box);
+      show(f, r, deg);
+      // 돌린 틀 — 크기 글은 바로 서게, 손잡이의 포인터 모양은 지금 방향으로
+      if (deg) this.badge.style.rotate = `${-deg}deg`;
+      else this.badge.style.removeProperty('rotate');
+      for (const k of f.querySelectorAll('.pick-h')) k.style.cursor = deg ? cursorAt(k.dataset.h, deg) : '';
       f.classList.remove('multi');
       f.classList.toggle('fixed', !this.movable(box) || lock);
       f.classList.toggle('locked', lock);
@@ -257,7 +300,8 @@ export class Pick {
       }
       this.mems.forEach((m, i) => {
         if (i >= live.length) { m.hidden = true; return; }
-        show(m, rectOf(live[i]));
+        const { r, deg } = frameOf(live[i]);
+        show(m, r, deg);
         m.classList.toggle('locked', this.locked(live[i]));
       });
     }
@@ -282,9 +326,12 @@ export class Pick {
     return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(css(cs.width, r.width)), h: Math.round(css(cs.height, r.height)) };
   }
 
+  // 보이는 테두리(덱 px) — 돌린 상자는 돌린 모양을 감싼 사각형. 맞추기·같은 간격이 이것으로 잰다.
+  seen(box) { return DeckOps.seen(this.geom(box), DeckOps.angle(box)); }
+
   // 새 자리·크기를 상자에 쓴다 — keys('x'·'y'·'w'·'h')에 든 것만. 옮길 때 높이를 적으면 높이가 정해지지 않았던 상자(표 등)가
   // 그 높이로 굳는다. 그림은 크기를 바꿀 때 가로·세로를 함께 px 로 적는다 — height:auto 는 그림 파일의 본래 비율을 따라,
-  // 덱이 다른 비율로 보이던 그림이 튄다.
+  // 덱이 다른 비율로 보이던 그림이 튄다. 선·화살표는 새 크기로 다시 그린다.
   apply(box, g, keys) {
     const movable = this.movable(box);
     const size = keys.includes('w') || keys.includes('h');
@@ -294,6 +341,7 @@ export class Pick {
     if (media || keys.includes('w')) box.style.width = `${g.w}px`;
     if (media || keys.includes('h')) box.style.height = `${g.h}px`;
     if (size && !movable && (box.localName === 'img' || box.localName === 'video')) box.style.maxWidth = 'none';
+    if (size && DeckOps.isLine(box)) DeckOps.fitLine(box);
   }
 
   /* ---------- 끌기 */
@@ -323,10 +371,12 @@ export class Pick {
     const slide = this.model.current;
     const moving = new Set(items);
     const g = this.geom(items[0]);
-    // 장 번호표와 장 안의 자리 — 끝낼 때 같은 장에 기록하고, 취소하면 되살린 장에서 같은 상자들을 다시 고른다
+    // 장 번호표와 장 안의 자리 — 끝낼 때 같은 장에 기록하고, 취소하면 되살린 장에서 같은 상자들을 다시 고른다.
+    // deg: 크기를 바꾸는 상자의 회전(돌린 상자는 상자 축으로 바꾼다)
     this.drag = {
       how, space, threshold, solo, moved: false, x: e.clientX, y: e.clientY,
       items: items.map((b) => ({ box: b, g: this.geom(b) })), box: items[0], g, ratio: g.h > 0 ? g.w / g.h : 1,
+      deg: how === 'move' ? 0 : DeckOps.angle(items[0]),
       rect: union(items.map(rectOf)),
       lines: snapLines(rectOf(slide), Array.from(slide.children).filter((c) => this.movable(c) && !moving.has(c)).map(rectOf)),
       id: slide.getAttribute(A.id), paths: list.map((b) => pathOf(b, slide)), before: this.model.snap(slide),
@@ -349,6 +399,7 @@ export class Pick {
     // 편집기 문서: 화면 전체를 덮는 막이 포인터를 붙잡아, 덱 화면 밖으로 나가도 끌기가 이어진다
     const sh = document.createElement('div');
     sh.className = `pick-shield ${how}`;
+    if (this.drag.deg) sh.style.cursor = cursorAt(how, this.drag.deg);
     sh.addEventListener('pointermove', onMove);
     sh.addEventListener('pointerup', onUp);
     sh.addEventListener('pointercancel', onCancel);
@@ -390,38 +441,51 @@ export class Pick {
         gy.push(...touching(ys(dy), d.lines.ys));
       }
       for (const it of d.items) this.apply(it.box, { ...it.g, x: it.g.x + dx, y: it.g.y + dy }, 'xy');
+    } else if (d.deg) {
+      // 돌린 상자 — 화면의 이동량을 상자 축으로 돌려 바꾸고, 반대쪽 변이 화면에서 제자리에 남게 옮긴다(맞춤선은 쓰지 않는다)
+      const t = DeckOps.resizeTurned(d.g, d.deg, dx, dy, (b, lx, ly) => this.resized(d, lx, ly, e.shiftKey, null).g);
+      this.apply(d.box, { x: r2(t.x), y: r2(t.y), w: t.w, h: t.h }, 'xywh');
     } else {
-      const g = { ...d.g };
-      const h = d.how;
-      const corner = h.length === 2;
-      const keep = corner && (this.isMedia(d.box) !== e.shiftKey);
-      if (h.includes('e')) g.w = d.g.w + dx;
-      if (h.includes('w')) g.w = d.g.w - dx;
-      if (h.includes('s')) g.h = d.g.h + dy;
-      if (h.includes('n')) g.h = d.g.h - dy;
       // 옮기는 가장자리를 맞춤선에 — 비율을 지키는 손잡이·흐름 덱의 그림(자리를 흐름이 정한다)은 빼고
-      if (snap && !keep && this.movable(d.box)) {
+      const toLines = snap && this.movable(d.box) ? (g, h) => {
         const edge = (c, lines, out) => { const k = nearest([c], lines, tol); out.push(...touching([c + k], lines)); return k; };
         if (h.includes('e')) g.w += edge(r.left + g.w, d.lines.xs, gx);
         if (h.includes('w')) g.w -= edge(r.left + r.width - g.w, d.lines.xs, gx);
         if (h.includes('s')) g.h += edge(r.top + g.h, d.lines.ys, gy);
         if (h.includes('n')) g.h -= edge(r.top + r.height - g.h, d.lines.ys, gy);
-      }
-      if (keep) {
-        const byW = Math.abs(g.w - d.g.w) / Math.max(1, d.g.w) >= Math.abs(g.h - d.g.h) / Math.max(1, d.g.h);
-        if (byW) g.h = g.w / d.ratio; else g.w = g.h * d.ratio;
-      }
-      g.w = Math.min(LIMIT, Math.max(MIN, Math.round(g.w)));
-      g.h = Math.min(LIMIT, Math.max(MIN, Math.round(g.h)));
-      if (h.includes('w')) g.x = d.g.x + d.g.w - g.w;
-      if (h.includes('n')) g.y = d.g.y + d.g.h - g.h;
-      const keys = `${h.includes('w') ? 'x' : ''}${h.includes('n') ? 'y' : ''}`
-        + `${keep || /[ew]/.test(h) ? 'w' : ''}${keep || /[ns]/.test(h) ? 'h' : ''}`;
+      } : null;
+      const { g, keys } = this.resized(d, dx, dy, e.shiftKey, toLines);
       this.apply(d.box, g, keys);
     }
     this.place();
     this.showGuides(gx, gy);
     this.frame.classList.add('dragging');
+  }
+
+  /* 돌리지 않은 상자(돌린 상자는 상자 축으로 본) d.box 의 크기를 손잡이(d.how) 방향으로 (dx, dy) 만큼 → {g, keys}. 모서리
+     손잡이는 그림의 비율을 지키고(Shift 로 풀기 — 선·화살표는 늘 풀린 채), 크기는 MIN~LIMIT, 왼쪽·위 손잡이는 반대쪽 변을 둔다.
+     toLines(g, how) 가 있으면 비율을 지키지 않을 때 옮기는 변을 맞춤선에 붙인다. */
+  resized(d, dx, dy, shift, toLines) {
+    const g = { ...d.g };
+    const h = d.how;
+    const corner = h.length === 2;
+    const keep = corner && ((this.isMedia(d.box) && !DeckOps.isLine(d.box)) !== shift);
+    if (h.includes('e')) g.w = d.g.w + dx;
+    if (h.includes('w')) g.w = d.g.w - dx;
+    if (h.includes('s')) g.h = d.g.h + dy;
+    if (h.includes('n')) g.h = d.g.h - dy;
+    if (toLines && !keep) toLines(g, h);
+    if (keep) {
+      const byW = Math.abs(g.w - d.g.w) / Math.max(1, d.g.w) >= Math.abs(g.h - d.g.h) / Math.max(1, d.g.h);
+      if (byW) g.h = g.w / d.ratio; else g.w = g.h * d.ratio;
+    }
+    g.w = Math.min(LIMIT, Math.max(MIN, Math.round(g.w)));
+    g.h = Math.min(LIMIT, Math.max(MIN, Math.round(g.h)));
+    if (h.includes('w')) g.x = d.g.x + d.g.w - g.w;
+    if (h.includes('n')) g.y = d.g.y + d.g.h - g.h;
+    const keys = `${h.includes('w') ? 'x' : ''}${h.includes('n') ? 'y' : ''}`
+      + `${keep || /[ew]/.test(h) ? 'w' : ''}${keep || /[ns]/.test(h) ? 'h' : ''}`;
+    return { g, keys };
   }
 
   end(cancel) {
