@@ -1,6 +1,6 @@
 {
  "version": 1,
- "rev": "2026-10-12T05:39:10.601Z-purb",
+ "rev": "2026-10-18T05:04:37.741Z-quu2",
  "categories": [
   {
    "key": "guide"
@@ -34,6 +34,7 @@
   "북한핵전략_게이트모델_인터랙티브",
   "핵확산위험_정량평가_발표자료_대시보드판",
   "guide/pdf-pptx-guide",
-  "guide/html-slides-guide"
+  "guide/html-slides-guide",
+  "guide/deck-editor-guide"
  ]
 }
