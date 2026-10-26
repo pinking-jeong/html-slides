@@ -167,6 +167,9 @@ a.ref{text-decoration:none;font-weight:700;font-size:.92em}
 .rng input{width:190px;accent-color:var(--s1)}
 .rng output{min-width:52px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
 .plot svg{display:block;overflow:visible}
+/* 크롬은 SVG 글자를 화면 배율(--s)에 맞춰 배치해 두고, 덱 바깥(발표자 보기·편집기의 스크립트 없는 iframe)이
+   배율을 꺼도 다시 배치하지 않는다 — 배율과 상관없이 배치하게 한다. */
+svg text{text-rendering:geometricPrecision}
 .chart text{font-family:var(--f-ko)}
 .tnum{font-variant-numeric:tabular-nums}
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--ink2)}
