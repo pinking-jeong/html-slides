@@ -1,7 +1,8 @@
 /* html-slides 갤러리 — decks.json 을 읽어 카드로 그린다.
    덱 제목·설명 같은 목록의 글은 모두 textContent 로만 넣는다(꺾쇠가 든 제목이 HTML 로 풀리지 않게).
    ‘편집’을 누르면 덱 순서와 분류를 바꿔 decks/gallery.json 으로 저장한다(GitHub 토큰 또는 GitHub 편집 화면).
-   덱 파일은 옮기지 않으므로 분류를 바꿔도 덱 주소는 그대로다. */
+   덱 파일은 옮기지 않으므로 분류를 바꿔도 덱 주소는 그대로다.
+   카드의 ‘⋯ → 삭제…’는 덱의 파일과 gallery.json 의 자리를 커밋 하나로 지운다(GitHub 토큰). */
 (() => {
   'use strict';
 
@@ -22,9 +23,13 @@
     tokenField: $('tokenField'), token: $('token'), tokenKept: $('tokenKept'), tokenForget: $('tokenForget'),
     tokenNew: $('tokenNew'), saveGo: $('saveGo'), saveStatus: $('saveStatus'), ghSave: $('ghSave'),
     ghLink: $('ghLink'), layoutText: $('layoutText'),
+    del: $('del'), delClose: $('delClose'), delLead: $('delLead'), delFiles: $('delFiles'), delPlan: $('delPlan'),
+    delForm: $('delForm'), delTokenField: $('delTokenField'), delToken: $('delToken'), delKept: $('delKept'),
+    delForget: $('delForget'), delGo: $('delGo'), delStatus: $('delStatus'), delTokenNew: $('delTokenNew'),
+    delLinks: $('delLinks'), delCmd: $('delCmd'), delCopy: $('delCopy'),
   };
   const SORTS = ['custom', 'updated', 'date', 'title'];
-  const PREF = { sort: 'hs:sort', folder: 'hs:folder', pending: 'hs:pending' };
+  const PREF = { sort: 'hs:sort', folder: 'hs:folder', pending: 'hs:pending', deleted: 'hs:deleted' };
   const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
   // Office 웹 뷰어가 받는 PowerPoint 파일 크기 상한(10 MB) — viewer/common.js 의 OFFICE_MAX 와 같게 둔다.
   const OFFICE_MAX = 10000000;
@@ -51,6 +56,13 @@
   const NOREPLY_RE = /^[0-9]{1,12}\+[A-Za-z0-9][A-Za-z0-9-]{0,38}@users\.noreply\.github\.com$/;
   const COMMIT_MSG = 'chore: 갤러리 배치 바꿈(첫 화면 편집)';
   const EDIT_TIP = '카드를 끌거나 화살표 단추로 순서를 바꾸고, 카드마다 분류를 고르세요.';
+  // 덱 삭제 — decks/ 아래만, 한 번에 이 수보다 많은 파일은 지우지 않는다(경로가 잘못 잡혀 저장소가 통째로 지워지는 일을 막는 안전장치)
+  const DECK_ROOT = 'decks/';
+  const PROTECTED = new Set([LAYOUT_PATH, `${DECK_ROOT}folders.json`]);
+  const DELETE_MAX_FILES = 2000;
+  const DELETE_LIST_MAX = 12;
+  const FOREIGN_DELETE_MSG = '다른 창이나 페이지가 연 갤러리에서는 토큰으로 삭제하지 않습니다 — 갤러리 주소를 브라우저에서 바로 열어 '
+    + '주세요(아래 ‘토큰 없이’ 길은 쓸 수 있습니다).';
 
   const state = {
     data: null, decks: [], q: '', sort: 'updated', folder: '', repo: null, branch: 'main', author: null,
@@ -67,6 +79,10 @@
     remote: undefined,   // 저장 창을 열 때 읽어 둔 저장소의 배치 {sha, file} — 읽는 중이면 undefined, 못 읽었으면 null
     remoteSeq: 0,
   };
+  // 삭제 창 — d 는 지우려는 덱, seq 는 파일 목록을 읽는 요청의 번호(창을 닫으면 올려 늦게 온 답을 버린다)
+  const del = { d: null, busy: false, seq: 0, files: [], exact: false, ready: false };
+  // 방금 저장·삭제해 아직 배포되지 않은 것을 알리는 글 — layout 은 저장한 배치, deleted 는 숨기고 있는 덱 수
+  const pendingFlags = { layout: false, deleted: 0 };
   let token = '';        // 저장에 쓰는 GitHub 토큰 — 이 페이지가 열려 있는 동안 메모리에만 두고 어디에도 적지 않는다
   let lastFocus = null;
   let toastTimer = 0;
@@ -374,6 +390,13 @@
         '새 판 올리기',
         h('small', null, d.kind === 'dir' ? '바뀐 파일을 같은 이름으로 올리면 바뀝니다'
           : `같은 이름(${fileName(d.path)})으로 올리면 바뀝니다`)));
+      if (branchOk(state.branch)) {
+        items.push(h('hr'));
+        items.push(h('button', {
+          type: 'button', class: 'danger', 'data-act': 'delete-deck',
+          onclick: (e) => openDelete(d, e.currentTarget.closest('details').querySelector('summary')),
+        }, '삭제…', h('small', null, '저장소에서 이 덱의 파일을 지웁니다')));
+      }
     }
     const menu = h('div', { class: 'menu' }, items);
     const more = h('details', { class: 'more' },
@@ -803,9 +826,11 @@
     els.saveStatus.classList.toggle('bad', !!bad);
   }
 
-  function renderTokenState() {
+  function renderTokenState() {                  // 저장 창과 삭제 창이 같은 토큰을 쓴다
     els.tokenField.hidden = !!token;
     els.tokenKept.hidden = !token;
+    els.delTokenField.hidden = !!token;
+    els.delKept.hidden = !token;
   }
 
   function openSave() {
@@ -895,6 +920,8 @@
       err.forget = true;
     } else if (r.status === 409) {
       err.message = '그 사이 저장소가 바뀌었습니다 — 다시 저장해 보세요.';
+    } else if (r.status === 422 && /fast.?forward/i.test(msg)) {     // 브랜치 끝을 옮기는 사이 다른 커밋이 올라왔다
+      err.message = '그 사이 저장소가 바뀌었습니다 — 다시 해 보세요.';
     } else {
       err.message = `GitHub 이 저장을 받지 않았습니다(HTTP ${r.status}${msg ? ` — ${msg}` : ''}).`;
     }
@@ -957,9 +984,19 @@
     return file;
   }
 
+  function renderPending() {
+    const parts = [];
+    if (pendingFlags.layout) parts.push('방금 저장한 배치를 보여 주고 있습니다 — 배포가 끝나면(1~2분) 모두에게 이렇게 보입니다.');
+    if (pendingFlags.deleted) {
+      parts.push(`방금 삭제한 덱 ${num(pendingFlags.deleted)}개를 숨기고 있습니다 — 배포가 끝나면(1~2분) 모두에게서 사라집니다.`);
+    }
+    els.pending.textContent = parts.join(' ');
+    els.pending.hidden = parts.length === 0;
+  }
+
   function showPending() {
-    els.pending.textContent = '방금 저장한 배치를 보여 주고 있습니다 — 배포가 끝나면(1~2분) 모두에게 이렇게 보입니다.';
-    els.pending.hidden = false;
+    pendingFlags.layout = true;
+    renderPending();
   }
 
   // 저장 직후의 배치는 탭마다(sessionStorage), 갤러리마다(같은 github.io 의 다른 저장소와 섞이지 않게) 둔다.
@@ -1013,7 +1050,7 @@
     if (edit.busy || !isDirty()) return;
     // 다른 창이 연 갤러리(window.opener)나 다른 페이지 안의 갤러리에서는 토큰을 받지 않는다 — 같은 출처에서 도는 덱
     // 스크립트가 그런 창을 손대 토큰을 가로챌 수 있다(이것만으로 다 막지는 못한다: README 의 ‘편집기와 토큰’).
-    if (window.top !== window || window.opener) {
+    if (foreign()) {
       els.token.value = '';
       setStatus('다른 창이나 페이지가 연 갤러리에서는 토큰으로 저장하지 않습니다 — 갤러리 주소를 브라우저에서 바로 열어 '
         + '주세요(‘복사하고 GitHub 열기’는 쓸 수 있습니다).', true);
@@ -1079,6 +1116,299 @@
     if (isDirty() && !window.confirm('저장하지 않은 바뀐 내용을 버리고 편집을 끝낼까요?')) return;
     stopEdit();
     els.editBtn.focus();
+  }
+
+  /* ---------- 덱 삭제 — 덱의 파일과 배치 파일의 자리를 커밋 하나로 */
+
+  // 다른 창이 연 갤러리나 다른 페이지 안의 갤러리(onTokenSave 의 설명 참고)
+  const foreign = () => window.top !== window || !!window.opener;
+  // 지워도 되는 경로: decks/ 아래, 빈 마디·.·.. 없음, 배치·분류 파일은 아님
+  const deletable = (p) => typeof p === 'string' && p.startsWith(DECK_ROOT) && p.length > DECK_ROOT.length
+    && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..') && !PROTECTED.has(p);
+  const deckSig = (d) => String(d.rev || '');      // 덱 내용 지문의 앞부분 — 공개 목록(decks.json)에는 hash 가 없다
+  // 커밋 메시지에 쓰는 덱 이름 — 대괄호는 바꾼다: [skip ci] 같은 말이 들어 있으면 GitHub 이 이 커밋의 배포를 건너뛴다
+  const deckName = (d) => cleanLabel(d.name || fileName(d.id)).replace(/\[/g, '(').replace(/\]/g, ')');
+  // ‘토큰 없이’ 길에 보여 주는 slides remove 명령에 넣을 수 있는 이름 — 셸(bash·PowerShell·cmd)이 따옴표·명령으로 읽을 수 있는
+  // 글자(굽은 따옴표 U+201C 등 포함)가 없는 것만. 아니면 명령을 보여 주지 않는다.
+  const CMD_ID_RE = /^[\p{L}\p{M}\p{N}_.()[\]/ -]+$/u;
+  const cmdOk = (id) => CMD_ID_RE.test(id) && !id.startsWith('-') && !id.includes('..');
+  // 브랜치 이름 — site.json 에서 오므로 API 주소 마디로 쓰기 전에 ..·빈 마디 같은 것을 거른다
+  const branchOk = (b) => typeof b === 'string' && /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(b) && !b.includes('..');
+  // 지울 목록 아래에 붙이는 글. 폴더 덱 안에 다른 덱처럼 보이는 파일이 있으면 알린다
+  // (빌드는 index.html 이 든 폴더를 덱 하나로 보므로 그 안의 덱도 함께 지워진다).
+  function planNote(d, paths) {
+    const note = `파일 ${num(paths.length)}개를 지우고, 첫 화면 배치(${LAYOUT_PATH})에 이 덱의 자리가 있으면 함께 뺍니다.`;
+    const nested = d.kind === 'dir'
+      && paths.some((p) => p !== `${d.dir}/index.html` && /(?:^|\/)index\.html$|\.meta\.json$/.test(p));
+    return nested ? `${note} 이 폴더 안에 다른 덱처럼 보이는 파일(index.html·.meta.json)이 있어 그것도 함께 지워집니다.` : note;
+  }
+  const repoApi = (path) => `${API}/repos/${state.repo}/${path}`;
+  const jsonBody = (method, obj) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
+
+  // 저장소의 파일 경로(paths) 가운데 이 덱의 것. 폴더 덱은 폴더 안 전부, 그 밖의 덱은 이름이 같은(대소문자 무시)
+  // 덱 파일(HTML·HTM·PDF·PPTX — 빌드가 덱 하나로 묶는 단위)과 정보 파일(.meta.json) — 하나만 지우면 남은 파일이 덱이 된다.
+  function deckFilesIn(d, paths) {
+    const dir = `${d.dir}/`;
+    let mine = [];
+    if (d.kind === 'dir') {
+      if (d.dir.startsWith(DECK_ROOT) && d.dir.length > DECK_ROOT.length) mine = paths.filter((p) => p.startsWith(dir));
+    } else {
+      const stem = fileName(d.path).replace(/\.(?:html?|pdf|pptx)$/i, '').toLowerCase();
+      const names = new Set(['.html', '.htm', '.pdf', '.pptx', '.meta.json'].map((x) => stem + x));
+      mine = paths.filter((p) => p.startsWith(dir) && names.has(p.slice(dir.length).toLowerCase()));
+    }
+    return mine.filter(deletable).sort();
+  }
+
+  async function ghJson(url, opts) {
+    const r = await gh(url, opts);
+    if (!r.ok) throw await apiError(r);
+    try {
+      return await r.json();
+    } catch (e) {
+      throw new Error('GitHub 의 답을 읽지 못했습니다.');
+    }
+  }
+
+  // 브랜치 맨 끝 커밋과 그 커밋의 파일 목록 → {head, root, blobs: [{path, sha}]}. 토큰이 없으면 공개 저장소만 읽힌다.
+  async function readTree() {
+    const ref = await ghJson(repoApi(`git/ref/heads/${enc(state.branch)}`));
+    const head = ref && ref.object && ref.object.sha;
+    const commit = typeof head === 'string' ? await ghJson(repoApi(`git/commits/${head}`)) : null;
+    const root = commit && commit.tree && commit.tree.sha;
+    if (typeof root !== 'string') throw new Error('저장소의 맨 끝 커밋을 읽지 못했습니다.');
+    const tree = await ghJson(repoApi(`git/trees/${root}?recursive=1`));
+    if (!tree || !Array.isArray(tree.tree)) throw new Error('저장소의 파일 목록을 읽지 못했습니다.');
+    if (tree.truncated) {
+      throw new Error('저장소의 파일 목록이 너무 길어 한 번에 읽지 못했습니다 — 이 PC 에서 slides remove 로 내려 주세요.');
+    }
+    const blobs = tree.tree
+      .filter((x) => x && x.type === 'blob' && typeof x.path === 'string' && typeof x.sha === 'string')
+      .map((x) => ({ path: x.path, sha: x.sha }));
+    return { head, root, blobs };
+  }
+
+  // 브랜치 끝에 커밋 하나를 더해 덱의 파일을 지운다. 파일은 새 트리에서 빼고(sha: null), 배치 파일에 이 덱의 자리가 있으면
+  // 같은 커밋에서 뺀다 — 중간에 실패해도 반쯤 지워진 채로 남지 않고, 그 사이 다른 커밋이 올라왔으면 브랜치 이동이 거절된다(force 안 함).
+  // shown 은 사용자가 확인한 파일 목록(읽지 못했으면 null) — 그 뒤에 이 덱에 파일이 더해졌으면 지우지 않고 새 목록을 보여 준다.
+  async function deleteWithToken(d, shown) {
+    const { head, root, blobs } = await readTree();
+    const paths = deckFilesIn(d, blobs.map((b) => b.path));
+    if (!paths.length) throw new Error('저장소에서 이 덱의 파일을 찾지 못했습니다 — 이미 지워졌을 수 있습니다. 새로 고쳐 보세요.');
+    if (shown && paths.some((p) => !shown.includes(p))) {
+      const err = new Error('목록을 확인한 뒤 이 덱의 파일이 바뀌었습니다 — 아래 새 목록을 확인하고 다시 눌러 주세요.');
+      err.fresh = paths;
+      throw err;
+    }
+    if (paths.length > DELETE_MAX_FILES) {
+      throw new Error(`지울 파일이 너무 많습니다(${num(paths.length)}개) — 이 PC 에서 slides remove 로 내려 주세요.`);
+    }
+    const entries = paths.map((path) => ({ path, mode: '100644', type: 'blob', sha: null }));
+    let layout = null;                           // 자리를 뺀 배치 파일(바뀐 것이 없으면 null)
+    const lay = blobs.find((b) => b.path === LAYOUT_PATH);
+    // id 가 같은 다른 덱(x.html 과 x/index.html)이 남아 있으면 그 덱의 자리이기도 하니 배치는 그대로 둔다
+    const shared = state.decks.some((x) => x.id === d.id && x.path !== d.path);
+    if (lay && !shared) {
+      const file = decodeFile((await ghJson(repoApi(`git/blobs/${lay.sha}`))).content);
+      const assign = file && file.assign && typeof file.assign === 'object' && !Array.isArray(file.assign) ? file.assign : null;
+      const inAssign = !!assign && Object.prototype.hasOwnProperty.call(assign, d.id);
+      const inOrder = !!file && Array.isArray(file.order) && file.order.includes(d.id);
+      if (inAssign || inOrder) {
+        layout = { ...file };
+        if (inAssign) {
+          layout.assign = { ...assign };
+          delete layout.assign[d.id];
+        }
+        if (inOrder) layout.order = file.order.filter((id) => id !== d.id);
+        layout.rev = newRev();                   // 다른 화면에서 편집 중이면 ‘그 사이 저장됨’으로 알아챈다
+        entries.push({ path: LAYOUT_PATH, mode: '100644', type: 'blob', content: `${JSON.stringify(layout, null, 1)}\n` });
+      }
+    }
+    const made = await ghJson(repoApi('git/trees'), jsonBody('POST', { base_tree: root, tree: entries }));
+    if (!made || typeof made.sha !== 'string') throw new Error('GitHub 이 새 파일 목록을 만들지 못했습니다.');
+    const commit = { message: `docs: 덱 삭제 — ${deckName(d)}(갤러리 메뉴)`, tree: made.sha, parents: [head] };
+    if (state.author) {
+      commit.author = { ...state.author };
+      commit.committer = { ...state.author };
+    }
+    const c = await ghJson(repoApi('git/commits'), jsonBody('POST', commit));
+    if (!c || typeof c.sha !== 'string') throw new Error('GitHub 이 커밋을 만들지 못했습니다.');
+    const r = await gh(repoApi(`git/refs/heads/${enc(state.branch)}`), jsonBody('PATCH', { sha: c.sha, force: false }));
+    if (!r.ok) throw await apiError(r);
+    return { paths, layout };
+  }
+
+  // 방금 지워 아직 배포되지 않은 덱 {path, sig, at} — 탭마다(sessionStorage), 갤러리마다 둔다. 경로(덱마다 하나)와 판(sig)이
+  // 모두 맞는 덱만 숨기므로 같은 이름으로 다시 올려 내용이 달라진 덱은 가려지지 않는다.
+  const deletedKey = () => `${PREF.deleted}:${state.repo}`;
+
+  function readDeleted() {
+    const raw = sessGet(deletedKey());
+    if (!raw) return [];
+    try {
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        return list.filter((x) => x && typeof x.path === 'string' && typeof x.sig === 'string' && typeof x.at === 'number'
+          && Date.now() - x.at < PENDING_TTL);
+      }
+    } catch (e) { /* 깨졌으면 버린다 */ }
+    sessSet(deletedKey(), '');
+    return [];
+  }
+
+  function setDelPlan(msg, bad) {
+    els.delPlan.textContent = msg;
+    els.delPlan.classList.toggle('bad', !!bad);
+  }
+
+  function setDelStatus(msg, bad) {
+    els.delStatus.textContent = msg;
+    els.delStatus.classList.toggle('bad', !!bad);
+  }
+
+  function setDelBusy(on) {
+    del.busy = on;
+    els.delGo.disabled = on || !del.ready;
+    els.delClose.disabled = on;
+    els.delForget.disabled = on;
+  }
+
+  // 지워질 파일 목록과 ‘토큰 없이’ 길을 그린다. paths 는 저장소의 경로, shown 은 목록에 보일 글.
+  // exact: 저장소에서 읽은 목록인가(아니면 이 화면이 아는 파일만 보여 주는 것). ready: 삭제 단추를 눌러도 되는가.
+  function renderDeletePlan(d, paths, shown, note, { bad = false, exact = false, ready = false } = {}) {
+    del.files = paths;
+    del.exact = exact;
+    del.ready = ready;
+    els.delGo.disabled = del.busy || !ready;
+    els.delFiles.replaceChildren(...shown.slice(0, DELETE_LIST_MAX).map((s) => h('li', null, h('code', null, s))));
+    if (shown.length > DELETE_LIST_MAX) els.delFiles.append(h('li', null, `… 외 ${num(shown.length - DELETE_LIST_MAX)}개`));
+    setDelPlan(note, bad);
+    els.delLinks.replaceChildren();
+    const site = `https://github.com/${state.repo}`;
+    if (d.kind === 'dir') {
+      if (deletable(`${d.dir}/index.html`)) {
+        els.delLinks.append(h('li', null,
+          h('a', { href: `${site}/tree/${enc(state.branch)}/${enc(d.dir)}`, target: '_blank', rel: 'noopener' }, `${d.dir}/ 폴더 열기`),
+          ' — 폴더 화면의 ⋯ → Delete directory'));
+      }
+    } else {
+      for (const p of paths.slice(0, DELETE_LIST_MAX)) {
+        els.delLinks.append(h('li', null,
+          h('a', { href: `${site}/delete/${enc(state.branch)}/${enc(p)}`, target: '_blank', rel: 'noopener' }, p)));
+      }
+    }
+    els.delLinks.hidden = !els.delLinks.childElementCount;
+    const cmd = cmdOk(d.id) ? `slides remove "${d.id}"` : '';
+    els.delCmd.textContent = cmd || 'slides list';
+    els.delCopy.hidden = !cmd;
+  }
+
+  function openDelete(d, opener) {
+    if (edit.on || del.busy || !state.repo || !branchOk(state.branch)) return;
+    closeMenus();
+    del.d = d;
+    lastFocus = opener || document.activeElement;
+    els.delLead.replaceChildren('‘', h('b', null, d.title), '’ 덱을 저장소에서 지웁니다.');
+    renderDeletePlan(d, [], [], '저장소의 파일 목록을 읽는 중…');       // 목록을 보기 전에는 삭제 단추를 잠가 둔다
+    setDelStatus('');
+    els.delToken.value = '';
+    renderTokenState();
+    els.del.showModal();
+    (token ? els.delClose : els.delToken).focus();   // 토큰을 기억해 둔 채로 엔터 한 번에 지워지지 않게 삭제 단추에는 두지 않는다
+    const seq = ++del.seq;
+    readTree().then((t) => {
+      if (seq !== del.seq) return;
+      const paths = deckFilesIn(d, t.blobs.map((b) => b.path));
+      if (!paths.length) {
+        renderDeletePlan(d, [], [], '저장소에서 이 덱의 파일을 찾지 못했습니다 — 이미 지워졌거나 아직 올라가지 않았을 수 있습니다.',
+          { bad: true, exact: true });
+        return;
+      }
+      renderDeletePlan(d, paths, paths, planNote(d, paths), { exact: true, ready: true });
+    }, (err) => {
+      if (seq !== del.seq) return;
+      // 목록을 못 읽어도 삭제는 누르는 순간 다시 읽어 정확한 목록으로 한다 — 여기서는 이 화면이 아는 파일만 보여 준다
+      const known = [...new Set([d.path, d.pdf, d.pptx].filter(deletable))];
+      const shown = d.kind === 'dir' ? [`${d.dir}/ (폴더 안 전부)`] : known;
+      // 토큰 없이 읽다 거절된 것(요청 한도·비공개 저장소)에는 ‘토큰이 맞지 않다’는 말이 어울리지 않는다
+      const why = err && err.forget && !token
+        ? '저장소의 파일 목록을 읽지 못했습니다(GitHub 요청 한도에 걸렸거나 비공개 저장소입니다).'
+        : (err && err.message) || '저장소의 파일 목록을 읽지 못했습니다.';
+      renderDeletePlan(d, d.kind === 'dir' ? [] : known, shown, `${why} 지우는 순간 다시 읽어 정확한 목록으로 지웁니다.`,
+        { bad: true, ready: true });
+    });
+  }
+
+  // 지운 뒤: 화면에서 덱을 빼고, 낡은 목록(decks.json)이 다시 보여 주지 않게 이 탭에 적어 둔다.
+  function deleted(d, result) {
+    const at = visible().findIndex((x) => x.path === d.path);
+    state.decks = state.decks.filter((x) => x.path !== d.path);       // id 가 같은 다른 덱(x.html 과 x/index.html)은 남긴다
+    if (result.layout) {                         // 배치 파일의 rev 가 바뀌었으니 이 화면의 기준도 새 것으로(저장 때 ‘그 사이 저장됨’을 묻지 않게)
+      state.applied = cleanLayout(result.layout);
+      state.layoutExists = true;
+      const prev = readPending();                // 아직 배포되지 않은 배치 저장의 알림은 그대로 둔다
+      sessSet(pendingKey(), JSON.stringify({ rev: result.layout.rev, at: Date.now(), layout: result.layout,
+        quiet: !prev || !!prev.quiet }));
+    }
+    const list = readDeleted();
+    list.push({ path: d.path, sig: deckSig(d), at: Date.now() });
+    sessSet(deletedKey(), JSON.stringify(list));
+    pendingFlags.deleted = list.length;
+    applyLayout(state.applied);
+    if (state.folder && !state.folders.some((f) => f.key === state.folder)) {   // 그 분류의 마지막 덱이었으면 ‘전체’로
+      state.folder = '';
+      prefSet(PREF.folder, '');
+    }
+    renderAll();
+    renderPending();
+    lastFocus = () => {                          // 지운 카드 자리에 온 카드(없으면 찾기 칸)
+      const list2 = visible();
+      const near = list2[Math.min(Math.max(at, 0), list2.length - 1)];
+      const el = near ? cardEls.get(near.id) : null;
+      return (el && el.querySelector('.title a')) || els.q;
+    };
+    if (els.del.open) els.del.close();
+    toast('삭제했습니다 — 1~2분 뒤 모두에게서 사라집니다');
+  }
+
+  async function onDelete(e) {
+    e.preventDefault();
+    if (del.busy || !del.d || !del.ready) return;
+    if (foreign()) {
+      els.delToken.value = '';
+      setDelStatus(FOREIGN_DELETE_MSG, true);
+      return;
+    }
+    if (!token) {
+      const typed = els.delToken.value.trim();
+      if (!/^[A-Za-z0-9_]{20,255}$/.test(typed)) {
+        setDelStatus('GitHub 토큰을 넣어 주세요(github_pat_ 으로 시작하는 fine-grained 토큰).', true);
+        els.delToken.focus();
+        return;
+      }
+      token = typed;
+    }
+    els.delToken.value = '';
+    renderTokenState();
+    const d = del.d;
+    setDelBusy(true);
+    setDelStatus('지우는 중…');
+    let result;
+    try {
+      result = await deleteWithToken(d, del.exact ? del.files : null);
+    } catch (err) {
+      if (err && err.fresh) renderDeletePlan(d, err.fresh, err.fresh, planNote(d, err.fresh), { exact: true, ready: true });
+      setDelBusy(false);
+      if (err && err.forget) token = '';
+      renderTokenState();
+      const msg = (err && err.message) || '삭제하지 못했습니다.';
+      setDelStatus(msg, true);
+      if (els.del.open) (token ? els.delGo : els.delToken).focus();
+      else toast(msg);                           // 지우는 동안 창이 닫혔으면(Esc 를 거듭 누름 등) 알림으로
+      return;
+    }
+    setDelBusy(false);
+    deleted(d, result);
   }
 
   /* ---------- 메뉴·창·알림 */
@@ -1198,16 +1528,28 @@
       els.editBtn.hidden = false;
       const owner = state.repo.split('/')[0];
       const q = new URLSearchParams({
-        name: 'html-slides 갤러리 편집', description: `${state.repo} 첫 화면의 덱 순서·분류 저장(contents 쓰기만)`,
+        name: 'html-slides 갤러리 편집', description: `${state.repo} 첫 화면의 덱 순서·분류 저장, 덱 삭제(contents 쓰기만)`,
         target_name: owner, expires_in: '90', contents: 'write',
       });
       els.tokenNew.href = `https://github.com/settings/personal-access-tokens/new?${q}`;
+      els.delTokenNew.href = els.tokenNew.href;
     }
     const a = site.author;
     if (a && typeof a.name === 'string' && typeof a.email === 'string' && NOREPLY_RE.test(a.email)) {
       state.author = { name: a.name, email: a.email };
     }
     els.gen.textContent = data.generated ? `목록 만든 때 ${fmtStamp(toTime(data.generated))}` : '';
+
+    // 방금 지워 아직 배포되지 않은 덱은 목록(decks.json)이 낡았어도 숨긴다. 목록에 같은 덱(경로·판)이 아직 있으면 지운 것이
+    // 아직 배포되지 않은 것이다 — 목록을 만든 시각으로는 가리지 못한다(먼저 시작한 배포가 옛 커밋으로 끝나 나중에 올라올 수 있음).
+    // 목록에서 사라졌거나 판이 달라진(다시 올린) 덱의 기록은 버린다.
+    if (state.repo) {
+      const recent = readDeleted();
+      const live = recent.filter((x) => state.decks.some((d) => d.path === x.path && deckSig(d) === x.sig));
+      state.decks = state.decks.filter((d) => !live.some((x) => x.path === d.path && x.sig === deckSig(d)));
+      pendingFlags.deleted = live.length;
+      if (live.length !== recent.length) sessSet(deletedKey(), live.length ? JSON.stringify(live) : '');
+    }
 
     // 배치 — decks.json 에 없으면(예전 목록) 폴더 칩으로 분류 목록을 만든다.
     const lay = data.layout && typeof data.layout === 'object' && !Array.isArray(data.layout) ? data.layout : null;
@@ -1227,11 +1569,12 @@
     if (pending && pending.rev !== state.layout.rev) {
       state.applied = cleanLayout(pending.layout);
       state.layoutExists = true;                 // 저장했으니 파일은 이미 저장소에 있다
-      showPending();
+      if (!pending.quiet) showPending();         // 덱을 지우며 자리를 뺀 배치(quiet)는 따로 알리지 않는다
     } else {
       if (pending) sessSet(pendingKey(), '');   // 배포가 끝났다
       state.applied = state.layout;
     }
+    renderPending();
     applyLayout(state.applied);
 
     state.sort = state.applied.order.length ? 'custom' : 'updated';
@@ -1322,10 +1665,26 @@
   });
   els.ghSave.addEventListener('click', onGithubSave);
 
+  els.delClose.addEventListener('click', () => { if (!del.busy) els.del.close(); });
+  els.del.addEventListener('cancel', (e) => { if (del.busy) e.preventDefault(); });      // 지우는 동안 Esc
+  els.del.addEventListener('close', () => { del.seq += 1; del.d = null; els.delToken.value = ''; restoreFocus(); });
+  els.delForm.addEventListener('submit', onDelete);
+  els.delForget.addEventListener('click', () => {
+    token = '';
+    renderTokenState();
+    setDelStatus('토큰을 잊었습니다.');
+    els.delToken.focus();
+  });
+  els.delCopy.addEventListener('click', () => {
+    copyText(els.delCmd.textContent).then((ok) => {
+      setDelStatus(ok ? '명령을 복사했습니다.' : '복사하지 못했습니다 — 위 명령을 직접 복사하세요.', !ok);
+    });
+  });
+
   // 바깥(배경)을 누르면 닫는다. 창 안을 누른 것은 e.target 이 창 자신이 아니므로 걸리지 않는다.
-  for (const dlg of [els.viewer, els.help, els.cats, els.save]) {
+  for (const dlg of [els.viewer, els.help, els.cats, els.save, els.del]) {
     dlg.addEventListener('click', (e) => {
-      if (e.target !== dlg || (dlg === els.save && edit.busy)) return;
+      if (e.target !== dlg || (dlg === els.save && edit.busy) || (dlg === els.del && del.busy)) return;
       const r = dlg.getBoundingClientRect();
       const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
       if (!inside) dlg.close();

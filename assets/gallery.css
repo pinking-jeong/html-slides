@@ -19,6 +19,7 @@
   --warn-line: #EBCB8B;
   --warn-ink: #6B4A00;
   --err: #B42318;
+  --on-err: #FFFFFF;
   --shadow: 0 1px 2px rgba(18, 28, 36, .05), 0 6px 18px rgba(18, 28, 36, .06);
   --shadow-hover: 0 2px 4px rgba(18, 28, 36, .06), 0 14px 32px rgba(18, 28, 36, .12);
   --backdrop: rgba(10, 16, 20, .74);
@@ -48,6 +49,7 @@
     --warn-line: #6B5520;
     --warn-ink: #F0D79A;
     --err: #FF8F80;
+    --on-err: #2A0A06;
     --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 6px 18px rgba(0, 0, 0, .28);
     --shadow-hover: 0 2px 4px rgba(0, 0, 0, .4), 0 14px 32px rgba(0, 0, 0, .45);
     --backdrop: rgba(0, 0, 0, .8);
@@ -122,6 +124,9 @@ a { color: inherit; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn.ghost:disabled:hover { border-color: var(--line2); color: var(--ink); }
 .btn.primary:disabled:hover { background: var(--accent); }
+.btn.danger { background: var(--err); color: var(--on-err); }
+.btn.danger:hover { filter: brightness(.92); }
+.btn.danger:disabled:hover { filter: none; }
 
 /* 소개 */
 .intro { padding-block: 34px 18px; }
@@ -214,6 +219,8 @@ a { color: inherit; }
 }
 .menu a:hover, .menu button:hover { background: var(--accent-soft); color: var(--accent); }
 .menu small { color: var(--muted); font-size: 12px; word-break: break-all; }
+.menu .danger { color: var(--err); }
+.menu .danger:hover { background: var(--warn-bg); color: var(--err); }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
 
 /* 알림·빈 화면 */
@@ -315,6 +322,10 @@ dialog::backdrop { background: var(--backdrop); }
 .help-body .status.bad { color: var(--err); }
 .help-body .fine { color: var(--muted); font-size: 13px; }
 .help-body .gh-link { display: block; margin-top: 8px; font-size: 13px; }
+/* 덱 삭제 창 */
+.del-files, .del-links { margin: 8px 0 0; padding-left: 20px; }
+.del-files code, .del-links a { overflow-wrap: anywhere; word-break: break-all; }
+.del-links { font-size: 13.5px; }
 .layout-text {
   display: block; width: 100%; min-height: 140px; margin-top: 10px; padding: 8px; resize: vertical;
   font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
