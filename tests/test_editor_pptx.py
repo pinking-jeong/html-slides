@@ -543,11 +543,12 @@ def test_pptx_settles_motion_links_repeated_backgrounds_and_odd_text(browser, tm
             ET.fromstring(z.read(n))
     s1, s2, s3 = slides(z)
     assert all(clean(x) for x in (s1, s2, s3))
-    # 등장 애니메이션(.3s 뒤 투명에서 24px 올라옴)은 끝난 모습으로 — 제목이 빠지지 않고 제자리(위 100px = 952500 EMU)에
+    # 등장 애니메이션(.3s 뒤 투명에서 24px 올라옴)은 끝난 모습으로 — 제목이 빠지지 않고 제자리(위 100px = 952500 EMU)에.
+    # 한 줄 제목(40px)은 PowerPoint 가 CSS 보다 글자 크기의 0.07배(2.8px) 위에 그리므로 그만큼 아래로 옮긴 자리(lineShift)다.
     for s, t in ((s1, "첫 장 제목"), (s2, "둘째 장 제목"), (s3, "셋째 장 제목")):
         sp = next(x for x in shapes(s) if f"<a:t>{t}</a:t>" in x)
         y = int(re.search(r'<a:off x="-?\d+" y="(-?\d+)"/>', sp).group(1))
-        assert abs(y - 952500) <= 2 * 9525, (t, y)
+        assert abs(y - (952500 + round(0.07 * 40 * 9525))) <= 9525, (t, y)
     assert any('val="FFD400"' in sp for sp in shapes(s1))   # 끝없이 도는 것은 그 자리에 멈춘 도형으로
     # 링크 — 덱 안의 자리는 그 장으로, 바깥 주소는 그대로, 상대 주소·javascript: 는 글만
     rels = z.read("ppt/slides/_rels/slide1.xml.rels").decode("utf-8")

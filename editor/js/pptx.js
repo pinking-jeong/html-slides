@@ -21,7 +21,7 @@ const SCALE = 2;                 // 그림으로 옮기는 도표·배경의 해
 const MAX_PX = 4096;             // 그림 한 장의 긴 변 상한
 const SKIP = new Set(['script', 'style', 'template', 'noscript', 'link', 'meta', 'title', 'base', 'head']);
 const MEDIA = new Set(['canvas', 'video', 'audio', 'iframe', 'object', 'embed']);
-const EMBED = new Set(['img', 'svg', 'table', 'picture', ...MEDIA]);   // 글상자 안에 있어도 따로 옮기는 것
+const EMBED = new Set(['img', 'svg', 'table', 'picture', 'input', ...MEDIA]);   // 글상자 안에 있어도 따로 옮기는 것
 const BLOCK = new Set(['block', 'list-item', 'flex', 'grid', 'table', 'table-row', 'table-cell', 'table-caption',
   'flow-root', 'table-row-group', 'table-header-group', 'table-footer-group']);
 const ALIGN = { left: 'left', start: 'left', right: 'right', end: 'right', center: 'center', justify: 'justify',
@@ -32,6 +32,7 @@ const NUMBER = { decimal: 'arabicPeriod', 'decimal-leading-zero': 'arabicPeriod'
   'lower-latin': 'alphaLcPeriod', 'upper-alpha': 'alphaUcPeriod', 'upper-latin': 'alphaUcPeriod',
   'lower-roman': 'romanLcPeriod', 'upper-roman': 'romanUcPeriod' };
 const MARKS = { disc: '2022', circle: '25E6', square: '25AA' };
+const PAGE_CLASSES = ['pg', 'pgno', 'pageno', 'page-no', 'pagenum', 'page-num', 'page-number', 'slide-no', 'slide-num', 'slide-number'];
 const PLAIN = '200B';            // 글머리표 없는 문단의 왼쪽 여백을 실어 보내는 보이지 않는 표시 — tidy 가 buNone 으로 바꾼다
 const NBSP = String.fromCharCode(0xA0);
 const NBHY = String.fromCharCode(0x2011);                            // 꺾이지 않는 붙임표
@@ -261,10 +262,59 @@ class Exporter {
     await this.background(el);
     await this.pseudo(el, '::before', 1);
     await this.children(el, 1);
+    await this.scriptNumber(el, i);
     await this.pseudo(el, '::after', 1);
     const notes = notesText(this.model, el);
     if (notes) this.s.addNotes(notes);
     this.count.slides += 1;
+  }
+
+  // 덱 스크립트가 장마다 만드는 쪽 번호 — 편집 화면은 덱 스크립트를 돌리지 않아 그 칸이 없다. 덱의 스타일시트에 쪽 번호 칸 이름
+  // (PAGE_CLASSES)의 규칙이 있고 덱 스크립트가 그 이름을 쓰는데 이 장에 그 칸이 없으면, 장 번호를 단 칸을 잠깐 달아 옮기고 바로
+  // 뗀다(덱 스크립트가 하는 일과 같다 — 번호는 지금 장 순서의 몇 번째). 모양(자리·글꼴·색)은 덱의 규칙 그대로 잰다.
+  async scriptNumber(el, i) {
+    const cls = this.pageClass();
+    if (!cls || el.querySelector(`:scope > .${cls}`)) return;
+    const d = this.doc.createElement('div');
+    d.className = cls;
+    d.textContent = String(i + 1);
+    el.appendChild(d);
+    try {
+      // 쪽 번호 칸은 장 안의 정해진 자리에 놓인다(절대·고정 자리). 덱의 규칙이 이 칸에 안 닿으면(`.foot .pg` 처럼 다른 칸 안에서만
+      // 쓰이는 규칙) 스타일 없는 번호가 장 왼쪽 위에 얹힌다 — 그리지 않는다
+      if (/^(absolute|fixed)$/.test(this.win.getComputedStyle(d).position)) await this.visit(d, 1);
+    } finally {
+      d.remove();
+    }
+  }
+
+  // 쪽 번호 칸의 이름 — 덱 스타일시트에 `.이름` 규칙이 있고 덱 스크립트가 그 이름을 글로 쓰는 것. 없으면 null(덱마다 한 번만 알아본다).
+  pageClass() {
+    if (this.pgClass !== undefined) return this.pgClass;
+    this.pgClass = null;
+    const code = [...this.doc.scripts].map((s) => s.textContent || '').join('\n');
+    if (!code) return null;
+    const rules = [];
+    const collect = (list) => {
+      for (const r of list) {
+        if (r.selectorText) rules.push(r.selectorText);
+        else if (r.cssRules) collect(r.cssRules);
+      }
+    };
+    for (const sheet of this.doc.styleSheets) {
+      try {
+        collect(sheet.cssRules);
+      } catch (e) { /* 다른 출처의 스타일시트 — 읽지 못한다 */ }
+    }
+    for (const name of PAGE_CLASSES) {
+      const used = code.includes(`'${name}'`) || code.includes(`"${name}"`);
+      const styled = rules.some((sel) => new RegExp(`(^|[\\s,>+~])\\.${name}(?![\\w-])`).test(sel));
+      if (used && styled) {
+        this.pgClass = name;
+        break;
+      }
+    }
+    return this.pgClass;
   }
 
   // 띄운 장의 글꼴이 다 올 때까지 — 웹 글꼴은 그 장에 쓰인 글자 묶음만 그때 불러오므로, 먼저 배치를 시켜 불러오게 하고
@@ -395,13 +445,54 @@ class Exporter {
       if (shown && g) await this.media(e, g, o);
       return;
     }
+    // 슬라이더 — 화면의 기본 모양을 도형으로(입력 칸의 흰 바탕은 그리지 않는다). 덱이 appearance:none 으로 제 모양을 입혔거나
+    // 돌려 세웠으면(세로 슬라이더) 기본 모양이 아니므로 일반 상자로(덱의 배경·테두리)
+    if (tag === 'input' && e.type === 'range' && cs.appearance !== 'none' && !(g && g.rot) && cs.writingMode === 'horizontal-tb') {
+      if (shown && g) this.slider(e, cs, g, o);
+      return;
+    }
     if (shown && g) await this.box(e, cs, g, o);
     await this.pseudo(e, '::before', o);
     if (tag === 'table') {
-      if (shown && g) await this.table(e, g, o);
+      // 칸이 둥글거나 칸 사이가 떨어진 격자(행렬·히트맵)는 PowerPoint 표로 옮기면 모양이 달라진다 — 칸마다 도형·글상자로
+      if (shown && g) await (this.gridTable(e) ? this.children(e, o) : this.table(e, g, o));
     } else if (this.hosts.has(e) || directText(e)) await this.text(e, cs, g, o);
     else await this.children(e, o);
     await this.pseudo(e, '::after', o);
+  }
+
+  // 슬라이더(input[type=range]) — 브라우저 기본 모양(회색 윤곽의 홈 + accent-color 로 채운 부분 + 동그란 손잡이)을 도형으로.
+  // 홈 8px(윤곽 1px)·손잡이 16px 는 Chrome 기본 크기, 손잡이 가운데는 양끝에서 반지름만큼 안쪽에서 값의 비율대로.
+  slider(e, cs, g, o) {
+    const k = this.k;
+    const acc = rgba(cs.accentColor) || { hex: '0075FF', a: 1 };
+    const min = parseFloat(e.min) || 0;
+    const max = Number.isFinite(parseFloat(e.max)) ? parseFloat(e.max) : 100;
+    const v = Number.isFinite(parseFloat(e.value)) ? parseFloat(e.value) : min;
+    const f = max > min ? Math.max(0, Math.min(1, (v - min) / (max - min))) : 0;
+    const trackH = 8 * k;
+    const thumb = Math.min(16 * k, g.h);
+    const left = g.x + 2 * k;
+    const width = Math.max(thumb, g.w - 4 * k);
+    const ty = g.y + (g.h - trackH) / 2;
+    const rtl = cs.direction === 'rtl';                   // 오른쪽에서 왼쪽 — 최솟값이 오른쪽 끝, 채움은 오른쪽에서부터
+    const cx = g.x + thumb / 2 + (rtl ? 1 - f : f) * (g.w - thumb);
+    const transparency = transp(o);
+    this.s.addShape('roundRect', {
+      ...this.at({ x: left, y: ty, w: width, h: trackH }), rectRadius: inch(trackH / 2),
+      fill: { color: 'EFEFEF', transparency }, line: { color: '808080', width: r2(k * PT), transparency },
+    });
+    const fillW = rtl ? left + width - cx - k : cx - left - k;
+    if (fillW > 0.5) {
+      this.s.addShape('roundRect', {
+        ...this.at({ x: rtl ? cx : left + k, y: ty + k, w: fillW, h: trackH - 2 * k }), rectRadius: inch((trackH - 2 * k) / 2),
+        fill: { color: acc.hex, transparency }, line: { type: 'none' },
+      });
+    }
+    this.s.addShape('ellipse', {
+      ...this.at({ x: cx - thumb / 2, y: g.y + (g.h - thumb) / 2, w: thumb, h: thumb }),
+      fill: { color: acc.hex, transparency }, line: { type: 'none' },
+    });
   }
 
   // 나란히 놓인 칸의 하나(text 가 나눈 것) — 제 자리의 글상자로
@@ -555,15 +646,71 @@ class Exporter {
       return { w, c, style };
     });
     const lined = sides.filter((s) => s.w > 0.2);
-    if (!bg && !image && !lined.length) return;
+    const shadows = rect ? [] : shadowsOf(cs);
+    if (!bg && !image && !lined.length && !shadows.length) return;
     const shape = this.shapeOf(cs, g, rect);
+    // 바깥 그림자 — 번지지 않는 것은 아래(마지막)부터 겹쳐 그린다(첫 그림자가 맨 위). CSS 는 바깥 그림자를 상자 바깥에만 칠하므로
+    // (상자 안쪽은 비어 뒤가 비친다) 속을 채우면 안 된다:
+    //  · 밀리지 않은 것(링·테두리 흉내) → 상자 바깥으로 spread 만큼 두른 고리(선만) — 모서리가 둥글어도 그대로 맞는다
+    //  · 밀린 것(딱딱한 그림자) → 배경이 불투명이면 속이 가려지므로 키워 민 도형 그대로, 아니면 네모 상자에 한해 상자 밖 조각들로.
+    //    그 밖(둥근 상자·돌린 상자)은 속을 채워 글을 덮느니 그리지 않는다
+    // 번지는 부드러운 그림자는 배경 도형의 PowerPoint 그림자로(배경이 없으면 그릴 것이 없다).
+    let soft = null;
+    const opaque = !!bg && bg.a * o >= 0.99;
+    for (let i = shadows.length - 1; i >= 0; i -= 1) {
+      const s = shadows[i];
+      if (s.inset) continue;
+      if (s.blur > 0.5) {
+        soft = s;
+        continue;
+      }
+      const grow = s.spread * this.k;
+      const at = { ...g, x: g.x - grow + s.x * this.k, y: g.y - grow + s.y * this.k, w: g.w + 2 * grow, h: g.h + 2 * grow };
+      if (!(at.w > 0.5 && at.h > 0.5)) continue;
+      const tone = { color: s.c.hex, transparency: transp(s.c.a * o) };
+      if (Math.abs(s.x) <= 0.5 && Math.abs(s.y) <= 0.5) {
+        if (grow < 0.2) continue;                       // 상자에 가려진다
+        const mid = { ...g, x: g.x - grow / 2, y: g.y - grow / 2, w: g.w + grow, h: g.h + grow };
+        this.s.addShape(shape.name, {
+          ...this.at(mid), rectRadius: shape.r === undefined ? undefined : r2(shape.r + inch(grow / 2)),
+          line: { ...tone, width: r2(grow * PT) },
+        });
+      } else if (opaque) {
+        this.s.addShape(shape.name, {
+          ...this.at(at), rectRadius: shape.r === undefined ? undefined : r2(shape.r + inch(grow)),
+          fill: tone, line: { type: 'none' },
+        });
+      } else if (shape.name === 'rect' && !g.rot) {
+        for (const c of outside(at, g)) this.s.addShape('rect', { ...this.at(c), fill: tone, line: { type: 'none' } });
+      }
+    }
     if (bg) {
-      this.s.addShape(shape.name, {
-        ...this.at(g), rectRadius: shape.r,
-        fill: { color: bg.hex, transparency: transp(bg.a * o) }, line: { type: 'none' },
-      });
+      const fill = { color: bg.hex, transparency: transp(bg.a * o) };
+      const opts = { ...this.at(g), rectRadius: shape.r, fill, line: { type: 'none' } };
+      if (soft) {
+        // CSS 의 번짐(blur)·밀림(x, y) → PowerPoint 바깥 그림자(pt). 각은 오른쪽을 0, 아래를 90 으로 시계 방향.
+        // pptxgenjs 는 0 을 "안 줌"으로 보고 offset 4pt·각 270°(위)로 바꾸므로, 0 은 눈에 안 띄게 작은 값으로 준다.
+        const deg = Math.round(((Math.atan2(soft.y, soft.x) * 180) / Math.PI + 360) % 360);
+        opts.shadow = {
+          type: 'outer', color: soft.c.hex, opacity: Math.max(0.01, Math.min(1, soft.c.a * o)),
+          blur: Math.max(0.01, Math.min(100, r2(soft.blur * this.k * PT))),
+          offset: Math.max(0.01, Math.min(200, r2(Math.hypot(soft.x, soft.y) * this.k * PT))),
+          angle: deg % 360 || 359,
+        };
+      }
+      this.s.addShape(shape.name, opts);
     }
     if (image) await this.paint(e, cs, g, o);
+    // 안쪽 그림자 가운데 번지지 않고 밀리지 않은 것(inset 0 0 0 Npx — 안쪽 테두리)은 안쪽 선으로
+    for (const s of shadows) {
+      if (!s.inset || s.blur > 0.5 || Math.abs(s.x) > 0.5 || Math.abs(s.y) > 0.5 || s.spread * this.k < 0.2) continue;
+      const w = s.spread * this.k;
+      const inner = { ...g, x: g.x + w / 2, y: g.y + w / 2, w: Math.max(0.5, g.w - w), h: Math.max(0.5, g.h - w) };
+      this.s.addShape(shape.name, {
+        ...this.at(inner), rectRadius: shape.r === undefined ? undefined : r2(Math.max(0, shape.r - inch(w / 2))),
+        line: { color: s.c.hex, width: r2(w * PT), transparency: transp(s.c.a * o) },
+      });
+    }
     const same = lined.length === 4 && lined.every((s) => s.w === lined[0].w && s.c.hex === lined[0].c.hex
       && s.style === lined[0].style);
     if (same) {
@@ -815,7 +962,12 @@ class Exporter {
   async text(host, cs, g, o) {
     // 0) 한 줄에 나란히 놓인 칸(flex·grid — 꼬리말의 쪽 번호, 알약, 키 상자, 카드 등)은 칸마다 제 자리의 글상자로 — 칸 사이에
     //    바로 든 글 조각도 그 글이 그려진 자리에
-    const items = this.sideBySide(host, cs);
+    let items = this.sideBySide(host, cs);
+    // 문단(재기만 한다) — 문단 흐름 밖에 떠 있는 것(절대 자리)은 따로 제 자리에 옮기므로 아래 1)에서 뺀다
+    const paras = !items && g ? this.paragraphs(host) : null;
+    // 0') 글을 글상자 하나에 위에서부터 흘리면 화면의 자리가 나오지 않는 칸(번호 원·그림이 사이에 끼거나, 열이 둘로 나뉘거나,
+    //     바깥 칸이 글을 아래·가운데로 민 카드)도 자식마다 제 자리의 글상자로
+    if (paras && !this.flows(host, cs, paras) && this.splittable(host, cs)) items = this.childItems(host);
     if (items) {
       for (const it of items) {
         if (it.nodeType === 3) this.loose(it, host, cs);
@@ -823,8 +975,6 @@ class Exporter {
       }
       return;
     }
-    // 문단(재기만 한다) — 문단 흐름 밖에 떠 있는 것(절대 자리)은 따로 제 자리에 옮기므로 아래 1)에서 뺀다
-    const paras = g ? this.paragraphs(host) : null;
     const floating = (d) => !!paras && paras.floaters.some((f) => f.contains(d));
     // 1) 글 속 상자(배경·테두리가 있는 span·p 등) — 줄마다 도형으로, 글상자보다 먼저(뒤에). 배경만 칠한 글 줄과 한 줄짜리
     //    배지(lit)는 글자 형광으로 옮겨 글과 함께 움직이게 하고, 글 없는 꾸밈(::before·::after)도 여기서
@@ -833,7 +983,8 @@ class Exporter {
       const dcs = this.win.getComputedStyle(d);
       if (dcs.display === 'none') continue;
       const lit = this.lit(d, dcs);
-      if (dcs.visibility === 'visible' && !lit && (rgba(dcs.backgroundColor) || hasBorder(dcs))) {
+      if (dcs.visibility === 'visible' && !lit
+        && (rgba(dcs.backgroundColor) || hasBorder(dcs) || hasImage(dcs) || shadowsOf(dcs).length)) {
         const rects = dcs.display === 'inline' ? [...d.getClientRects()] : [d.getBoundingClientRect()];
         for (const rc of rects) {
           const dg = this.geom(d, dcs, rc);
@@ -847,7 +998,7 @@ class Exporter {
     if (paras && paras.some((p) => p.runs.some((r) => r.text.trim()))) this.addTextBox(host, cs, g, paras);
     for (const f of (paras && paras.floaters) || []) await this.item(f, o);
     // 3) 글 속 그림·도표·표 — 글상자 위에
-    for (const d of host.querySelectorAll('img, svg, table, canvas, video, audio, iframe, object, embed')) {
+    for (const d of host.querySelectorAll('img, svg, table, input, canvas, video, audio, iframe, object, embed')) {
       if (outerEmbed(d, host) && !floating(d)) await this.visit(d, o);
     }
   }
@@ -856,23 +1007,8 @@ class Exporter {
   // 아니면 null(한 글상자로)
   sideBySide(host, cs) {
     if (!/flex|grid/.test(cs.display) || /column/.test(cs.flexDirection)) return null;
-    const items = [];
     const flow = [];
-    for (const n of host.childNodes) {
-      if (n.nodeType === 3) {
-        if (!/\S/.test(n.data)) continue;
-        const rg = this.doc.createRange();
-        rg.selectNodeContents(n);
-        items.push(n);
-        flow.push(rg.getBoundingClientRect());
-        continue;
-      }
-      if (n.nodeType !== 1 || SKIP.has(n.localName) || n.hasAttribute(A.ui)) continue;
-      const ccs = this.win.getComputedStyle(n);
-      if (ccs.display === 'none') continue;
-      items.push(n);
-      if (ccs.position !== 'absolute' && ccs.position !== 'fixed') flow.push(n.getBoundingClientRect());
-    }
+    const items = this.childItems(host, (n, rect) => flow.push(rect));
     for (let i = 1; i < flow.length; i += 1) {
       const a = flow[i - 1];
       const b = flow[i];
@@ -880,6 +1016,117 @@ class Exporter {
       if (overlap > 0.5 * Math.min(a.height, b.height) && (b.left >= a.right - 1 || a.left >= b.right - 1)) return items;
     }
     return null;
+  }
+
+  // 자식마다 글상자로 나눠도 되는가 — 자식이 화면에서 제각각의 칸일 때만. 한 줄로 이어지는 글(블록 host 에 든 글 조각·span·b·
+  // 인라인 그림)은 여러 줄로 꺾이므로 조각으로 나누면 줄마다 겹쳐 그려진다 → 나누지 않는다(옛 방식: 글상자 하나). flex·grid host 의
+  // 자식은 줄 안 흐름이 아니라 칸으로 바뀌어(blockify) 나눠도 된다. display:contents 자식은 자기 상자가 없어 글이 빠진다 → 나누지 않는다.
+  splittable(host, cs) {
+    const cells = /flex|grid/.test(cs.display);
+    for (const n of host.childNodes) {
+      if (n.nodeType === 3) {
+        if (/\S/.test(n.data) && !cells) return false;
+        continue;
+      }
+      if (n.nodeType !== 1 || SKIP.has(n.localName) || n.hasAttribute(A.ui)) continue;
+      const d = this.win.getComputedStyle(n).display;
+      if (d === 'none') continue;
+      if (d === 'contents' || (!cells && /^inline/.test(d))) return false;
+    }
+    return true;
+  }
+
+  // host 의 자식 칸 — 글이 든 글 조각과 보이는 요소(절대 자리의 것도). onFlow(노드, 자리): 흐름 안의 것(글 조각, 절대 자리가
+  // 아닌 요소)마다 — 나란히 놓였는지 재는 데 쓴다.
+  childItems(host, onFlow) {
+    const items = [];
+    for (const n of host.childNodes) {
+      if (n.nodeType === 3) {
+        if (!/\S/.test(n.data)) continue;
+        items.push(n);
+        if (onFlow) {
+          const rg = this.doc.createRange();
+          rg.selectNodeContents(n);
+          onFlow(n, rg.getBoundingClientRect());
+        }
+        continue;
+      }
+      if (n.nodeType !== 1 || SKIP.has(n.localName) || n.hasAttribute(A.ui)) continue;
+      const ccs = this.win.getComputedStyle(n);
+      if (ccs.display === 'none') continue;
+      items.push(n);
+      if (onFlow && ccs.position !== 'absolute' && ccs.position !== 'fixed') onFlow(n, n.getBoundingClientRect());
+    }
+    return items;
+  }
+
+  /* 문단들을 글상자 하나에 위에서부터 흘리면 화면의 자리가 나오는가 — 글 줄의 자리(글 노드 상자의 합)로 잰다. PowerPoint 글상자는
+     첫 글을 위(또는 valign 의 가운데·아래)에 두고 문단을 차례로 아래로 흘릴 뿐이라, 다음이면 거짓이다:
+     · 글이 위로 되돌아가거나 옆으로 갔다(열이 둘로 나뉜 목록·카드 격자),
+     · 첫 글이 상자 위에서 떨어져 있다(번호 원·그림이 먼저 왔거나, 바깥 칸이 글을 아래·가운데로 밀었거나, 문단 안쪽 여백),
+     · 가운데·오른쪽 맞춤 글이 상자의 가운데·오른쪽에 있지 않다.
+     잴 수 없으면 참(옛 방식 그대로). */
+  flows(host, cs, paras) {
+    // 글이 host 에 바로 든 한 문단은 늘 옛 방식 그대로 — 자식(칩·배지 li·span)이 안쪽 여백으로 글을 민 것은 아래에서 잰다
+    if (paras.length === 1 && paras[0].block === host && paras[0].nodes.every((n) => n.parentNode === host)) return true;
+    const win = this.win;
+    const rg = this.doc.createRange();
+    const rows = [];
+    for (const p of paras) {
+      let top = Infinity;
+      let bottom = -Infinity;
+      let left = Infinity;
+      let right = -Infinity;
+      for (const n of p.nodes) {
+        rg.selectNodeContents(n);
+        for (const r of rg.getClientRects()) {
+          if (!(r.width > 0.5 && r.height > 0.5)) continue;
+          top = Math.min(top, r.top);
+          bottom = Math.max(bottom, r.bottom);
+          left = Math.min(left, r.left);
+          right = Math.max(right, r.right);
+        }
+      }
+      if (bottom > top) rows.push({ p, top, bottom, left, right });
+    }
+    if (!rows.length) return true;
+    // 배경·테두리를 두른 flex·grid 칸(알약·칩·표 칸 같은 격자) 안의 글은 그 칸 상자 자리에 놓여 있어, 문단으로 이으면 칸마다의
+    // 자리·줄 바꿈이 사라진다 — 칸마다
+    for (const r of rows) {
+      for (const n of r.p.nodes) {
+        for (let e = n.parentElement; e && e !== host; e = e.parentElement) {
+          const par = e.parentElement && win.getComputedStyle(e.parentElement);
+          if (!par || !/flex|grid/.test(par.display)) continue;
+          const ecs = win.getComputedStyle(e);
+          if (ecs.position === 'absolute' || ecs.position === 'fixed') continue;
+          if (rgba(ecs.backgroundColor) || hasBorder(ecs)) return false;
+        }
+      }
+    }
+    const fs = (p) => px(win.getComputedStyle(p.block).fontSize) || 16;
+    for (let i = 1; i < rows.length; i += 1) {
+      if (rows[i].top < rows[i - 1].bottom - Math.max(2, 0.4 * fs(rows[i].p))) return false;
+      // 사이에 아이콘·그림이 끼어 문단 사이가 글자 크기의 두 배를 넘게 벌어졌다 — 보통의 문단 간격(여백·gap)이 아니다
+      if (rows[i].top - rows[i - 1].bottom > 2 * Math.max(fs(rows[i].p), fs(rows[i - 1].p))) return false;
+    }
+    const hr = host.getBoundingClientRect();
+    const pad = (s) => px(cs[`padding${s}`]) + px(cs[`border${s}Width`]);
+    const innerTop = hr.top + pad('Top');
+    const innerH = hr.height - pad('Top') - pad('Bottom');
+    const first = rows[0];
+    const spanH = rows[rows.length - 1].bottom - first.top;
+    const v = this.valignOf(host, cs);
+    const want = v === 'middle' ? innerTop + (innerH - spanH) / 2 : v === 'bottom' ? innerTop + innerH - spanH : innerTop;
+    const lh = px(win.getComputedStyle(first.p.block).lineHeight) || fs(first.p) * 1.3;
+    if (Math.abs(first.top - want) > Math.max(4, 0.25 * lh)) return false;
+    const innerL = hr.left + pad('Left');
+    const innerR = hr.right - pad('Right');
+    for (const r of rows) {
+      const al = r.p.para && r.p.para.align;
+      if (al === 'center' && Math.abs((r.left + r.right) / 2 - (innerL + innerR) / 2) > 4) return false;
+      if (al === 'right' && Math.abs(r.right - innerR) > 4) return false;
+    }
+    return true;
   }
 
   // 나란히 놓인 칸 사이에 바로 든 글 조각 하나 — 그 글이 그려진 자리의 글상자로(여러 줄로 꺾였으면 그 폭에서 꺾이게)
@@ -938,10 +1185,24 @@ class Exporter {
     // 한 줄짜리 글이 상자 높이를 거의 다 채우면 위아래 가운데에 — CSS 는 줄 높이에서 남는 틈을 위아래에 반씩 두어 글자를 줄
     // 가운데에 그린다(정한 줄 간격이 없는 PowerPoint 의 줄이 상자보다 높거나 낮아도 글자가 제자리에)
     const valign = single && Math.abs(inner - lh) <= lh * 0.25 ? 'middle' : this.valignOf(host, cs);
+    const dy = this.lineShift(paras, single, lh, biggest);
+    if (dy && !g.rot) box = { ...box, y: box.y + dy * this.k };       // 돌린 상자는 글 축이 달라 옮기지 않는다
     this.s.addText(symbolRuns(runs), {
       ...this.at(box), margin, valign, wrap: !single, isTextBox: true,
     });
     this.count.text += 1;
+  }
+
+  /* 글상자를 아래로 옮길 크기(CSS px) — PowerPoint 는 줄 안의 글자를 CSS 와 다르게 놓는다(맑은 고딕을 PowerPoint 로 그려 보고 잰 값,
+     글자 크기 12~56px·줄 높이 1.0~2.0 에서 ±0.8px 안). 한 줄짜리 글(줄 간격을 주지 않고 가운데에 둔다)은 글자 크기의 0.07배만큼
+     위에 놓이고, 정확한 줄 간격(spcPts)을 준 글은 줄 높이/글자 크기 r 에서 0.24·(r − 1.62)배만큼 아래(r < 1.62 이면 위)에 놓인다 —
+     상자를 그 반대로 옮겨 화면의 자리에 맞춘다. 다른 글꼴은 재어 보지 않았으므로 옮기지 않는다. */
+  lineShift(paras, single, lh, fs) {
+    const first = paras[0].runs[0];
+    if (!first || first.opts.fontFace !== 'Malgun Gothic' || !(fs > 0)) return 0;
+    if (single) return 0.07 * fs;
+    if (paras[0].para.lineSpacing === undefined) return 0;
+    return Math.max(-0.2, Math.min(0.2, 0.24 * (1.62 - lh / fs))) * fs;
   }
 
   valignOf(host, cs) {
@@ -960,6 +1221,25 @@ class Exporter {
   // 문단 흐름 밖(절대 자리)의 것은 따로 — 문단의 왼쪽 여백에 둔 글자 하나(①·√·※)는 그 문단의 글머리표로(marks), 그 밖은
   // 제 자리의 글상자로(floaters, text 가 옮긴다). inline-flex·inline-grid 의 칸은 줄 안의 글로 잇고, 글 줄의 옆 여백·안쪽
   // 여백·칸 사이(3px 이상)는 빈칸 하나로.
+  // 글 노드의 줄 시작 — [{ i: n.data 안의 글자 순번, top }], 글자마다 자리를 재어 줄(위 좌표)이 바뀐 곳(첫 줄 포함). 빈칸은 재지 않는다.
+  lineStarts(n) {
+    const rg = this.doc.createRange();
+    const out = [];
+    let lineTop = null;
+    for (let i = 0; i < n.data.length; i += 1) {
+      if (/\s/.test(n.data[i])) continue;
+      rg.setStart(n, i);
+      rg.setEnd(n, i + 1);
+      const r = rg.getClientRects()[0];
+      if (!r || !(r.width > 0 && r.height > 0)) continue;
+      if (lineTop === null || r.top > lineTop + 0.6 * r.height) {
+        out.push({ i, top: r.top });
+        lineTop = r.top;
+      }
+    }
+    return out;
+  }
+
   paragraphs(host) {
     const win = this.win;
     const paras = [];
@@ -973,7 +1253,7 @@ class Exporter {
       return host;
     };
     const start = (block) => {
-      cur = { block, runs: [], para: null };
+      cur = { block, runs: [], para: null, nodes: [], lastTop: null };      // nodes: 이 문단의 글 노드 — flows 가 화면 자리를 잰다
       paras.push(cur);
     };
     let soft = false;
@@ -991,9 +1271,32 @@ class Exporter {
         const mode = pcs.whiteSpace;
         const raw = collapse(n.data, mode);
         if (!raw) return;
+        // 열린 문단이 없는 곳의 빈칸·줄바꿈뿐인 글 조각(블록 사이 들여쓰기)은 화면에 아무것도 만들지 않는다 — 문단을 열면 빈 문단이 된다
+        if (!cur && !/\S/.test(raw) && !/^pre/.test(mode) && mode !== 'break-spaces') return;
         if (!cur) start(blockOf(n));
+        cur.nodes.push(n);
         const opts = this.runOpts(parent, pcs, cur.block);
-        const parts = /^pre/.test(mode) || mode === 'break-spaces' ? raw.split('\n') : [raw];
+        let parts = /^pre/.test(mode) || mode === 'break-spaces' ? raw.split('\n') : [raw];
+        // text-wrap: balance — 브라우저는 줄 길이를 고르게 맞춰 꺾지만 PowerPoint 는 꽉 채워 꺾는다(제목의 줄 바꿈 자리가 달라진다).
+        // 화면에서 줄이 시작하는 자리마다 줄바꿈(soft)을 넣어 같은 자리에서 꺾이게 한다 — 줄은 모두 상자 폭 안이라 더 꺾이지 않는다.
+        if (parts.length === 1 && /balance/.test(pcs.textWrapStyle || pcs.textWrap || '')) {
+          const lines = this.lineStarts(n);
+          if (lines.length) {
+            if (cur.lastTop != null && lines[0].top > cur.lastTop + 0.5 * (px(pcs.fontSize) || 16)) soft = true;
+            cur.lastTop = lines[lines.length - 1].top;
+            const cuts = lines.slice(1).map((l) => ({ at: collapse(n.data.slice(0, l.i), mode).length, ch: n.data[l.i] }))
+              .filter((c) => c.at > 0 && c.at < raw.length && raw[c.at] === c.ch).map((c) => c.at);
+            if (cuts.length) {
+              parts = [];
+              let from = 0;
+              for (const c of cuts) {
+                parts.push(raw.slice(from, c).replace(/ $/, ''));
+                from = c;
+              }
+              parts.push(raw.slice(from));
+            }
+          }
+        }
         const last = cur.runs[cur.runs.length - 1];
         if (last && last.gap && /^[)\]}」』》〉’”.,:;!?…]/u.test(parts[0])) cur.runs.pop();
         parts.forEach((t, i) => {
@@ -1235,6 +1538,24 @@ class Exporter {
   }
 
   /* ---------- 표 */
+
+  // PowerPoint 표가 못 담는 칸 모양의 표인가 — 둥근 모서리의 배경·테두리 칸, 또는 칸 사이가 떨어져(border-spacing 2.5px 넘게)
+  // 칸마다 배경·테두리가 있는 격자. 그런 표는 칸마다 도형으로 그려 화면 모양을 지킨다(표로서 고치는 길은 잃는다).
+  gridTable(t) {
+    const win = this.win;
+    const tcs = win.getComputedStyle(t);
+    const separate = tcs.borderCollapse !== 'collapse';
+    let painted = 0;
+    let round = 0;
+    for (const td of t.querySelectorAll('td, th')) {
+      const cs = win.getComputedStyle(td);
+      if (!rgba(cs.backgroundColor) && !hasBorder(cs)) continue;
+      painted += 1;
+      if (['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].some((c) => px(cs[`border${c}Radius`]) > 0.5)) round += 1;
+    }
+    // 칸 사이가 떨어졌거나(칸마다 따로 칠한 격자), 칠한 칸 대부분이 둥글다. 표 바깥 모서리 칸만 둥근 보통 표는 PowerPoint 표 그대로
+    return painted > 0 && separate && (px(tcs.borderSpacing) > 2.5 || round * 2 > painted);
+  }
 
   async table(t, g, o) {
     const win = this.win;
@@ -1618,6 +1939,53 @@ function directText(e) {
 // 테두리가 모두 가는가(1.5px 까지)
 function thinBorder(cs) {
   return ['Top', 'Right', 'Bottom', 'Left'].every((s) => /none|hidden/.test(cs[`border${s}Style`]) || px(cs[`border${s}Width`]) <= 1.5);
+}
+
+// box-shadow 계산값 → [{inset, x, y, blur, spread, c}](CSS px, c 는 rgba 결과) — 'rgb(..) 0px 0px 0px 2px inset, rgba(..) 0px 10px 30px 0px'
+function shadowsOf(cs) {
+  const v = cs.boxShadow;
+  if (!v || v === 'none') return [];
+  const parts = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of v) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    if (ch === ',' && depth === 0) {
+      parts.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  parts.push(cur);
+  const out = [];
+  for (const p of parts) {
+    const m = /(rgba?\([^)]*\))/.exec(p);
+    const c = m ? rgba(m[1]) : null;
+    if (!c) continue;
+    const rest = p.replace(m[1], ' ');
+    const [x = 0, y = 0, blur = 0, spread = 0] = (rest.match(/-?[\d.]+px/g) || []).map(px);
+    out.push({ inset: /\binset\b/.test(rest), x, y, blur, spread, c });
+  }
+  return out;
+}
+
+const hasImage = (cs) => !!cs.backgroundImage && cs.backgroundImage !== 'none';
+
+// 네모 a 가운데 네모 b 바깥에 있는 부분 — 겹치지 않는 네모 조각들 [{x, y, w, h}](위·아래 띠, 그 사이의 왼쪽·오른쪽 띠)
+function outside(a, b) {
+  const [al, at, ar, ab] = [a.x, a.y, a.x + a.w, a.y + a.h];
+  const [bl, bt, br, bb] = [b.x, b.y, b.x + b.w, b.y + b.h];
+  const out = [];
+  const add = (l, t, r, bo) => {
+    if (r - l > 0.01 && bo - t > 0.01) out.push({ x: l, y: t, w: r - l, h: bo - t });
+  };
+  add(al, at, ar, Math.min(ab, bt));                    // 위 띠(전체 폭)
+  add(al, Math.max(at, bb), ar, ab);                    // 아래 띠(전체 폭)
+  const y0 = Math.max(at, bt);
+  const y1 = Math.min(ab, bb);
+  add(al, y0, Math.min(ar, bl), y1);                    // 사이의 왼쪽 띠
+  add(Math.max(al, br), y0, ar, y1);                    // 사이의 오른쪽 띠
+  return out;
 }
 
 function hasBorder(cs) {
